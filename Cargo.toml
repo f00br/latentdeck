@@ -8,6 +8,7 @@ members = [
   "crates/core",
   "crates/gpu",
   "crates/gpu-python",
+  "crates/library",
   "crates/output-spout",
 ]
 resolver = "3"

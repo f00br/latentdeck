@@ -11,7 +11,10 @@ tauri-build.workspace = true
 
 [dependencies]
 latentdeck-core = { path = "../../../crates/core" }
+latentdeck-library = { path = "../../../crates/library" }
+serde.workspace = true
 tauri.workspace = true
+tauri-plugin-dialog.workspace = true
 
 [lints]
 workspace = true
