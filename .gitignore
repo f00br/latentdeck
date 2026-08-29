@@ -1,0 +1,134 @@
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+*.local
+*.local.*
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+credentials.*
+secrets.*
+
+# Operating systems and editors
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+.vs/
+
+# Logs, diagnostics, profiling, and crash data
+*.log
+logs/
+diagnostics/
+crash-dumps/
+*.dmp
+*.etl
+*.trace
+*.prof
+
+# Rust / Tauri
+target/
+**/target/
+src-tauri/gen/
+
+# JavaScript / Svelte / Vite
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+build/
+**/build/
+.svelte-kit/
+coverage/
+playwright-report/
+test-results/
+*.tsbuildinfo
+
+# Python / uv / pytest
+.venv/
+venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local databases and indexes
+*.sqlite
+*.sqlite3
+*.db
+
+# Latent cartridges, model assets, and ML checkpoints are never public by default
+*.lc
+*.partial
+*.lc.partial
+*.h3latent
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.engine
+*.plan
+*.gguf
+*.bin
+
+# Generated media and opaque archives require an explicit public-assets review
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.wav
+*.flac
+*.mp3
+*.zip
+*.7z
+*.rar
+*.tar
+*.tgz
+*.gz
+
+# Local research material and generated outputs
+/artifacts/
+/benchmarks/raw/
+/cartridges/
+/checkpoints/
+/data/
+/datasets/
+/models/
+/outputs/
+/private/
+/.private/
+/scratch/
+/tmp/
+/vendor-local/
+**/weights/
+
+# Owner-supplied UI sketches are local-only visual references. Public builds
+# must use original screenshots of the implemented applications instead.
+/docs/assets/concepts/*.png
+
+# Package-manager caches (lock files remain tracked)
+.pnpm-store/
+.npm/
+.yarn/
+.uv-cache/
+
+# Windows build products and installers are release artifacts, not source
+*.exe
+*.dll
+*.msi
+*.msix
+*.appx

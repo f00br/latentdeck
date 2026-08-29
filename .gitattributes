@@ -1,0 +1,33 @@
+* text=auto
+
+*.rs text eol=lf
+*.toml text eol=lf
+*.py text eol=lf
+*.js text eol=lf
+*.ts text eol=lf
+*.svelte text eol=lf
+*.css text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.wasm binary
+
+# These payload types are intentionally ignored by default, but remain binary
+# if an explicitly reviewed fixture is ever approved for version control.
+*.lc binary
+*.safetensors binary
+*.pt binary
+*.pth binary
+*.onnx binary
