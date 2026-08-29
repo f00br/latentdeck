@@ -19,11 +19,13 @@ package = false
 members = [
     "codec-host/python",
     "codec-host/codecs/h3",
+    "comfy/latent-cartridge",
     "sdk/python",
 ]
 
 [tool.uv.sources]
 latentdeck-codec-host = { workspace = true }
+latentdeck-cartridge = { workspace = true }
 torch = { index = "pytorch-cu130" }
 
 [[tool.uv.index]]
@@ -36,6 +38,7 @@ addopts = "-ra --strict-markers --import-mode=importlib"
 testpaths = [
     "codec-host/python/tests",
     "codec-host/codecs/h3/tests",
+    "comfy/latent-cartridge/tests",
     "sdk/python/tests",
 ]
 

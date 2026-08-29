@@ -19,6 +19,8 @@ active. It currently contains:
 - buildable LatentDeck and LatentPlayer smoke shells;
 - normative LC 0.1 and H3 0.1 specifications;
 - a deterministic Rust cartridge SDK and command-line tool;
+- the native Python SDK binding and raw H3 `latentdeck-pack` authoring command;
+- the independent `Save Latent Cartridge (.lc)` ComfyUI recorder;
 - a policy for local-only, non-binding interface references.
 
 The product behavior, codec runtime, native output, and release packaging are
@@ -47,6 +49,8 @@ MiniMax H3 is the first intended codec profile. It is not the definition of
 - [Latent Cartridge Specification 0.1](spec/latent-cartridge/README.md)
 - [LC Manifest JSON Schema 0.1](spec/latent-cartridge/manifest.schema.json)
 - [MiniMax H3 Codec Profile 0.1](spec/codec-h3/README.md)
+- [Python Cartridge SDK and raw H3 packer](sdk/python/README.md)
+- [ComfyUI-LatentCartridge recorder](comfy/latent-cartridge/README.md)
 - [Agent runway](AGENTS.md)
 - [Bootstrap handoff](docs/repository/BOOTSTRAP_HANDOFF.md)
 - [Repository layout](docs/repository/REPOSITORY_LAYOUT.md)

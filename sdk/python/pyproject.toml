@@ -1,11 +1,19 @@
 [project]
 name = "latentdeck-cartridge"
 version = "0.1.0"
-description = "Python package boundary for the LatentDeck Cartridge SDK binding."
+description = "Python binding for the data-only LatentDeck Cartridge SDK."
 requires-python = ">=3.13,<3.14"
 license = "Apache-2.0"
 dependencies = []
 
+[project.scripts]
+latentdeck-pack = "latentdeck_cartridge.__main__:pack_main"
+
 [build-system]
-requires = ["uv-build==0.12.7"]
-build-backend = "uv_build"
+requires = ["maturin==1.15.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+manifest-path = "../../crates/cartridge-python/Cargo.toml"
+python-source = "src"
+module-name = "latentdeck_cartridge._native"

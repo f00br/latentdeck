@@ -4,8 +4,9 @@
 
 This repository was prepared as a clean local foundation for future LatentDeck
 development. At bootstrap time it contains documentation, empty component
-boundaries, and repository-safety tooling only. The owner may keep ignored
-interface sketches locally, but they are not repository inputs.
+boundaries, and repository-safety tooling only. The owner may keep ignored,
+project-local generated interface sketches as visual references, but they are
+not technical repository inputs.
 
 No product source code, build manifest, dependency lock, model, codec pack,
 cartridge, dataset, test payload, executable, installer, CI workflow, remote, or

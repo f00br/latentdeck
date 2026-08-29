@@ -8,6 +8,7 @@ The scaffold follows the monorepo shape accepted by the 0.1 plan.
 | `apps/latentplayer/` | Standalone lightweight cartridge player. |
 | `crates/core/` | Realtime coordination and stable signal contracts. |
 | `crates/cartridge/` | Codec-neutral `.lc` reader, writer, validator, hashing, and metadata. |
+| `crates/cartridge-python/` | PyO3 adapter over the single Rust Cartridge SDK implementation. |
 | `crates/gpu/` | Native GPU presentation and shared frame transport. |
 | `crates/control/` | UI-independent controls and state commands. |
 | `crates/output-spout/` | Required Windows Spout2 native texture output. |

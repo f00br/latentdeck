@@ -118,8 +118,8 @@ htmlcov/
 /vendor-local/
 **/weights/
 
-# Owner-supplied UI sketches are local-only visual references. Public builds
-# must use original screenshots of the implemented applications instead.
+# Owner-authorized, project-local generated UI sketches are visual references
+# only. Public builds use original screenshots of implemented applications.
 /docs/assets/concepts/*.png
 
 # Tauri's icon generator also emits mobile/macOS/raster variants. The Windows
@@ -138,6 +138,7 @@ htmlcov/
 # Windows build products and installers are release artifacts, not source
 *.exe
 *.dll
+*.pdb
 *.msi
 *.msix
 *.appx

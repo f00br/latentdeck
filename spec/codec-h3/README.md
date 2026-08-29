@@ -172,7 +172,8 @@ When audio exists, its descriptor and tensor are:
 
 For a source H3 AV latent:
 
-    T_audio = floor(decoded_frames * 5 / 3)
+    T_audio = round(decoded_frames * 5 / 3)
+            = floor((decoded_frames * 5 + 1) / 3)
 
 All multiplication and division use checked integer arithmetic. Normative
 cases:
@@ -181,6 +182,11 @@ cases:
 | ---------------: | -------------------: |
 | <code>107</code> |     <code>178</code> |
 | <code>243</code> |     <code>405</code> |
+
+The nearest-integer rule is observable on shorter valid clips: a visual
+<code>T=7</code> clip decodes to <code>22</code> frames and therefore requires
+<code>T_audio=37</code>. The exact integer form above is normative; no floating
+point rounding is required.
 
 LatentDeck 0.1 preserves audio data but does not play or synthesize it. Audio is
 not uploaded to the 0.1 operator path. A validator still verifies its shape,
@@ -320,6 +326,8 @@ reference cases for:
 
 - full visual <code>T = 32 -> 107 frames</code>;
 - full visual <code>T = 72 -> 243 frames</code>;
+- discriminating short AV cadence
+  <code>T = 7 -> 22 frames -> T_audio = 37</code>;
 - a five-slot streaming block producing seventeen usable frames;
 - AV mapping <code>107 frames -> T_audio = 178</code>;
 - AV mapping <code>243 frames -> T_audio = 405</code>.

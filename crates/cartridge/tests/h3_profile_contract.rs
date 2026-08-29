@@ -37,6 +37,28 @@ fn validates_t72_av_cadence_and_preserved_audio_dtype() {
 }
 
 #[test]
+fn rounds_audio_cadence_to_the_nearest_slot_for_short_valid_clips() {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&av_manifest_t72()).expect("test JSON");
+    value["tensors"][0]["shape"][2] = serde_json::Value::from(7_u64);
+    value["tensors"][1]["shape"][3] = serde_json::Value::from(37_u64);
+    value["timing"]["decoded_video"]["frame_count"] = serde_json::Value::from(22_u64);
+    value["timing"]["decoded_video"]["duration"] =
+        serde_json::json!({"numerator":11,"denominator":12});
+    let limits = ValidationLimits::specification();
+    let manifest = parse_manifest_json(
+        &serde_json::to_vec(&value).expect("test JSON serialization"),
+        &limits,
+    )
+    .expect("short AV manifest");
+
+    let validated = h3::validate(&manifest, &limits).expect("rounded H3 audio cadence");
+
+    assert_eq!(validated.visual.decoded_frame_count, 22);
+    assert_eq!(validated.audio.expect("audio is present").latent_slots, 37);
+}
+
+#[test]
 fn keeps_streaming_five_slot_cadence_separate_from_full_clip_cadence() {
     assert_eq!(h3::streaming_usable_frames(5).expect("one block"), 17);
     assert_eq!(h3::streaming_usable_frames(10).expect("two blocks"), 34);

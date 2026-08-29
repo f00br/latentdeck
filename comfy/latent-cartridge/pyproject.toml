@@ -1,0 +1,18 @@
+[project]
+name = "latentdeck-comfy-cartridge"
+version = "0.1.0"
+description = "Lightweight ComfyUI recorder for Latent Cartridge files."
+requires-python = ">=3.13,<3.14"
+license = "Apache-2.0"
+dependencies = [
+    "latentdeck-cartridge==0.1.0",
+    "safetensors==0.8.0",
+]
+
+[build-system]
+requires = ["uv-build==0.12.7"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "latentdeck_comfy_cartridge"
+source-include = ["__init__.py", "README.md"]

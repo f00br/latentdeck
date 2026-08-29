@@ -24,7 +24,7 @@ private research storage, or separately governed media distribution:
   captures;
 - local ComfyUI installations, virtual environments, dependency caches, build
   products, databases, logs, diagnostics, and crash dumps;
-- owner-supplied rough interface sketches kept under
+- owner-authorized, project-local generated rough interface sketches kept under
   `docs/assets/concepts/` in a local working copy;
 - API keys, tokens, credentials, signing certificates, machine configuration,
   and absolute local paths;

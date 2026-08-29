@@ -1,0 +1,21 @@
+[package]
+name = "latentdeck-cartridge-python"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "PyO3 binding for the LatentDeck Cartridge SDK"
+
+[lib]
+name = "_native"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+latentdeck-cartridge = { path = "../cartridge" }
+pyo3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_path_to_error.workspace = true
+
+[lints]
+workspace = true

@@ -84,6 +84,28 @@ pub fn decoded_frame_count(latent_slots: u64) -> Result<u64> {
         })
 }
 
+/// Derive the H3 audio latent length from the decoded video frame count.
+///
+/// H3 rounds `decoded_frames * 5 / 3` to the nearest integer. Because the
+/// denominator is three, the value can never land exactly on a half slot.
+///
+/// # Errors
+///
+/// Returns `tensor_size_overflow` when checked cadence arithmetic overflows.
+pub fn audio_latent_slot_count(decoded_frames: u64) -> Result<u64> {
+    decoded_frames
+        .checked_mul(5)
+        .and_then(|slots| slots.checked_add(1))
+        .map(|slots| slots / 3)
+        .ok_or_else(|| {
+            CartridgeError::new(
+                ErrorCode::TensorSizeOverflow,
+                "H3 audio cadence arithmetic overflow",
+            )
+            .at_tensor("audio")
+        })
+}
+
 /// Return the incremental streaming cadence. This is not full-clip `T=5`.
 #[must_use]
 pub const fn streaming_contract() -> (u64, u64) {
@@ -404,13 +426,7 @@ fn validate_audio(
         )
         .at_tensor("audio"));
     }
-    let expected_audio_slots = expected_frames.checked_mul(5).ok_or_else(|| {
-        CartridgeError::new(
-            ErrorCode::TensorSizeOverflow,
-            "H3 audio cadence arithmetic overflow",
-        )
-        .at_tensor("audio")
-    })? / 3;
+    let expected_audio_slots = audio_latent_slot_count(expected_frames)?;
     if descriptor.shape[3] != expected_audio_slots
         || descriptor.shape[3] == 0
         || descriptor.shape[3] > limits.max_h3_temporal_axis()
