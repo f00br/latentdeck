@@ -7,10 +7,31 @@ license.workspace = true
 description = "UI-independent LatentDeck runtime coordination"
 
 [dependencies]
+getrandom.workspace = true
+hex.workspace = true
 latentdeck-cartridge = { path = "../cartridge" }
 latentdeck-control = { path = "../control" }
+rmp-serde.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_System_JobObjects",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -1,0 +1,16 @@
+[project]
+name = "latentdeck-rgb-ring"
+version = "0.1.0"
+description = "Native worker-side producer for LatentDeck RGB Ring ABI 1."
+requires-python = ">=3.13,<3.14"
+license = "Apache-2.0"
+dependencies = []
+
+[build-system]
+requires = ["maturin==1.15.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+manifest-path = "../../crates/gpu-python/Cargo.toml"
+python-source = "src"
+module-name = "latentdeck_rgb_ring._native"

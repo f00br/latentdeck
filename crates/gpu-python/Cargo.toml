@@ -1,0 +1,24 @@
+[package]
+name = "latentdeck-gpu-python"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "PyO3 producer bridge for LatentDeck RGB Ring ABI 1"
+
+[lib]
+name = "_native"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+latentdeck-gpu = { path = "../gpu" }
+pyo3.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+windows = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+] }
+
+[lints]
+workspace = true

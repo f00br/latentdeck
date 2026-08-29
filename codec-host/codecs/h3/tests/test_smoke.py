@@ -1,6 +1,11 @@
 import sys
 
-from latentdeck_codec_h3 import CODEC_FAMILY, PROFILE_VERSION, descriptor
+from latentdeck_codec_h3 import (
+    CODEC_FAMILY,
+    PROFILE_VERSION,
+    H3PresentationCadence,
+    descriptor,
+)
 
 
 def test_h3_descriptor_is_available_without_importing_torch() -> None:
@@ -11,3 +16,4 @@ def test_h3_descriptor_is_available_without_importing_torch() -> None:
         "runtime_extra": "cu130",
     }
     assert PROFILE_VERSION == "0.1.0"
+    assert H3PresentationCadence.__module__ == "latentdeck_codec_h3.presentation"

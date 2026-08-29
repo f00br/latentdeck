@@ -1,0 +1,2 @@
+extend = "../../../pyproject.toml"
+extend-exclude = ["src/latentdeck_codec_h3/_vendor"]

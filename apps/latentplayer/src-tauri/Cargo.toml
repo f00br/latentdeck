@@ -10,8 +10,16 @@ description = "LatentPlayer desktop cartridge player"
 tauri-build.workspace = true
 
 [dependencies]
+latentdeck-control = { path = "../../../crates/control" }
 latentdeck-core = { path = "../../../crates/core" }
-tauri.workspace = true
+latentdeck-gpu = { path = "../../../crates/gpu" }
+serde.workspace = true
+tauri = { workspace = true, features = ["unstable"] }
+tauri-plugin-dialog.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+wgpu.workspace = true
 
 [lints]
 workspace = true

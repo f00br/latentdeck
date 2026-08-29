@@ -1,0 +1,619 @@
+//! UI-independent `LatentPlayer` media and codec selection state.
+
+use std::path::{Path, PathBuf};
+
+use latentdeck_cartridge::reader::{ValidatedCartridge, ValidationOptions, open_validated};
+use semver::Version;
+use serde::Serialize;
+use thiserror::Error;
+
+use crate::codec_pack::{
+    CodecPackError, ValidatedCodecPack, ValidatedExternalAsset, discover_codec_packs,
+    validate_external_asset,
+};
+
+const H3_PACK_ID: &str = "org.latentdeck.h3";
+const H3_ASSET_ID: &str = "taeh3";
+
+/// Player lifecycle exposed to UI surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayerPhase {
+    Empty,
+    Loading,
+    Ready,
+    Playing,
+    Paused,
+    Error,
+}
+
+/// External codec availability exposed without machine-local paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodecState {
+    Missing,
+    Loading,
+    Ready,
+    Incompatible,
+    Error,
+}
+
+/// Fully validated cartridge metadata needed by the simple Player UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CartridgeSummary {
+    pub cartridge_id: String,
+    pub archive_sha256: String,
+    pub file_name: String,
+    pub width: u32,
+    pub height: u32,
+    pub frame_count: u64,
+    pub frame_rate_numerator: u64,
+    pub frame_rate_denominator: u64,
+    pub audio_present: bool,
+}
+
+/// Codec state with a bounded, path-free operator hint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodecSummary {
+    pub state: CodecState,
+    pub display_name: Option<String>,
+    pub detail: Option<String>,
+}
+
+/// Stable user-facing failure state. Detailed diagnostics remain in logs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayerErrorView {
+    pub code: String,
+    pub message: String,
+    pub recoverable: bool,
+}
+
+/// Immutable UI snapshot. It contains no transport clock or mutable paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayerView {
+    pub revision: u64,
+    pub phase: PlayerPhase,
+    pub cartridge: Option<CartridgeSummary>,
+    pub codec: CodecSummary,
+    pub position_frame: u64,
+    pub loop_enabled: bool,
+    pub output_available: bool,
+    pub error: Option<PlayerErrorView>,
+}
+
+/// Inputs retained only by trusted Core for worker launch and slot binding.
+pub struct PlayerLaunchInputs<'a> {
+    pub codec_pack: &'a ValidatedCodecPack,
+    pub decoder_asset: &'a ValidatedExternalAsset,
+    pub cartridge_path: &'a Path,
+    pub cartridge: &'a CartridgeSummary,
+}
+
+struct LoadedCartridge {
+    _validated: ValidatedCartridge,
+    path: PathBuf,
+    summary: CartridgeSummary,
+}
+
+/// Synchronous selection state. Worker scheduling is layered on top of this
+/// object and is never owned by the webview.
+pub struct PlayerCoordinator {
+    revision: u64,
+    phase: PlayerPhase,
+    packs: Vec<ValidatedCodecPack>,
+    selected_pack: Option<usize>,
+    codec_fault: Option<CodecSummary>,
+    decoder_asset: Option<ValidatedExternalAsset>,
+    cartridge: Option<LoadedCartridge>,
+    position_frame: u64,
+    loop_enabled: bool,
+    output_available: bool,
+    error: Option<PlayerErrorView>,
+}
+
+impl PlayerCoordinator {
+    /// Discover only the supplied exact Codec Pack roots.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable discovery error instead of silently ignoring a broken
+    /// or conflicting installation.
+    pub fn discover(roots: &[PathBuf], app_version: &str) -> Result<Self, PlayerCoordinatorError> {
+        let packs =
+            discover_codec_packs(roots, app_version).map_err(PlayerCoordinatorError::from)?;
+        Ok(Self::with_validated_packs(packs))
+    }
+
+    /// Discover packs while retaining a visible failure state for desktop UI.
+    #[must_use]
+    pub fn discover_visible(roots: &[PathBuf], app_version: &str) -> Self {
+        match Self::discover(roots, app_version) {
+            Ok(player) => player,
+            Err(error) => {
+                let mut player = Self::without_codec();
+                player.codec_fault = Some(CodecSummary {
+                    state: CodecState::Error,
+                    display_name: None,
+                    detail: Some(error.message.clone()),
+                });
+                player.error = Some(PlayerErrorView {
+                    code: error.code,
+                    message: error.message,
+                    recoverable: true,
+                });
+                player
+            }
+        }
+    }
+
+    /// Construct the visible missing-codec state without scanning the disk.
+    #[must_use]
+    pub fn without_codec() -> Self {
+        Self::with_validated_packs(Vec::new())
+    }
+
+    fn with_validated_packs(packs: Vec<ValidatedCodecPack>) -> Self {
+        let selected_pack = newest_h3_pack(&packs);
+        Self {
+            revision: 0,
+            phase: PlayerPhase::Empty,
+            packs,
+            selected_pack,
+            codec_fault: None,
+            decoder_asset: None,
+            cartridge: None,
+            position_frame: 0,
+            loop_enabled: false,
+            output_available: false,
+            error: None,
+        }
+    }
+
+    /// Select and verify the external TAEH3 weight declared by the pack.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable error when no compatible pack is installed or the
+    /// selected file is not an accepted exact variant.
+    pub fn select_decoder_asset(
+        &mut self,
+        path: impl AsRef<Path>,
+    ) -> Result<PlayerView, PlayerCoordinatorError> {
+        let pack = self.selected_codec_pack().ok_or_else(|| {
+            PlayerCoordinatorError::new(
+                "codec.pack_missing",
+                "Install a compatible H3 Codec Pack before selecting its decoder weight.",
+            )
+        })?;
+        let asset = validate_external_asset(pack, H3_ASSET_ID, path)
+            .map_err(PlayerCoordinatorError::from)?;
+        self.decoder_asset = Some(asset);
+        self.error = None;
+        self.bump_revision()?;
+        Ok(self.view())
+    }
+
+    /// Fully validate and retain one `.lc` cartridge.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable LC error without exposing its absolute path.
+    pub fn open_cartridge(
+        &mut self,
+        path: impl AsRef<Path>,
+    ) -> Result<PlayerView, PlayerCoordinatorError> {
+        let path = path.as_ref();
+        self.phase = PlayerPhase::Loading;
+        let validated = open_validated(path, &ValidationOptions::default()).map_err(|error| {
+            self.phase = PlayerPhase::Error;
+            PlayerCoordinatorError::new(error.code(), error.detail)
+        })?;
+        let profile = validated.h3_profile();
+        let manifest = validated.manifest();
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("cartridge.lc")
+            .to_owned();
+        let summary = CartridgeSummary {
+            cartridge_id: manifest.cartridge_id.0.clone(),
+            archive_sha256: validated.receipt().archive_sha256.to_string(),
+            file_name,
+            width: profile.visual.decoded_width,
+            height: profile.visual.decoded_height,
+            frame_count: profile.visual.decoded_frame_count,
+            frame_rate_numerator: profile.compatibility_key.frame_rate.numerator,
+            frame_rate_denominator: profile.compatibility_key.frame_rate.denominator,
+            audio_present: profile.audio.is_some(),
+        };
+        self.cartridge = Some(LoadedCartridge {
+            _validated: validated,
+            path: path.to_path_buf(),
+            summary,
+        });
+        self.phase = PlayerPhase::Ready;
+        self.position_frame = 0;
+        self.error = None;
+        self.bump_revision()?;
+        Ok(self.view())
+    }
+
+    /// Return worker inputs only after both trust decisions are complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable state error while the cartridge, pack, or explicit
+    /// decoder asset is missing.
+    pub fn launch_inputs(&self) -> Result<PlayerLaunchInputs<'_>, PlayerCoordinatorError> {
+        let codec_pack = self.selected_codec_pack().ok_or_else(|| {
+            PlayerCoordinatorError::new("codec.pack_missing", "No compatible H3 Codec Pack")
+        })?;
+        let decoder_asset = self.decoder_asset.as_ref().ok_or_else(|| {
+            PlayerCoordinatorError::new(
+                "codec.asset_missing",
+                "No compatible TAEH3 decoder weight is selected",
+            )
+        })?;
+        let cartridge = self.cartridge.as_ref().ok_or_else(|| {
+            PlayerCoordinatorError::new("slot.cartridge_missing", "No cartridge is loaded")
+        })?;
+        Ok(PlayerLaunchInputs {
+            codec_pack,
+            decoder_asset,
+            cartridge_path: &cartridge.path,
+            cartridge: &cartridge.summary,
+        })
+    }
+
+    /// Update the transport loop policy without changing decoder state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a state error when no cartridge is loaded.
+    pub fn set_loop_enabled(
+        &mut self,
+        enabled: bool,
+    ) -> Result<PlayerView, PlayerCoordinatorError> {
+        if self.cartridge.is_none() {
+            return Err(PlayerCoordinatorError::new(
+                "state.invalid_transition",
+                "Load a cartridge before changing Loop.",
+            ));
+        }
+        self.loop_enabled = enabled;
+        self.bump_revision()?;
+        Ok(self.view())
+    }
+
+    /// Record a transport transition decided by trusted runtime scheduling.
+    ///
+    /// # Errors
+    ///
+    /// Returns a state error when launch inputs are incomplete or the current
+    /// phase cannot perform the requested transition.
+    pub fn set_playing(&mut self, playing: bool) -> Result<PlayerView, PlayerCoordinatorError> {
+        if playing {
+            self.launch_inputs()?;
+            if !matches!(self.phase, PlayerPhase::Ready | PlayerPhase::Paused) {
+                return Err(PlayerCoordinatorError::new(
+                    "state.invalid_transition",
+                    "Player is not ready to start.",
+                ));
+            }
+            self.phase = PlayerPhase::Playing;
+        } else if self.phase == PlayerPhase::Playing {
+            self.phase = PlayerPhase::Paused;
+        } else {
+            return Err(PlayerCoordinatorError::new(
+                "state.invalid_transition",
+                "Player is not currently playing.",
+            ));
+        }
+        self.error = None;
+        self.bump_revision()?;
+        Ok(self.view())
+    }
+
+    /// Apply the post-reset transport state after causal decoder reset.
+    ///
+    /// # Errors
+    ///
+    /// Returns a state error when launch inputs are incomplete.
+    pub fn reset_to_start(&mut self) -> Result<PlayerView, PlayerCoordinatorError> {
+        self.launch_inputs()?;
+        self.position_frame = 0;
+        self.phase = PlayerPhase::Paused;
+        self.error = None;
+        self.bump_revision()?;
+        Ok(self.view())
+    }
+
+    /// Update the read-only frame progress reported by native presentation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a state error for an absent cartridge or out-of-range frame.
+    pub fn set_position_frame(
+        &mut self,
+        position_frame: u64,
+    ) -> Result<PlayerView, PlayerCoordinatorError> {
+        let frame_count = self
+            .cartridge
+            .as_ref()
+            .map(|loaded| loaded.summary.frame_count)
+            .ok_or_else(|| {
+                PlayerCoordinatorError::new("state.invalid_transition", "No cartridge is loaded.")
+            })?;
+        if position_frame >= frame_count {
+            return Err(PlayerCoordinatorError::new(
+                "player.position_invalid",
+                "Presented frame is outside the cartridge duration.",
+            ));
+        }
+        self.position_frame = position_frame;
+        self.bump_revision()?;
+        Ok(self.view())
+    }
+
+    /// Make native output availability visible without exposing a window
+    /// handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if the monotonic view revision is exhausted.
+    pub fn set_output_available(
+        &mut self,
+        available: bool,
+    ) -> Result<PlayerView, PlayerCoordinatorError> {
+        self.output_available = available;
+        self.bump_revision()?;
+        Ok(self.view())
+    }
+
+    /// Enter a safe error state after worker or renderer failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if the monotonic view revision is exhausted.
+    pub fn set_runtime_error(
+        &mut self,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        recoverable: bool,
+    ) -> Result<PlayerView, PlayerCoordinatorError> {
+        self.phase = PlayerPhase::Error;
+        self.output_available = false;
+        self.error = Some(PlayerErrorView {
+            code: code.into(),
+            message: message.into(),
+            recoverable,
+        });
+        self.bump_revision()?;
+        Ok(self.view())
+    }
+
+    /// Current path-free snapshot.
+    #[must_use]
+    pub fn view(&self) -> PlayerView {
+        PlayerView {
+            revision: self.revision,
+            phase: self.phase,
+            cartridge: self.cartridge.as_ref().map(|loaded| loaded.summary.clone()),
+            codec: self.codec_summary(),
+            position_frame: self.position_frame,
+            loop_enabled: self.loop_enabled,
+            output_available: self.output_available,
+            error: self.error.clone(),
+        }
+    }
+
+    fn selected_codec_pack(&self) -> Option<&ValidatedCodecPack> {
+        self.selected_pack.and_then(|index| self.packs.get(index))
+    }
+
+    fn codec_summary(&self) -> CodecSummary {
+        if let Some(fault) = &self.codec_fault {
+            return fault.clone();
+        }
+        let Some(pack) = self.selected_codec_pack() else {
+            return CodecSummary {
+                state: CodecState::Missing,
+                display_name: None,
+                detail: Some("Install a compatible H3 Codec Pack.".to_owned()),
+            };
+        };
+        if self.decoder_asset.is_none() {
+            return CodecSummary {
+                state: CodecState::Missing,
+                display_name: Some(pack.manifest.display_name.clone()),
+                detail: Some("Select a compatible TAEH3 decoder weight.".to_owned()),
+            };
+        }
+        CodecSummary {
+            state: CodecState::Ready,
+            display_name: Some(pack.manifest.display_name.clone()),
+            detail: None,
+        }
+    }
+
+    fn bump_revision(&mut self) -> Result<(), PlayerCoordinatorError> {
+        self.revision = self.revision.checked_add(1).ok_or_else(|| {
+            PlayerCoordinatorError::new("player.revision_exhausted", "Player revision exhausted")
+        })?;
+        Ok(())
+    }
+}
+
+fn newest_h3_pack(packs: &[ValidatedCodecPack]) -> Option<usize> {
+    packs
+        .iter()
+        .enumerate()
+        .filter(|(_, pack)| pack.manifest.pack_id == H3_PACK_ID)
+        .filter_map(|(index, pack)| {
+            Version::parse(&pack.manifest.pack_version)
+                .ok()
+                .map(|version| (index, version))
+        })
+        .max_by(|(_, left), (_, right)| left.cmp(right))
+        .map(|(index, _)| index)
+}
+
+/// Stable command failure returned to the desktop shell.
+#[derive(Debug, Error)]
+#[error("{code}: {message}")]
+pub struct PlayerCoordinatorError {
+    pub code: String,
+    pub message: String,
+}
+
+impl PlayerCoordinatorError {
+    fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl From<CodecPackError> for PlayerCoordinatorError {
+    fn from(error: CodecPackError) -> Self {
+        Self::new(error.code, error.detail)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, io::Cursor};
+
+    use latentdeck_cartridge::{
+        archive::{EntryWrite, payload_crc32, write_canonical},
+        hash::hash_reader,
+        limits::ValidationLimits,
+        manifest::parse_manifest_json,
+        writer::canonical_json_bytes,
+    };
+
+    use super::*;
+
+    #[test]
+    fn missing_codec_is_visible_without_scanning_or_fake_playability() {
+        let player = PlayerCoordinator::without_codec();
+        let view = player.view();
+
+        assert_eq!(view.phase, PlayerPhase::Empty);
+        assert_eq!(view.codec.state, CodecState::Missing);
+        assert!(player.launch_inputs().is_err());
+    }
+
+    #[test]
+    fn opening_a_cartridge_runs_full_validation_and_exposes_no_path() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("synthetic.lc");
+        fs::write(&path, synthetic_lc()).expect("synthetic cartridge");
+        let mut player = PlayerCoordinator::without_codec();
+
+        let view = player.open_cartridge(&path).expect("validated cartridge");
+
+        assert_eq!(view.phase, PlayerPhase::Ready);
+        let cartridge = view.cartridge.expect("summary");
+        assert_eq!(cartridge.file_name, "synthetic.lc");
+        assert_eq!(cartridge.frame_count, 5);
+        assert_eq!(cartridge.width, 16);
+        assert!(!cartridge.audio_present);
+        let encoded = serde_json::to_string(&player.view()).expect("serialize view");
+        assert!(!encoded.contains(directory.path().to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn corrupt_cartridge_never_replaces_the_retained_valid_slot() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let valid = directory.path().join("valid.lc");
+        let corrupt = directory.path().join("corrupt.lc");
+        fs::write(&valid, synthetic_lc()).expect("valid cartridge");
+        fs::write(&corrupt, b"not an LC archive").expect("corrupt cartridge");
+        let mut player = PlayerCoordinator::without_codec();
+        player.open_cartridge(&valid).expect("initial slot");
+
+        let error = player
+            .open_cartridge(&corrupt)
+            .expect_err("corrupt replacement");
+
+        assert!(!error.code.is_empty());
+        assert_eq!(
+            player.view().cartridge.expect("retained slot").file_name,
+            "valid.lc"
+        );
+    }
+
+    fn synthetic_lc() -> Vec<u8> {
+        let tensor_bytes = vec![0_u8; 24 * 2 * 2];
+        let mut header = format!(
+            r#"{{"video":{{"data_offsets":[0,{}],"dtype":"F16","shape":[1,24,2,1,1]}}}}"#,
+            tensor_bytes.len()
+        )
+        .into_bytes();
+        while !header.len().is_multiple_of(8) {
+            header.push(b' ');
+        }
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(header.len() as u64).to_le_bytes());
+        payload.extend_from_slice(&header);
+        payload.extend_from_slice(&tensor_bytes);
+        let measured = hash_reader(&mut Cursor::new(&payload)).expect("payload hash");
+        let manifest_value = serde_json::json!({
+            "spec_version": "0.1.0",
+            "cartridge_id": "550e8400-e29b-41d4-a716-446655440000",
+            "codec": {"family": "minimax_h3", "profile": "h3_av_latent", "profile_version": "0.1.0"},
+            "payloads": [{
+                "path": "payloads/h3.safetensors",
+                "media_type": "application/vnd.safetensors",
+                "byte_length": measured.byte_length,
+                "sha256": measured.sha256.to_string()
+            }],
+            "tensors": [{
+                "stream": "visual", "name": "video", "payload": "payloads/h3.safetensors",
+                "storage_dtype": "F16", "runtime_dtype": "F16", "shape": [1,24,2,1,1]
+            }],
+            "timing": {
+                "contract": "minimax_h3_causal", "contract_version": "0.1.0",
+                "decoded_video": {
+                    "width": 16, "height": 16, "frame_count": 5,
+                    "frame_rate": {"numerator": 24, "denominator": 1},
+                    "duration": {"numerator": 5, "denominator": 24}
+                }
+            },
+            "audio": {"policy": "source_absent"},
+            "provenance": {"created_by": {"name": "latentdeck-test", "version": "0.1.0"}, "sources": []},
+            "parent_cartridges": [], "operation_history": []
+        });
+        let parsed = parse_manifest_json(
+            &serde_json::to_vec(&manifest_value).expect("manifest JSON"),
+            &ValidationLimits::default(),
+        )
+        .expect("manifest");
+        let manifest = canonical_json_bytes(&parsed).expect("canonical manifest");
+        let mut manifest_reader = Cursor::new(&manifest);
+        let mut payload_reader = Cursor::new(&payload);
+        let mut entries = [
+            EntryWrite::new(
+                "manifest.json",
+                manifest.len() as u64,
+                payload_crc32(&manifest),
+                &mut manifest_reader,
+            ),
+            EntryWrite::new(
+                "payloads/h3.safetensors",
+                payload.len() as u64,
+                payload_crc32(&payload),
+                &mut payload_reader,
+            ),
+        ];
+        let mut archive = Cursor::new(Vec::new());
+        write_canonical(&mut archive, &mut entries).expect("LC archive");
+        archive.into_inner()
+    }
+}
