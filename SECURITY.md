@@ -1,10 +1,10 @@
 # Security
 
-LatentDeck has no supported public release yet. The repository is a scaffold,
-not software that should be used with untrusted files.
+LatentDeck has no supported public release yet. Early workspace targets must not
+be used with untrusted files until the cartridge validation gates are complete.
 
-The 0.1 design treats every `.lc` cartridge as untrusted, data-only media. A
-future loader must reject malformed manifests and payloads before runtime use,
+The 0.1 contract treats every `.lc` cartridge as untrusted, data-only media. The
+loader must reject malformed manifests and payloads before runtime use,
 validate tensor schema, dtype, shapes, sizes, hashes, codec compatibility, and
 memory limits, and must never execute cartridge-supplied code.
 

@@ -1,0 +1,19 @@
+[project]
+name = "latentdeck-codec-h3"
+version = "0.1.0"
+description = "MiniMax H3 codec adapter for the LatentDeck codec host."
+requires-python = ">=3.13,<3.14"
+license = "Apache-2.0"
+dependencies = [
+    "latentdeck-codec-host==0.1.0",
+    "safetensors==0.8.0",
+]
+
+[project.optional-dependencies]
+cu130 = [
+    "torch==2.13.0",
+]
+
+[build-system]
+requires = ["uv-build==0.12.7"]
+build-backend = "uv_build"

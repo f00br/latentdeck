@@ -1,7 +1,7 @@
 # Contributing
 
-LatentDeck is currently a pre-implementation repository. Contributions are not
-open for general feature work yet.
+LatentDeck 0.1 is under active local implementation. Contributions are not open
+for uncoordinated feature work yet.
 
 For any explicitly assigned change:
 

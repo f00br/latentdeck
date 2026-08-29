@@ -36,7 +36,7 @@ crash-dumps/
 # Rust / Tauri
 target/
 **/target/
-src-tauri/gen/
+**/src-tauri/gen/
 
 # JavaScript / Svelte / Vite
 node_modules/
@@ -46,6 +46,7 @@ dist/
 build/
 **/build/
 .svelte-kit/
+**/.svelte-check/
 coverage/
 playwright-report/
 test-results/
@@ -113,12 +114,20 @@ htmlcov/
 /.private/
 /scratch/
 /tmp/
+/.tools/
 /vendor-local/
 **/weights/
 
 # Owner-supplied UI sketches are local-only visual references. Public builds
 # must use original screenshots of the implemented applications instead.
 /docs/assets/concepts/*.png
+
+# Tauri's icon generator also emits mobile/macOS/raster variants. The Windows
+# 0.1 source tree tracks only the original SVG and required ICO resource.
+/apps/*/src-tauri/icons/android/
+/apps/*/src-tauri/icons/ios/
+/apps/*/src-tauri/icons/*.png
+/apps/*/src-tauri/icons/*.icns
 
 # Package-manager caches (lock files remain tracked)
 .pnpm-store/

@@ -23,6 +23,6 @@ The scaffold follows the monorepo shape accepted by the 0.1 plan.
 | `docs/` | Durable public documentation; local concept PNGs remain ignored. |
 | `tools/` | Repository maintenance and release-safety tools. |
 
-The scaffold intentionally does not create Cargo, pnpm, uv, Tauri, Svelte, or
-Python manifests. Those files establish real dependency and workspace contracts
-and should be generated only by an implementation task that can validate them.
+Cargo, pnpm, uv, Tauri, Svelte, and Python workspaces are now initialized with
+pinned manifests and lock files. Component specifications remain authoritative
+over these replaceable implementation shells.

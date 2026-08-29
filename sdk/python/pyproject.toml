@@ -1,0 +1,11 @@
+[project]
+name = "latentdeck-cartridge"
+version = "0.1.0"
+description = "Python package boundary for the LatentDeck Cartridge SDK binding."
+requires-python = ">=3.13,<3.14"
+license = "Apache-2.0"
+dependencies = []
+
+[build-system]
+requires = ["uv-build==0.12.7"]
+build-backend = "uv_build"

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="LatentDeck mark">
+  <rect width="512" height="512" rx="92" fill="#0a0c0f"/>
+  <path d="M112 104h64v240h112v64H112z" fill="#78d9cf"/>
+  <path d="M232 104h72c62 0 112 50 112 112v80c0 62-50 112-112 112h-16v-64h16c27 0 48-21 48-48v-80c0-27-21-48-48-48h-72z" fill="#e8edf2"/>
+</svg>

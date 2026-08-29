@@ -1,0 +1,16 @@
+[project]
+name = "latentdeck-codec-host"
+version = "0.1.0"
+description = "Isolated Python codec-host process for LatentDeck."
+requires-python = ">=3.13,<3.14"
+license = "Apache-2.0"
+dependencies = [
+    "msgpack==1.2.2",
+]
+
+[project.scripts]
+latentdeck-codec-host = "latentdeck_codec_host.__main__:main"
+
+[build-system]
+requires = ["uv-build==0.12.7"]
+build-backend = "uv_build"

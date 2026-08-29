@@ -1,0 +1,17 @@
+[package]
+name = "latentplayer-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "LatentPlayer desktop cartridge player"
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+latentdeck-core = { path = "../../../crates/core" }
+tauri.workspace = true
+
+[lints]
+workspace = true

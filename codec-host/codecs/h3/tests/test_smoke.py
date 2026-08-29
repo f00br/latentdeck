@@ -1,0 +1,13 @@
+import sys
+
+from latentdeck_codec_h3 import CODEC_FAMILY, PROFILE_VERSION, descriptor
+
+
+def test_h3_descriptor_is_available_without_importing_torch() -> None:
+    assert "torch" not in sys.modules
+    assert descriptor() == {
+        "codec_family": CODEC_FAMILY,
+        "profile_version": PROFILE_VERSION,
+        "runtime_extra": "cu130",
+    }
+    assert PROFILE_VERSION == "0.1.0"

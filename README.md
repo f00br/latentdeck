@@ -3,22 +3,25 @@
 > LatentDeck treats saved generative latents as playable and synthesizable media
 > signals.
 
-LatentDeck is a planned open ecosystem around the codec-neutral **Latent
+LatentDeck is an open ecosystem under active local development around the codec-neutral **Latent
 Cartridge** (`.lc`) format: record a latent representation, play it, synthesize
 it with other cartridges in real time, and resample the post-operator latent
 state into a new cartridge.
 
 ## Repository status
 
-This repository currently contains **project groundwork only**:
+The public-safe bootstrap is complete and the reproducible 0.1 workspace is
+active. It currently contains:
 
 - the accepted 0.1 product and architecture plan;
 - public-repository boundaries and agent instructions;
-- the planned monorepo directory scaffold;
+- pinned Cargo, pnpm, uv, Tauri, Svelte, and Python workspaces;
+- buildable LatentDeck and LatentPlayer smoke shells;
 - a policy for local-only, non-binding interface references.
 
-There is no runnable application, package, model, codec pack, cartridge, or
-supported release yet. The scaffold must not be presented as an implementation.
+The product behavior, codec runtime, native output, and release packaging are
+still being implemented. There is no supported release, bundled model, codec
+pack, or cartridge in this repository yet.
 
 ## Planned ecosystem
 
@@ -44,6 +47,7 @@ MiniMax H3 is the first intended codec profile. It is not the definition of
 - [Repository layout](docs/repository/REPOSITORY_LAYOUT.md)
 - [Public repository boundary](docs/repository/REPOSITORY_BOUNDARY.md)
 - [Public release checklist](docs/repository/PUBLIC_RELEASE_CHECKLIST.md)
+- [Pinned toolchains](docs/repository/TOOLCHAINS.md)
 - [Interface reference policy](docs/assets/concepts/README.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security posture](SECURITY.md)
@@ -59,6 +63,12 @@ Run the local guard before committing:
 
 ```powershell
 pwsh -NoProfile -File tools/Test-PublicTree.ps1
+```
+
+Run the complete local workspace check with the pinned Node runtime:
+
+```powershell
+pwsh -NoProfile -File tools/Check-Workspace.ps1
 ```
 
 ## License

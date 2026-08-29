@@ -1,8 +1,8 @@
 # LatentDeck agent runway
 
-This repository is intentionally in **bootstrap-only state**. The directory
-layout and repository safeguards exist; product implementation has not begun.
-The scaffold is not authorization to start coding.
+This repository is in active local `0.1.0` implementation. The approved
+implementation contract is `docs/main-plan-v01.md`; repository safeguards and
+component boundaries remain mandatory throughout development.
 
 ## Required reading order
 
@@ -26,8 +26,8 @@ the baseline.
 ## Scope discipline
 
 - Implement only the task explicitly assigned in the current session.
-- Do not infer a request to implement the 0.1 plan from the presence of the
-  scaffold.
+- Do not infer new scope beyond the approved 0.1 implementation contract and
+  the current user instruction.
 - Do not create a new roadmap, Technical Design Document, dependency graph, or
   stack migration unless requested.
 - Do not treat the concept images as pixel-perfect UI requirements. They are

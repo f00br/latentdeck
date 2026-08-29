@@ -1,0 +1,10 @@
+packages:
+  - "apps/latentdeck"
+  - "apps/latentplayer"
+minimumReleaseAge: 0
+onlyBuiltDependencies:
+  - "@parcel/watcher"
+  - "esbuild"
+# svelte-check 4.7.6 works with TypeScript 7 in our smoke suite, but its
+# published peer range has not yet been widened beyond TypeScript 6.
+strictPeerDependencies: true

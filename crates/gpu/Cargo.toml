@@ -1,0 +1,16 @@
+[package]
+name = "latentdeck-gpu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Bounded frame transport and native wgpu presentation"
+
+[dependencies]
+bytemuck.workspace = true
+memmap2.workspace = true
+thiserror.workspace = true
+wgpu.workspace = true
+
+[lints]
+workspace = true
