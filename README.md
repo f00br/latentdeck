@@ -17,6 +17,8 @@ active. It currently contains:
 - public-repository boundaries and agent instructions;
 - pinned Cargo, pnpm, uv, Tauri, Svelte, and Python workspaces;
 - buildable LatentDeck and LatentPlayer smoke shells;
+- normative LC 0.1 and H3 0.1 specifications;
+- a deterministic Rust cartridge SDK and command-line tool;
 - a policy for local-only, non-binding interface references.
 
 The product behavior, codec runtime, native output, and release packaging are
@@ -42,6 +44,9 @@ MiniMax H3 is the first intended codec profile. It is not the definition of
 
 - [Approved 0.1 implementation plan](docs/main-plan-v01.md)
 - [Product and architecture rationale](latentdeck_0.1-plan.md)
+- [Latent Cartridge Specification 0.1](spec/latent-cartridge/README.md)
+- [LC Manifest JSON Schema 0.1](spec/latent-cartridge/manifest.schema.json)
+- [MiniMax H3 Codec Profile 0.1](spec/codec-h3/README.md)
 - [Agent runway](AGENTS.md)
 - [Bootstrap handoff](docs/repository/BOOTSTRAP_HANDOFF.md)
 - [Repository layout](docs/repository/REPOSITORY_LAYOUT.md)

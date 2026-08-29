@@ -1,0 +1,457 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:latentdeck:lc:manifest:0.1.0",
+  "title": "Latent Cartridge manifest 0.1.0",
+  "description": "Normative structural schema. Cross-entry, Safetensors, canonical JSON, resource, and codec-profile checks remain mandatory.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spec_version",
+    "cartridge_id",
+    "codec",
+    "payloads",
+    "tensors",
+    "timing",
+    "audio",
+    "provenance",
+    "parent_cartridges",
+    "operation_history"
+  ],
+  "properties": {
+    "spec_version": {
+      "const": "0.1.0"
+    },
+    "cartridge_id": {
+      "$ref": "#/$defs/nonNilUuid"
+    },
+    "codec": {
+      "$ref": "#/$defs/codec"
+    },
+    "payloads": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "$ref": "#/$defs/payload"
+      }
+    },
+    "tensors": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/$defs/tensor"
+      }
+    },
+    "timing": {
+      "$ref": "#/$defs/timing"
+    },
+    "audio": {
+      "$ref": "#/$defs/audioDisposition"
+    },
+    "preview": {
+      "$ref": "#/$defs/preview"
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    },
+    "parent_cartridges": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/parentCartridge"
+      }
+    },
+    "operation_history": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {
+        "$ref": "#/$defs/operation"
+      }
+    }
+  },
+  "$defs": {
+    "token": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$"
+    },
+    "version": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "nonNilUuid": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/uuid"
+        },
+        {
+          "not": {
+            "const": "00000000-0000-0000-0000-000000000000"
+          }
+        }
+      ]
+    },
+    "humanString": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "uriString": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "rational": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["numerator", "denominator"],
+      "properties": {
+        "numerator": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "denominator": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "codec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "profile", "profile_version"],
+      "properties": {
+        "family": {
+          "$ref": "#/$defs/token"
+        },
+        "profile": {
+          "$ref": "#/$defs/token"
+        },
+        "profile_version": {
+          "$ref": "#/$defs/version"
+        }
+      }
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "media_type", "byte_length", "sha256"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 160,
+          "pattern": "^payloads/[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?\\.safetensors$"
+        },
+        "media_type": {
+          "const": "application/vnd.safetensors"
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16106127360
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "tensor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stream",
+        "name",
+        "payload",
+        "storage_dtype",
+        "runtime_dtype",
+        "shape"
+      ],
+      "properties": {
+        "stream": {
+          "enum": ["visual", "audio"]
+        },
+        "name": {
+          "$ref": "#/$defs/token"
+        },
+        "payload": {
+          "type": "string",
+          "maxLength": 160,
+          "pattern": "^payloads/[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?\\.safetensors$"
+        },
+        "storage_dtype": {
+          "enum": ["F16", "F32"]
+        },
+        "runtime_dtype": {
+          "enum": ["F16", "F32"]
+        },
+        "shape": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1048576
+          }
+        }
+      }
+    },
+    "timing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "contract_version", "decoded_video"],
+      "properties": {
+        "contract": {
+          "$ref": "#/$defs/token"
+        },
+        "contract_version": {
+          "$ref": "#/$defs/version"
+        },
+        "decoded_video": {
+          "$ref": "#/$defs/decodedVideo"
+        }
+      }
+    },
+    "decodedVideo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height", "frame_count", "frame_rate", "duration"],
+      "properties": {
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "frame_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "frame_rate": {
+          "$ref": "#/$defs/rational"
+        },
+        "duration": {
+          "$ref": "#/$defs/rational"
+        }
+      }
+    },
+    "cartridgeRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cartridge_id", "archive_sha256"],
+      "properties": {
+        "cartridge_id": {
+          "$ref": "#/$defs/nonNilUuid"
+        },
+        "archive_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "audioDisposition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["policy"],
+          "properties": {
+            "policy": {
+              "const": "source_absent"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["policy"],
+          "properties": {
+            "policy": {
+              "const": "preserved_source"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["policy", "source_cartridge"],
+          "properties": {
+            "policy": {
+              "const": "copied_from_carrier_exact"
+            },
+            "source_cartridge": {
+              "$ref": "#/$defs/cartridgeRef"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["policy", "source_cartridge", "reason"],
+          "properties": {
+            "policy": {
+              "const": "omitted_timing_mismatch"
+            },
+            "source_cartridge": {
+              "$ref": "#/$defs/cartridgeRef"
+            },
+            "reason": {
+              "enum": [
+                "duration_mismatch",
+                "temporal_mapping_mismatch",
+                "duration_and_mapping_mismatch"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "preview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "media_type",
+        "byte_length",
+        "sha256",
+        "width",
+        "height"
+      ],
+      "properties": {
+        "path": {
+          "const": "preview.webp"
+        },
+        "media_type": {
+          "const": "image/webp"
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        }
+      }
+    },
+    "createdBy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/token"
+        },
+        "version": {
+          "$ref": "#/$defs/version"
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/token"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "uri": {
+          "$ref": "#/$defs/uriString"
+        },
+        "license": {
+          "$ref": "#/$defs/humanString"
+        },
+        "metadata": {
+          "type": "object"
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["created_by", "sources"],
+      "properties": {
+        "created_by": {
+          "$ref": "#/$defs/createdBy"
+        },
+        "created_at": {
+          "type": "string",
+          "maxLength": 64,
+          "format": "date-time"
+        },
+        "sources": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/source"
+          }
+        }
+      }
+    },
+    "parentCartridge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cartridge_id", "archive_sha256", "role"],
+      "properties": {
+        "cartridge_id": {
+          "$ref": "#/$defs/nonNilUuid"
+        },
+        "archive_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "role": {
+          "$ref": "#/$defs/token"
+        }
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operator_id", "operator_version", "seed", "controls"],
+      "properties": {
+        "operator_id": {
+          "$ref": "#/$defs/token"
+        },
+        "operator_version": {
+          "$ref": "#/$defs/version"
+        },
+        "seed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "controls": {
+          "type": "object",
+          "maxProperties": 128
+        }
+      }
+    }
+  }
+}

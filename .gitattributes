@@ -2,6 +2,7 @@
 
 *.rs text eol=lf
 *.toml text eol=lf
+Cargo.lock text eol=lf
 *.py text eol=lf
 *.js text eol=lf
 *.ts text eol=lf
