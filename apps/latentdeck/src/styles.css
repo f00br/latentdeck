@@ -197,9 +197,9 @@ input::placeholder {
   color: var(--green);
 }
 
-.instrument-shell.d2-active > .command-rail,
-.instrument-shell.d2-active > .message,
-.instrument-shell.d2-active > .work-surface {
+.instrument-shell.deck-active > .command-rail,
+.instrument-shell.deck-active > .message,
+.instrument-shell.deck-active > .work-surface {
   display: none;
 }
 

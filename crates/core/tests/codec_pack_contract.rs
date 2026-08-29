@@ -53,6 +53,7 @@ fn write_pack(root: &Path, id: &str, version: &str) -> PathBuf {
             "executable": "bin/worker.exe",
             "arguments": ["--worker"],
             "d2_arguments": ["--d2-worker"],
+            "q4_arguments": ["--q4-worker"],
             "working_directory": "bin",
             "probe_timeout_ms": 5000
         },
@@ -121,6 +122,22 @@ fn selects_an_explicit_d2_worker_entrypoint_from_the_validated_pack() {
 }
 
 #[test]
+fn selects_an_explicit_q4_worker_entrypoint_from_the_validated_pack() {
+    let root = TempDir::new().expect("root");
+    write_pack(root.path(), "org.latentdeck.h3", "0.1.0");
+    let pack = discover_codec_packs(&[root.path().to_path_buf()], "0.1.0")
+        .expect("validated pack")
+        .pop()
+        .expect("one pack");
+
+    assert_eq!(
+        pack.manifest.worker.q4_arguments.as_ref(),
+        Some(&vec!["--q4-worker".to_owned()])
+    );
+    ValidatedWorkerLaunch::from_codec_pack_q4(&pack).expect("explicit Q4 entrypoint");
+}
+
+#[test]
 fn player_only_pack_stays_valid_but_cannot_be_launched_as_d2() {
     let root = TempDir::new().expect("root");
     let pack_path = write_pack(root.path(), "org.latentdeck.h3", "0.1.0");
@@ -140,6 +157,29 @@ fn player_only_pack_stays_valid_but_cannot_be_launched_as_d2() {
     assert!(matches!(
         error,
         WorkerSupervisorError::WorkerEntrypointMissing("d2")
+    ));
+}
+
+#[test]
+fn pack_without_q4_stays_valid_but_cannot_be_launched_as_q4() {
+    let root = TempDir::new().expect("root");
+    let pack_path = write_pack(root.path(), "org.latentdeck.h3", "0.1.0");
+    mutate_manifest(&pack_path, |manifest| {
+        manifest["worker"]
+            .as_object_mut()
+            .expect("worker object")
+            .remove("q4_arguments");
+    });
+    let pack = discover_codec_packs(&[root.path().to_path_buf()], "0.1.0")
+        .expect("pack without Q4 remains valid")
+        .pop()
+        .expect("one pack");
+
+    let error = ValidatedWorkerLaunch::from_codec_pack_q4(&pack)
+        .expect_err("Q4 requires its own declared entrypoint");
+    assert!(matches!(
+        error,
+        WorkerSupervisorError::WorkerEntrypointMissing("q4")
     ));
 }
 
@@ -175,6 +215,21 @@ fn blocks_an_empty_or_oversized_d2_entrypoint() {
 
         let error = discover_codec_packs(&[root.path().to_path_buf()], "0.1.0")
             .expect_err("invalid D2 entrypoint");
+        assert_eq!(error.code, CodecPackErrorCode::ManifestInvalid.as_str());
+    }
+}
+
+#[test]
+fn blocks_an_empty_or_oversized_q4_entrypoint() {
+    for q4_arguments in [json!([]), json!(vec!["x"; 129])] {
+        let root = TempDir::new().expect("root");
+        let pack = write_pack(root.path(), "org.latentdeck.h3", "0.1.0");
+        mutate_manifest(&pack, |manifest| {
+            manifest["worker"]["q4_arguments"] = q4_arguments;
+        });
+
+        let error = discover_codec_packs(&[root.path().to_path_buf()], "0.1.0")
+            .expect_err("invalid Q4 entrypoint");
         assert_eq!(error.code, CodecPackErrorCode::ManifestInvalid.as_str());
     }
 }

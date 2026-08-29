@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latentdeck.org/schema/operator-descriptor/ld-q4/0.1.0",
+  "title": "LatentDeck LD-Q4 Operator Descriptor 0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "operator_id",
+    "operator_version",
+    "trust",
+    "entrypoint",
+    "supported_profiles",
+    "algorithms",
+    "controls",
+    "limits"
+  ],
+  "properties": {
+    "schema_version": { "const": "0.1.0" },
+    "operator_id": { "const": "org.latentdeck.builtin.ld_q4" },
+    "operator_version": { "type": "string", "pattern": "^0\\.1\\.[0-9]+$" },
+    "trust": { "const": "builtin" },
+    "entrypoint": { "const": "latentdeck_operator_q4:process_slot" },
+    "supported_profiles": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "codec_family",
+          "profile",
+          "profile_version",
+          "timing_contract",
+          "timing_contract_version",
+          "layout",
+          "runtime_dtype"
+        ],
+        "properties": {
+          "codec_family": { "const": "minimax_h3" },
+          "profile": { "const": "h3_av_latent" },
+          "profile_version": { "const": "0.1.0" },
+          "timing_contract": { "const": "minimax_h3_causal" },
+          "timing_contract_version": { "const": "0.1.0" },
+          "layout": { "const": "[1,24,1,H,W]" },
+          "runtime_dtype": { "const": "F16" }
+        }
+      }
+    },
+    "algorithms": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "items": { "enum": ["LINEAR", "XS5"] }
+    },
+    "controls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "interaction",
+        "mode",
+        "preserve",
+        "influence_mode",
+        "donor_weight_b",
+        "donor_weight_c",
+        "donor_weight_d",
+        "triangle_x",
+        "triangle_y",
+        "xs5_routing",
+        "temperature",
+        "top_k",
+        "sinkhorn_iterations",
+        "chaos"
+      ],
+      "properties": {
+        "algorithm": { "$ref": "#/$defs/control" },
+        "interaction": { "$ref": "#/$defs/control" },
+        "mode": { "$ref": "#/$defs/control" },
+        "preserve": { "$ref": "#/$defs/control" },
+        "influence_mode": { "$ref": "#/$defs/control" },
+        "donor_weight_b": { "$ref": "#/$defs/control" },
+        "donor_weight_c": { "$ref": "#/$defs/control" },
+        "donor_weight_d": { "$ref": "#/$defs/control" },
+        "triangle_x": { "$ref": "#/$defs/control" },
+        "triangle_y": { "$ref": "#/$defs/control" },
+        "xs5_routing": { "$ref": "#/$defs/control" },
+        "temperature": { "$ref": "#/$defs/control" },
+        "top_k": { "$ref": "#/$defs/control" },
+        "sinkhorn_iterations": { "$ref": "#/$defs/control" },
+        "chaos": { "$ref": "#/$defs/control" }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_spatial_tokens",
+        "top_k_max",
+        "sinkhorn_iterations_max",
+        "donor_count"
+      ],
+      "properties": {
+        "max_spatial_tokens": { "type": "integer", "minimum": 1 },
+        "top_k_max": { "type": "integer", "minimum": 1 },
+        "sinkhorn_iterations_max": { "type": "integer", "minimum": 2 },
+        "donor_count": { "const": 3 }
+      }
+    }
+  },
+  "$defs": {
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "default"],
+      "properties": {
+        "type": { "enum": ["enum", "float", "integer"] },
+        "default": {},
+        "minimum": { "type": "number" },
+        "maximum": { "type": "number" },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}

@@ -9,6 +9,7 @@ members = [
     "latentdeck-codec-host",
     "latentdeck-comfy-cartridge",
     "latentdeck-operator-d2",
+    "latentdeck-operator-q4",
     "latentdeck-python-workspace",
     "latentdeck-rgb-ring",
 ]
@@ -142,6 +143,7 @@ source = { editable = "codec-host/codecs/h3" }
 dependencies = [
     { name = "latentdeck-codec-host" },
     { name = "latentdeck-operator-d2" },
+    { name = "latentdeck-operator-q4" },
     { name = "latentdeck-rgb-ring" },
     { name = "safetensors" },
 ]
@@ -149,6 +151,7 @@ dependencies = [
 [package.optional-dependencies]
 cu130 = [
     { name = "latentdeck-operator-d2", extra = ["cu130"] },
+    { name = "latentdeck-operator-q4", extra = ["cu130"] },
     { name = "numpy" },
     { name = "torch" },
     { name = "tqdm" },
@@ -159,6 +162,8 @@ requires-dist = [
     { name = "latentdeck-codec-host", editable = "codec-host/python" },
     { name = "latentdeck-operator-d2", editable = "operators/builtin/d2" },
     { name = "latentdeck-operator-d2", extras = ["cu130"], marker = "extra == 'cu130'", editable = "operators/builtin/d2" },
+    { name = "latentdeck-operator-q4", editable = "operators/builtin/q4" },
+    { name = "latentdeck-operator-q4", extras = ["cu130"], marker = "extra == 'cu130'", editable = "operators/builtin/q4" },
     { name = "latentdeck-rgb-ring", editable = "codec-host/rgb-ring" },
     { name = "numpy", marker = "extra == 'cu130'", specifier = "==2.5.2" },
     { name = "safetensors", specifier = "==0.8.0" },
@@ -197,6 +202,30 @@ requires-dist = [
 name = "latentdeck-operator-d2"
 version = "0.1.0"
 source = { editable = "operators/builtin/d2" }
+dependencies = [
+    { name = "latentdeck-codec-host" },
+]
+
+[package.optional-dependencies]
+cu130 = [
+    { name = "torch" },
+]
+test = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "latentdeck-codec-host", editable = "codec-host/python" },
+    { name = "pytest", marker = "extra == 'test'", specifier = "==9.1.1" },
+    { name = "torch", marker = "extra == 'cu130'", specifier = "==2.13.0", index = "https://download.pytorch.org/whl/cu130" },
+]
+provides-extras = ["cu130", "test"]
+
+[[package]]
+name = "latentdeck-operator-q4"
+version = "0.1.0"
+source = { editable = "operators/builtin/q4" }
 dependencies = [
     { name = "latentdeck-codec-host" },
 ]

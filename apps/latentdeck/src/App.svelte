@@ -18,9 +18,10 @@
     type ReindexSummary,
   } from "./library-model";
   import D2Faceplate from "./D2Faceplate.svelte";
+  import Q4Faceplate from "./Q4Faceplate.svelte";
   import { product } from "./product";
 
-  type AppSurface = "library" | "d2";
+  type AppSurface = "library" | "d2" | "q4";
 
   let view: LibraryView = EMPTY_LIBRARY_VIEW;
   let search = "";
@@ -346,13 +347,17 @@
 
 <svelte:head>
   <title
-    >{product.name} — {activeSurface === "library" ? "Library" : "LD-D2"}</title
+    >{product.name} — {activeSurface === "library"
+      ? "Library"
+      : activeSurface === "d2"
+        ? "LD-D2"
+        : "LD-Q4"}</title
   >
 </svelte:head>
 
 <main
   class="instrument-shell"
-  class:d2-active={activeSurface === "d2"}
+  class:deck-active={activeSurface !== "library"}
   aria-busy={busy}
 >
   <header class="top-rail">
@@ -391,6 +396,16 @@
       <span>02</span>
       <strong>LD-D2</strong>
       <small>Dual-source synthesis</small>
+    </button>
+    <button
+      type="button"
+      class:active={activeSurface === "q4"}
+      aria-current={activeSurface === "q4" ? "page" : undefined}
+      onclick={() => void selectSurface("q4")}
+    >
+      <span>03</span>
+      <strong>LD-Q4</strong>
+      <small>Carrier · Three donors</small>
     </button>
   </nav>
 
@@ -796,5 +811,7 @@
   </div>
   {#if activeSurface === "d2"}
     <D2Faceplate />
+  {:else if activeSurface === "q4"}
+    <Q4Faceplate />
   {/if}
 </main>

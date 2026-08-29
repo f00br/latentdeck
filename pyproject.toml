@@ -22,6 +22,7 @@ members = [
     "codec-host/codecs/h3",
     "comfy/latent-cartridge",
     "operators/builtin/d2",
+    "operators/builtin/q4",
     "sdk/python",
 ]
 
@@ -29,6 +30,7 @@ members = [
 latentdeck-codec-host = { workspace = true }
 latentdeck-cartridge = { workspace = true }
 latentdeck-operator-d2 = { workspace = true }
+latentdeck-operator-q4 = { workspace = true }
 latentdeck-rgb-ring = { workspace = true }
 torch = { index = "pytorch-cu130" }
 
@@ -45,6 +47,7 @@ testpaths = [
     "codec-host/codecs/h3/tests",
     "comfy/latent-cartridge/tests",
     "operators/builtin/d2/tests",
+    "operators/builtin/q4/tests",
     "sdk/python/tests",
 ]
 

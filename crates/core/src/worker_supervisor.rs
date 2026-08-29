@@ -58,6 +58,23 @@ impl ValidatedWorkerLaunch {
         Ok(Self::from_arguments(pack, arguments))
     }
 
+    /// Derive the Q4 worker launch only when the validated pack declares the
+    /// dedicated trusted entrypoint. Player and D2 commands are never reused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkerSupervisorError::WorkerEntrypointMissing`] when Q4 is
+    /// unavailable in an otherwise valid Codec Pack.
+    pub fn from_codec_pack_q4(pack: &ValidatedCodecPack) -> Result<Self, WorkerSupervisorError> {
+        let arguments = pack
+            .manifest
+            .worker
+            .q4_arguments
+            .as_ref()
+            .ok_or(WorkerSupervisorError::WorkerEntrypointMissing("q4"))?;
+        Ok(Self::from_arguments(pack, arguments))
+    }
+
     fn from_arguments(pack: &ValidatedCodecPack, arguments: &[String]) -> Self {
         Self {
             executable: pack.worker_executable.clone(),

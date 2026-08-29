@@ -17,6 +17,12 @@ use super::d2::{
     D2Restart, D2RestartAck, D2SeedSet, D2SeedSetAck, D2Status, D2TransportSet, D2TransportSetAck,
 };
 use super::d2_capture::{D2CaptureStart, D2CaptureStatus, D2CaptureStatusRequest, D2CaptureStop};
+use super::q4::{
+    Q4CaptureStart, Q4CaptureStatus, Q4CaptureStatusRequest, Q4CaptureStop, Q4ControlsSet,
+    Q4ControlsSetAck, Q4Load, Q4ProcessSlot, Q4ProcessSlotAck, Q4Reset, Q4ResetAck, Q4Restart,
+    Q4RestartAck, Q4RolesSet, Q4RolesSetAck, Q4SeedSet, Q4SeedSetAck, Q4Status, Q4TransportSet,
+    Q4TransportSetAck,
+};
 
 pub const WORKER_PROTOCOL_VERSION: u16 = 1;
 pub const MAX_CONTROL_FRAME_BYTES: u32 = 262_144;
@@ -358,6 +364,30 @@ pub enum CommandName {
     DeckD2CaptureStop,
     #[serde(rename = "deck.d2.capture.status")]
     DeckD2CaptureStatus,
+    #[serde(rename = "deck.q4.load")]
+    DeckQ4Load,
+    #[serde(rename = "deck.q4.process_slot")]
+    DeckQ4ProcessSlot,
+    #[serde(rename = "deck.q4.reset")]
+    DeckQ4Reset,
+    #[serde(rename = "deck.q4.restart")]
+    DeckQ4Restart,
+    #[serde(rename = "deck.q4.controls.set")]
+    DeckQ4ControlsSet,
+    #[serde(rename = "deck.q4.roles.set")]
+    DeckQ4RolesSet,
+    #[serde(rename = "deck.q4.transport.set")]
+    DeckQ4TransportSet,
+    #[serde(rename = "deck.q4.seed.set")]
+    DeckQ4SeedSet,
+    #[serde(rename = "deck.q4.status")]
+    DeckQ4Status,
+    #[serde(rename = "deck.q4.capture.start")]
+    DeckQ4CaptureStart,
+    #[serde(rename = "deck.q4.capture.stop")]
+    DeckQ4CaptureStop,
+    #[serde(rename = "deck.q4.capture.status")]
+    DeckQ4CaptureStatus,
     #[serde(rename = "worker.status")]
     WorkerStatus,
     #[serde(rename = "metrics.get")]
@@ -405,6 +435,30 @@ pub enum Command {
     DeckD2CaptureStop(D2CaptureStop),
     #[serde(rename = "deck.d2.capture.status")]
     DeckD2CaptureStatus(D2CaptureStatusRequest),
+    #[serde(rename = "deck.q4.load")]
+    DeckQ4Load(Q4Load),
+    #[serde(rename = "deck.q4.process_slot")]
+    DeckQ4ProcessSlot(Q4ProcessSlot),
+    #[serde(rename = "deck.q4.reset")]
+    DeckQ4Reset(Q4Reset),
+    #[serde(rename = "deck.q4.restart")]
+    DeckQ4Restart(Q4Restart),
+    #[serde(rename = "deck.q4.controls.set")]
+    DeckQ4ControlsSet(Q4ControlsSet),
+    #[serde(rename = "deck.q4.roles.set")]
+    DeckQ4RolesSet(Q4RolesSet),
+    #[serde(rename = "deck.q4.transport.set")]
+    DeckQ4TransportSet(Q4TransportSet),
+    #[serde(rename = "deck.q4.seed.set")]
+    DeckQ4SeedSet(Q4SeedSet),
+    #[serde(rename = "deck.q4.status")]
+    DeckQ4Status(EmptyPayload),
+    #[serde(rename = "deck.q4.capture.start")]
+    DeckQ4CaptureStart(Q4CaptureStart),
+    #[serde(rename = "deck.q4.capture.stop")]
+    DeckQ4CaptureStop(Q4CaptureStop),
+    #[serde(rename = "deck.q4.capture.status")]
+    DeckQ4CaptureStatus(Q4CaptureStatusRequest),
     #[serde(rename = "worker.status")]
     WorkerStatus(EmptyPayload),
     #[serde(rename = "metrics.get")]
@@ -435,6 +489,18 @@ impl Command {
             Self::DeckD2CaptureStart(_) => CommandName::DeckD2CaptureStart,
             Self::DeckD2CaptureStop(_) => CommandName::DeckD2CaptureStop,
             Self::DeckD2CaptureStatus(_) => CommandName::DeckD2CaptureStatus,
+            Self::DeckQ4Load(_) => CommandName::DeckQ4Load,
+            Self::DeckQ4ProcessSlot(_) => CommandName::DeckQ4ProcessSlot,
+            Self::DeckQ4Reset(_) => CommandName::DeckQ4Reset,
+            Self::DeckQ4Restart(_) => CommandName::DeckQ4Restart,
+            Self::DeckQ4ControlsSet(_) => CommandName::DeckQ4ControlsSet,
+            Self::DeckQ4RolesSet(_) => CommandName::DeckQ4RolesSet,
+            Self::DeckQ4TransportSet(_) => CommandName::DeckQ4TransportSet,
+            Self::DeckQ4SeedSet(_) => CommandName::DeckQ4SeedSet,
+            Self::DeckQ4Status(_) => CommandName::DeckQ4Status,
+            Self::DeckQ4CaptureStart(_) => CommandName::DeckQ4CaptureStart,
+            Self::DeckQ4CaptureStop(_) => CommandName::DeckQ4CaptureStop,
+            Self::DeckQ4CaptureStatus(_) => CommandName::DeckQ4CaptureStatus,
             Self::WorkerStatus(_) => CommandName::WorkerStatus,
             Self::MetricsGet(_) => CommandName::MetricsGet,
             Self::WorkerShutdown(_) => CommandName::WorkerShutdown,
@@ -446,6 +512,7 @@ impl Command {
             Self::SessionConfigure(value) => value.validate(),
             Self::CodecInspect(_)
             | Self::DeckD2Status(_)
+            | Self::DeckQ4Status(_)
             | Self::WorkerStatus(_)
             | Self::MetricsGet(_)
             | Self::WorkerShutdown(_) => Ok(()),
@@ -464,6 +531,17 @@ impl Command {
             Self::DeckD2CaptureStart(value) => value.validate(),
             Self::DeckD2CaptureStop(value) => value.validate(),
             Self::DeckD2CaptureStatus(value) => value.validate(),
+            Self::DeckQ4Load(value) => value.validate(),
+            Self::DeckQ4ProcessSlot(value) => value.validate(),
+            Self::DeckQ4Reset(value) => value.validate(),
+            Self::DeckQ4Restart(value) => value.validate(),
+            Self::DeckQ4ControlsSet(value) => value.validate(),
+            Self::DeckQ4RolesSet(value) => value.validate(),
+            Self::DeckQ4TransportSet(value) => value.validate(),
+            Self::DeckQ4SeedSet(value) => value.validate(),
+            Self::DeckQ4CaptureStart(value) => value.validate(),
+            Self::DeckQ4CaptureStop(value) => value.validate(),
+            Self::DeckQ4CaptureStatus(value) => value.validate(),
         }
     }
 }
@@ -523,6 +601,30 @@ pub enum Ack {
     DeckD2CaptureStop(Box<D2CaptureStatus>),
     #[serde(rename = "deck.d2.capture.status")]
     DeckD2CaptureStatus(Box<D2CaptureStatus>),
+    #[serde(rename = "deck.q4.load")]
+    DeckQ4Load(Q4Status),
+    #[serde(rename = "deck.q4.process_slot")]
+    DeckQ4ProcessSlot(Q4ProcessSlotAck),
+    #[serde(rename = "deck.q4.reset")]
+    DeckQ4Reset(Q4ResetAck),
+    #[serde(rename = "deck.q4.restart")]
+    DeckQ4Restart(Q4RestartAck),
+    #[serde(rename = "deck.q4.controls.set")]
+    DeckQ4ControlsSet(Q4ControlsSetAck),
+    #[serde(rename = "deck.q4.roles.set")]
+    DeckQ4RolesSet(Q4RolesSetAck),
+    #[serde(rename = "deck.q4.transport.set")]
+    DeckQ4TransportSet(Q4TransportSetAck),
+    #[serde(rename = "deck.q4.seed.set")]
+    DeckQ4SeedSet(Q4SeedSetAck),
+    #[serde(rename = "deck.q4.status")]
+    DeckQ4Status(Q4Status),
+    #[serde(rename = "deck.q4.capture.start")]
+    DeckQ4CaptureStart(Box<Q4CaptureStatus>),
+    #[serde(rename = "deck.q4.capture.stop")]
+    DeckQ4CaptureStop(Box<Q4CaptureStatus>),
+    #[serde(rename = "deck.q4.capture.status")]
+    DeckQ4CaptureStatus(Box<Q4CaptureStatus>),
     #[serde(rename = "worker.status")]
     WorkerStatus(StatusSnapshot),
     #[serde(rename = "metrics.get")]
@@ -553,6 +655,18 @@ impl Ack {
             Self::DeckD2CaptureStart(_) => CommandName::DeckD2CaptureStart,
             Self::DeckD2CaptureStop(_) => CommandName::DeckD2CaptureStop,
             Self::DeckD2CaptureStatus(_) => CommandName::DeckD2CaptureStatus,
+            Self::DeckQ4Load(_) => CommandName::DeckQ4Load,
+            Self::DeckQ4ProcessSlot(_) => CommandName::DeckQ4ProcessSlot,
+            Self::DeckQ4Reset(_) => CommandName::DeckQ4Reset,
+            Self::DeckQ4Restart(_) => CommandName::DeckQ4Restart,
+            Self::DeckQ4ControlsSet(_) => CommandName::DeckQ4ControlsSet,
+            Self::DeckQ4RolesSet(_) => CommandName::DeckQ4RolesSet,
+            Self::DeckQ4TransportSet(_) => CommandName::DeckQ4TransportSet,
+            Self::DeckQ4SeedSet(_) => CommandName::DeckQ4SeedSet,
+            Self::DeckQ4Status(_) => CommandName::DeckQ4Status,
+            Self::DeckQ4CaptureStart(_) => CommandName::DeckQ4CaptureStart,
+            Self::DeckQ4CaptureStop(_) => CommandName::DeckQ4CaptureStop,
+            Self::DeckQ4CaptureStatus(_) => CommandName::DeckQ4CaptureStatus,
             Self::WorkerStatus(_) => CommandName::WorkerStatus,
             Self::MetricsGet(_) => CommandName::MetricsGet,
             Self::WorkerShutdown(_) => CommandName::WorkerShutdown,
@@ -578,6 +692,17 @@ impl Ack {
             Self::DeckD2CaptureStart(value)
             | Self::DeckD2CaptureStop(value)
             | Self::DeckD2CaptureStatus(value) => value.validate(),
+            Self::DeckQ4Load(value) | Self::DeckQ4Status(value) => value.validate(),
+            Self::DeckQ4ProcessSlot(value) => value.validate(),
+            Self::DeckQ4Reset(value) => value.validate(),
+            Self::DeckQ4Restart(value) => value.validate(),
+            Self::DeckQ4ControlsSet(value) => value.validate(),
+            Self::DeckQ4RolesSet(value) => value.validate(),
+            Self::DeckQ4TransportSet(value) => value.validate(),
+            Self::DeckQ4SeedSet(value) => value.validate(),
+            Self::DeckQ4CaptureStart(value)
+            | Self::DeckQ4CaptureStop(value)
+            | Self::DeckQ4CaptureStatus(value) => value.validate(),
             Self::WorkerStatus(value) => value.validate(),
             Self::MetricsGet(_) | Self::WorkerShutdown(_) => Ok(()),
         }

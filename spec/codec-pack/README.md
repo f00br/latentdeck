@@ -39,7 +39,7 @@ binds:
 - Windows x86-64 platform compatibility;
 - supported application, Worker Protocol, LC, and codec-profile versions;
 - one direct worker executable, bounded Player argument list, optional bounded
-  D2 argument list, working directory, and probe timeout;
+  D2 and Q4 argument lists, working directory, and probe timeout;
 - a SHA-256-bound integrity catalog;
 - required external assets and their accepted byte length/SHA-256 variants.
 
@@ -56,17 +56,19 @@ entrypoints are explicit and are never inferred from one another:
     "executable": "runtime/python.exe",
     "arguments": ["-s", "-m", "latentdeck_codec_h3.worker"],
     "d2_arguments": ["-s", "-m", "latentdeck_codec_h3.d2_worker"],
+    "q4_arguments": ["-s", "-m", "latentdeck_codec_h3.q4_worker"],
     "working_directory": "runtime",
     "probe_timeout_ms": 120000
   }
 }
 ```
 
-`d2_arguments` is optional so a validated Player-only pack remains usable.
-When it is absent, LatentDeck reports the D2 worker as unavailable; it never
-silently starts the Player entrypoint as a Deck worker. When present, the list
-must be non-empty and obey the same count and bounded-text rules as
-`arguments`. Neither entrypoint is accepted from UI state or a cartridge.
+`d2_arguments` and `q4_arguments` are independently optional so a validated
+Player-only or D2-only pack remains usable. When either is absent, LatentDeck
+reports that Deck type as unavailable; it never substitutes the Player or the
+other Deck entrypoint. Each present list must be non-empty and obey the same
+count and bounded-text rules as `arguments`. No entrypoint is accepted from UI
+state or a cartridge.
 
 The integrity catalog is a strict object:
 

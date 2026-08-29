@@ -167,6 +167,18 @@ are not directly compared as timestamps.
 | `deck.d2.transport.set` | atomically replace both A/B play and loop flags                              |
 | `deck.d2.seed.set`      | replace the exact deterministic u53 seed                                     |
 | `deck.d2.status`        | return the worker-owned D2 scheduler state                                   |
+| `deck.q4.load`          | bind four exact H3 sources and initialize trusted LD-Q4                       |
+| `deck.q4.process_slot`  | synthesize/decode one carrier-donor slot and publish its RGB frames           |
+| `deck.q4.reset`         | apply a reported Q4 causal-reset barrier with a newer generation              |
+| `deck.q4.restart`       | request a four-playhead restart barrier                                       |
+| `deck.q4.controls.set`  | atomically replace the closed Q4 synthesis controls                           |
+| `deck.q4.roles.set`     | atomically replace the explicit carrier/B/C/D role permutation                |
+| `deck.q4.transport.set` | atomically replace all four play and loop pairs                               |
+| `deck.q4.seed.set`      | replace the exact deterministic Q4 u53 seed                                   |
+| `deck.q4.status`        | return the worker-owned Q4 scheduler state                                    |
+| `deck.q4.capture.start` | arm bounded Snapshot or Live Capture at the next valid reset boundary         |
+| `deck.q4.capture.stop`  | stop or arm stopping of the active Q4 capture                                 |
+| `deck.q4.capture.status`| read the active Q4 capture state without mutation                             |
 | `worker.status`         | return current worker/codec/slot/ring states                                 |
 | `metrics.get`           | return a cumulative metrics snapshot                                         |
 | `worker.shutdown`       | acknowledge orderly shutdown before process exit                             |
@@ -345,6 +357,68 @@ commits the `.lc`, and imports it into Library. A successful finalizer consumes
 the exact spool. Active partials and unconsumed finished spools are removed on
 orderly worker close or replacement; after forced process termination, cleanup
 of the trusted temporary root belongs to the application.
+
+## LD-Q4 carrier-donor contract
+
+Q4 uses a separate explicitly declared Codec Pack entrypoint and the same
+authenticated framing, session, ring, reset, recovery, and shutdown invariants
+as D2. It never substitutes the Player or D2 entrypoint. The UI sends four
+Library identities/hashes; the trusted host resolves and fully validates the
+paths before constructing the low-level `deck.q4.load` command.
+
+Physical slots are always `A`, `B`, `C`, and `D`. A closed `roles` object maps
+one physical slot to `carrier` and the remaining slots to logical `donor_b`,
+`donor_c`, and `donor_d`. The four values must be an exact permutation. This
+assignment is explicit in load/status/process acknowledgements, may be replaced
+atomically with `deck.q4.roles.set`, and is recorded in resample provenance.
+No positional or UI-order inference is allowed.
+
+All four sources must match codec/profile/timing, frame rate, latent spatial
+grid, runtime layout, and decoded geometry. Their temporal lengths may differ
+and retain four independent playheads. The eight transport flags control each
+physical slot independently. Any looping slot or Restart produces a reported
+barrier; only `deck.q4.reset` with a newer generation and
+`causal_state_cleared=true` may resume decode. A non-looping EOS clears only
+that physical slot's `playing_*` flag.
+
+The Q4 control block is closed and finite:
+
+| Control | Values or range |
+| --- | --- |
+| `algorithm` | `LINEAR` or `XS5` |
+| `interaction`, `preserve`, `chaos` | `0..=1`; chaos `0` is the exact unperturbed path |
+| `mode` | `HYBRIDIZE` or `INTERACT` |
+| `influence_mode` | `MANUAL` or `TRIANGLE` |
+| `donor_weight_b/c/d` | each `0..=1`; at least one positive in manual mode |
+| `triangle_x/y` | `0..=1` and inside the B/C/D barycentric field |
+| `xs5_routing` | `TOPK` or `SINKHORN` |
+| `temperature` | `0.02..=1` |
+| `top_k` | integer `1..=64`, additionally bounded by the full loaded grid |
+| `sinkhorn_iterations` | integer `2..=12` |
+
+The global `interaction` value is total donor strength. Manual or triangular
+weights are normalized only to distribute that total among logical donors.
+Each donor affinity is computed against the same unchanged carrier state, then
+the routed states accumulate in fixed logical B/C/D order. Implementations may
+batch or reuse carrier affinity, but may not downscale the grid, omit a donor,
+drop to RGB, or silently change the algorithm to meet a frame-rate target.
+Seeded chaos and identical input/control/event sequences must be deterministic.
+
+`deck.q4.process_slot` returns `decoded_slot`, `reset_barrier`, or `paused` with
+the same ring-range and bounded provenance rules as D2, extended to four
+playheads and explicit roles. Controls, roles, transport, and seed updates are
+applied only between complete slot commands and acknowledge
+`requires_causal_reset=false`.
+
+Q4 capture uses the same bounded post-operator-before-decode spool and valid H3
+stop boundaries as D2. Snapshot freezes roles, controls, seed, and one complete
+structural-carrier cycle. Live Capture records at most 32 ordered events, each
+binding a latent-slot offset to roles, controls, and seed. The receipt binds all
+four UUID/hash parents and the structural carrier. Audio is copied only from
+that carrier when duration and temporal mapping match exactly; otherwise the
+receipt declares the explicit omission policy and reason. The host revalidates
+the worker path, Safetensors payload, hash, dtype/shape, genealogy, and final
+`.lc` before atomic commit and Library import.
 
 ## H3 slot timing
 

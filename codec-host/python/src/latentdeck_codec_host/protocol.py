@@ -27,6 +27,8 @@ MAX_STRING_BYTES = 32_768
 MAX_BINARY_BYTES = 64
 MAX_D2_CAPTURE_LATENT_SLOTS = 1_048_576
 MAX_D2_CAPTURE_VISUAL_BYTES = 15 * 1024 * 1024 * 1024
+MAX_Q4_CAPTURE_LATENT_SLOTS = 1_048_576
+MAX_Q4_CAPTURE_VISUAL_BYTES = 15 * 1024 * 1024 * 1024
 
 D2_CONTROL_FIELDS = {
     "algorithm",
@@ -46,6 +48,24 @@ D2_CONTROL_FIELDS = {
     "temperature",
     "top_k",
     "sinkhorn_iterations",
+}
+
+Q4_CONTROL_FIELDS = {
+    "algorithm",
+    "interaction",
+    "mode",
+    "preserve",
+    "influence_mode",
+    "donor_weight_b",
+    "donor_weight_c",
+    "donor_weight_d",
+    "triangle_x",
+    "triangle_y",
+    "xs5_routing",
+    "temperature",
+    "top_k",
+    "sinkhorn_iterations",
+    "chaos",
 }
 
 
@@ -330,6 +350,39 @@ def _validate_command_payload(name: str, payload: Mapping[str, object]) -> None:
         },
         "deck.d2.capture.stop": {"deck_id", "deck_revision", "capture_id"},
         "deck.d2.capture.status": {"deck_id", "deck_revision", "capture_id"},
+        "deck.q4.load": {
+            "deck_id",
+            "operator_id",
+            "operator_version",
+            "source_a",
+            "source_b",
+            "source_c",
+            "source_d",
+            "roles",
+            "controls",
+            "transport",
+            "seed",
+            "stream_generation",
+        },
+        "deck.q4.process_slot": {"deck_id", "deck_revision", "stream_generation"},
+        "deck.q4.reset": {"deck_id", "deck_revision", "new_stream_generation"},
+        "deck.q4.restart": {"deck_id", "deck_revision"},
+        "deck.q4.controls.set": {"deck_id", "deck_revision", "controls"},
+        "deck.q4.roles.set": {"deck_id", "deck_revision", "roles"},
+        "deck.q4.transport.set": {"deck_id", "deck_revision", "transport"},
+        "deck.q4.seed.set": {"deck_id", "deck_revision", "seed"},
+        "deck.q4.status": set(),
+        "deck.q4.capture.start": {
+            "deck_id",
+            "deck_revision",
+            "capture_id",
+            "mode",
+            "temporary_root",
+            "max_latent_slots",
+            "max_visual_bytes",
+        },
+        "deck.q4.capture.stop": {"deck_id", "deck_revision", "capture_id"},
+        "deck.q4.capture.status": {"deck_id", "deck_revision", "capture_id"},
         "worker.status": set(),
         "metrics.get": set(),
         "worker.shutdown": {"reason"},
@@ -396,6 +449,54 @@ def _validate_command_payload(name: str, payload: Mapping[str, object]) -> None:
         )
     elif name in {"deck.d2.capture.stop", "deck.d2.capture.status"}:
         _validate_d2_capture_identity(payload)
+    elif name == "deck.q4.load":
+        _text(payload["deck_id"], "deck_id", 128)
+        _text(payload["operator_id"], "operator_id", 128)
+        _text(payload["operator_version"], "operator_version", 128)
+        for slot in "abcd":
+            label = f"source_{slot}"
+            _validate_d2_source(payload[label], label)
+        _validate_q4_roles(payload["roles"])
+        _validate_q4_controls(payload["controls"])
+        _validate_q4_transport(payload["transport"])
+        _safe_seed(payload["seed"], "seed")
+        _positive_int(payload["stream_generation"], "stream_generation")
+    elif name == "deck.q4.process_slot":
+        _validate_q4_identity(payload, generation_field="stream_generation")
+    elif name == "deck.q4.reset":
+        _validate_q4_identity(payload, generation_field="new_stream_generation")
+    elif name == "deck.q4.restart":
+        _validate_q4_identity(payload)
+    elif name == "deck.q4.controls.set":
+        _validate_q4_identity(payload)
+        _validate_q4_controls(payload["controls"])
+    elif name == "deck.q4.roles.set":
+        _validate_q4_identity(payload)
+        _validate_q4_roles(payload["roles"])
+    elif name == "deck.q4.transport.set":
+        _validate_q4_identity(payload)
+        _validate_q4_transport(payload["transport"])
+    elif name == "deck.q4.seed.set":
+        _validate_q4_identity(payload)
+        _safe_seed(payload["seed"], "seed")
+    elif name == "deck.q4.capture.start":
+        _validate_q4_capture_identity(payload)
+        _enum(payload["mode"], "capture mode", {"snapshot", "live_capture"})
+        _text(payload["temporary_root"], "temporary_root", MAX_STRING_BYTES)
+        _bounded_int(
+            payload["max_latent_slots"],
+            "max_latent_slots",
+            2,
+            MAX_Q4_CAPTURE_LATENT_SLOTS,
+        )
+        _bounded_int(
+            payload["max_visual_bytes"],
+            "max_visual_bytes",
+            1,
+            MAX_Q4_CAPTURE_VISUAL_BYTES,
+        )
+    elif name in {"deck.q4.capture.stop", "deck.q4.capture.status"}:
+        _validate_q4_capture_identity(payload)
 
 
 def _validate_d2_identity(
@@ -409,6 +510,20 @@ def _validate_d2_identity(
 
 def _validate_d2_capture_identity(payload: Mapping[str, object]) -> None:
     _validate_d2_identity(payload)
+    _uuid(payload["capture_id"], "capture_id")
+
+
+def _validate_q4_identity(
+    payload: Mapping[str, object], *, generation_field: str | None = None
+) -> None:
+    _text(payload["deck_id"], "deck_id", 128)
+    _positive_int(payload["deck_revision"], "deck_revision")
+    if generation_field is not None:
+        _positive_int(payload[generation_field], generation_field)
+
+
+def _validate_q4_capture_identity(payload: Mapping[str, object]) -> None:
+    _validate_q4_identity(payload)
     _uuid(payload["capture_id"], "capture_id")
 
 
@@ -459,6 +574,71 @@ def _validate_d2_transport(raw: object) -> None:
     )
     if not all(isinstance(transport[name], bool) for name in transport):
         raise ProtocolError("D2 transport fields must be boolean")
+
+
+def _validate_q4_roles(raw: object) -> None:
+    roles = _mapping(raw, "Q4 roles")
+    _exact_keys(roles, {"carrier", "donor_b", "donor_c", "donor_d"}, "Q4 roles")
+    slots = [
+        _enum(roles[name], name, {"A", "B", "C", "D"})
+        for name in ("carrier", "donor_b", "donor_c", "donor_d")
+    ]
+    if len(set(slots)) != 4:
+        raise ProtocolError("Q4 roles must be an exact A/B/C/D permutation")
+
+
+def _validate_q4_controls(raw: object) -> None:
+    controls = _mapping(raw, "Q4 controls")
+    _exact_keys(controls, Q4_CONTROL_FIELDS, "Q4 controls")
+    _enum(controls["algorithm"], "algorithm", {"LINEAR", "XS5"})
+    _number(controls["interaction"], "interaction", 0.0, 1.0)
+    _enum(controls["mode"], "mode", {"HYBRIDIZE", "INTERACT"})
+    _number(controls["preserve"], "preserve", 0.0, 1.0)
+    influence_mode = _enum(controls["influence_mode"], "influence_mode", {"MANUAL", "TRIANGLE"})
+    for name in (
+        "donor_weight_b",
+        "donor_weight_c",
+        "donor_weight_d",
+        "triangle_x",
+        "triangle_y",
+        "chaos",
+    ):
+        _number(controls[name], name, 0.0, 1.0)
+    _enum(controls["xs5_routing"], "xs5_routing", {"TOPK", "SINKHORN"})
+    _number(controls["temperature"], "temperature", 0.02, 1.0)
+    _bounded_int(controls["top_k"], "top_k", 1, 64)
+    _bounded_int(controls["sinkhorn_iterations"], "sinkhorn_iterations", 2, 12)
+    if influence_mode == "MANUAL":
+        total = sum(
+            float(controls[name]) for name in ("donor_weight_b", "donor_weight_c", "donor_weight_d")
+        )
+        if total == 0.0:
+            raise ProtocolError("at least one Q4 manual donor weight must be positive")
+    else:
+        x = float(controls["triangle_x"])
+        y = float(controls["triangle_y"])
+        if min(1.0 - x - 0.5 * y, x - 0.5 * y, y) < -1e-12:
+            raise ProtocolError("Q4 triangle point lies outside the influence field")
+
+
+def _validate_q4_transport(raw: object) -> None:
+    transport = _mapping(raw, "Q4 transport")
+    _exact_keys(
+        transport,
+        {
+            "playing_a",
+            "playing_b",
+            "playing_c",
+            "playing_d",
+            "loop_a",
+            "loop_b",
+            "loop_c",
+            "loop_d",
+        },
+        "Q4 transport",
+    )
+    if not all(isinstance(transport[name], bool) for name in transport):
+        raise ProtocolError("Q4 transport fields must be boolean")
 
 
 def _enum(value: object, label: str, allowed: set[str]) -> str:
