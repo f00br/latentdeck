@@ -3,10 +3,10 @@ use std::io::Cursor;
 use latentdeck_control::{
     Ack, AckReply, AuthToken, BoundedVec, CodecInspection, CodecState, Command, EmptyPayload,
     Envelope, ErrorCode, ErrorPayload, ErrorReply, Event, EventMessage, FramingError,
-    InboundPolicy, MAX_CONTROL_FRAME_BYTES, Message, ProtocolMarker, RingState, SessionConfigure,
-    SessionConfigured, SessionValidator, SlotState, ValidationError, WORKER_PROTOCOL_VERSION,
-    WireUuid, WorkerHeartbeat, WorkerHello, WorkerState, decode_envelope, read_envelope,
-    write_envelope,
+    InboundPolicy, MAX_CONTROL_FRAME_BYTES, MAX_MESSAGES_PER_SESSION, Message, ProtocolMarker,
+    RingBind, RingBound, RingState, SessionConfigure, SessionConfigured, SessionValidator,
+    SlotState, ValidationError, WORKER_PROTOCOL_VERSION, WireUuid, WorkerHeartbeat, WorkerHello,
+    WorkerState, decode_envelope, read_envelope, write_envelope,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -319,6 +319,134 @@ fn outbound_command_sequence_also_starts_at_one() {
             actual: 2,
         })
     );
+}
+
+#[test]
+fn inbound_message_budget_is_exact_at_both_edges() {
+    let session_id = id(1);
+    let mut validator = SessionValidator::new(session_id, InboundPolicy::CommandsOnly);
+    assert_eq!(
+        validator.remaining_inbound_message_budget(),
+        MAX_MESSAGES_PER_SESSION
+    );
+    assert_eq!(
+        validator.remaining_outbound_message_budget(),
+        MAX_MESSAGES_PER_SESSION
+    );
+
+    for accepted in 0..MAX_MESSAGES_PER_SESSION {
+        if accepted == MAX_MESSAGES_PER_SESSION - 1 {
+            assert_eq!(validator.remaining_inbound_message_budget(), 1);
+        }
+        let sequence = u64::try_from(accepted + 1).expect("bounded session sequence fits u64");
+        let envelope = command_envelope(
+            session_id,
+            sequence,
+            id(u128::from(sequence) + 1),
+            Command::WorkerStatus(EmptyPayload {}),
+        );
+        validator
+            .validate_inbound(&envelope)
+            .expect("message within the session cap must be accepted");
+        if accepted == 0 {
+            assert_eq!(
+                validator.remaining_inbound_message_budget(),
+                MAX_MESSAGES_PER_SESSION - 1
+            );
+        }
+    }
+
+    assert_eq!(validator.remaining_inbound_message_budget(), 0);
+    assert_eq!(
+        validator.remaining_outbound_message_budget(),
+        MAX_MESSAGES_PER_SESSION
+    );
+    let over_limit_sequence =
+        u64::try_from(MAX_MESSAGES_PER_SESSION + 1).expect("bounded test sequence fits u64");
+    let over_limit = command_envelope(
+        session_id,
+        over_limit_sequence,
+        id(u128::from(over_limit_sequence) + 1),
+        Command::WorkerStatus(EmptyPayload {}),
+    );
+    assert_eq!(
+        validator.validate_inbound(&over_limit),
+        Err(ValidationError::SessionMessageLimit)
+    );
+    assert_eq!(validator.remaining_inbound_message_budget(), 0);
+}
+
+#[test]
+fn outbound_message_budget_counts_completed_commands_and_is_exact_at_the_cap() {
+    let session_id = id(1);
+    let mut validator = SessionValidator::new(session_id, InboundPolicy::ResponsesAndEvents);
+
+    for accepted in 0..MAX_MESSAGES_PER_SESSION {
+        if accepted == MAX_MESSAGES_PER_SESSION - 1 {
+            assert_eq!(validator.remaining_outbound_message_budget(), 1);
+            assert_eq!(validator.remaining_inbound_message_budget(), 1);
+        }
+        let sequence = u64::try_from(accepted + 1).expect("bounded session sequence fits u64");
+        let command_id = id(100_000 + u128::from(sequence));
+        let command = command_envelope(
+            session_id,
+            sequence,
+            command_id,
+            Command::RingBind(RingBind {
+                layout_version: 1,
+                mapping_handle: 1,
+                mapping_bytes: 4_096,
+                frames_ready_event_handle: 1,
+                ring_id: id(42),
+            }),
+        );
+        validator
+            .track_outbound_command(&command)
+            .expect("command within the session cap must be accepted");
+        assert!(validator.has_pending_reply(command_id));
+
+        let reply = ack_envelope(
+            session_id,
+            sequence,
+            id(200_000 + u128::from(sequence)),
+            command_id,
+            Ack::RingBind(RingBound {
+                layout_version: 1,
+                ring_id: id(42),
+                mapping_bytes: 4_096,
+            }),
+        );
+        validator
+            .validate_inbound(&reply)
+            .expect("matching reply must complete the command");
+        assert!(!validator.has_pending_reply(command_id));
+        if accepted == 0 {
+            assert_eq!(
+                validator.remaining_outbound_message_budget(),
+                MAX_MESSAGES_PER_SESSION - 1
+            );
+            assert_eq!(
+                validator.remaining_inbound_message_budget(),
+                MAX_MESSAGES_PER_SESSION - 1
+            );
+        }
+    }
+
+    assert_eq!(validator.remaining_outbound_message_budget(), 0);
+    assert_eq!(validator.remaining_inbound_message_budget(), 0);
+    let over_limit_sequence =
+        u64::try_from(MAX_MESSAGES_PER_SESSION + 1).expect("bounded test sequence fits u64");
+    let over_limit = command_envelope(
+        session_id,
+        over_limit_sequence,
+        id(100_000 + u128::from(over_limit_sequence)),
+        Command::WorkerStatus(EmptyPayload {}),
+    );
+    assert_eq!(
+        validator.track_outbound_command(&over_limit),
+        Err(ValidationError::SessionMessageLimit)
+    );
+    assert_eq!(validator.remaining_outbound_message_budget(), 0);
 }
 
 #[test]

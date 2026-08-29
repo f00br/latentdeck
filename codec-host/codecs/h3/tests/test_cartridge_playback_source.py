@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import struct
 from pathlib import Path
@@ -27,6 +28,28 @@ def safetensors_payload(dtype: str = "F16") -> bytes:
     ).encode()
     header += b" " * (-len(header) % 8)
     return struct.pack("<Q", len(header)) + header + tensor_bytes
+
+
+def av_safetensors_payload() -> tuple[bytes, bytes]:
+    audio_bytes = bytes(index % 251 for index in range(1 * 32 * 2 * 178 * 4))
+    video_bytes = bytes(1 * 24 * 32 * 2)
+    header = json.dumps(
+        {
+            "audio": {
+                "dtype": "F32",
+                "shape": [1, 32, 2, 178],
+                "data_offsets": [0, len(audio_bytes)],
+            },
+            "video": {
+                "dtype": "F16",
+                "shape": [1, 24, 32, 1, 1],
+                "data_offsets": [len(audio_bytes), len(audio_bytes) + len(video_bytes)],
+            },
+        },
+        separators=(",", ":"),
+    ).encode()
+    header += b" " * (-len(header) % 8)
+    return struct.pack("<Q", len(header)) + header + audio_bytes + video_bytes, audio_bytes
 
 
 def packed_cartridge(tmp_path: Path, dtype: str = "F16") -> tuple[Path, str]:
@@ -83,3 +106,41 @@ def test_rejects_noncanonical_hash_and_cycle_seek(tmp_path: Path) -> None:
 def test_fixture_hash_is_bound_to_the_actual_archive(tmp_path: Path) -> None:
     cartridge, archive_hash = packed_cartridge(tmp_path)
     assert hashlib.sha256(cartridge.read_bytes()).hexdigest() == archive_hash
+
+
+def test_exposes_exact_validated_audio_as_a_streaming_resample_source(tmp_path: Path) -> None:
+    payload_bytes, expected_audio = av_safetensors_payload()
+    payload = tmp_path / "av.safetensors"
+    cartridge = tmp_path / "av.lc"
+    payload.write_bytes(payload_bytes)
+    pack_raw_h3(payload, cartridge)
+    archive_hash = str(hash_cartridge(cartridge)["sha256"])
+
+    source = load_video_source(cartridge, archive_hash)
+
+    assert source.audio is not None
+    assert source.audio.storage_dtype == "F32"
+    assert source.audio.shape == (1, 32, 2, 178)
+    destination = io.BytesIO()
+    assert source.audio.copy_to(destination) == len(expected_audio)
+    assert destination.getvalue() == expected_audio
+    resample_source = source.audio.to_resample_source()
+    assert resample_source.storage_dtype == "F32"
+    assert resample_source.shape == (1, 32, 2, 178)
+
+
+def test_audio_stream_rechecks_the_bound_archive_hash(tmp_path: Path) -> None:
+    payload_bytes, _ = av_safetensors_payload()
+    payload = tmp_path / "av.safetensors"
+    cartridge = tmp_path / "av.lc"
+    payload.write_bytes(payload_bytes)
+    pack_raw_h3(payload, cartridge)
+    archive_hash = str(hash_cartridge(cartridge)["sha256"])
+    source = load_video_source(cartridge, archive_hash)
+    assert source.audio is not None
+    changed = bytearray(cartridge.read_bytes())
+    changed[-1] ^= 0x01
+    cartridge.write_bytes(changed)
+
+    with pytest.raises(CartridgeLoadError, match="hash changed"):
+        source.audio.copy_to(io.BytesIO())

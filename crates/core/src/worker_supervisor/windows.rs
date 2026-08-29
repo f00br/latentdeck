@@ -269,6 +269,22 @@ impl WorkerSession {
         self.worker_pid
     }
 
+    /// Number of additional worker replies/events this session can validate.
+    ///
+    /// The authenticated `worker.hello` has already consumed one inbound
+    /// message when a `WorkerSession` becomes available.
+    #[must_use]
+    pub fn remaining_inbound_message_budget(&self) -> usize {
+        self.validator.remaining_inbound_message_budget()
+    }
+
+    /// Number of additional Core commands this session can register.
+    /// Completed command IDs remain retained for duplicate/correlation checks.
+    #[must_use]
+    pub fn remaining_outbound_message_budget(&self) -> usize {
+        self.validator.remaining_outbound_message_budget()
+    }
+
     /// Borrow the authenticated child process handle for a synchronous,
     /// non-retaining operation such as duplicating anonymous ring handles.
     ///
@@ -830,6 +846,8 @@ mod tests {
         "worker_supervisor::platform::tests::worker_minimal_environment_helper";
     const EARLY_EXIT_HELPER: &str =
         "worker_supervisor::platform::tests::worker_exit_before_connect_helper";
+    const EXIT_AFTER_HELLO_HELPER: &str =
+        "worker_supervisor::platform::tests::worker_exit_after_hello_helper";
 
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -870,15 +888,84 @@ mod tests {
             .expect("spawn worker");
         let session_id = pending.session_id();
         let worker_pid = pending.worker_pid();
-        let mut session = pending.connect().await.expect("authenticated session");
+        let session = pending.connect().await.expect("authenticated session");
         assert_eq!(session.session_id(), session_id);
         assert_eq!(session.worker_pid(), worker_pid);
+        assert_eq!(
+            session.remaining_inbound_message_budget(),
+            latentdeck_control::MAX_MESSAGES_PER_SESSION - 1
+        );
+        assert_eq!(
+            session.remaining_outbound_message_budget(),
+            latentdeck_control::MAX_MESSAGES_PER_SESSION
+        );
 
-        let exit = session
+        let mut client = crate::worker_client::WorkerClient::new(session);
+        assert_eq!(
+            client.remaining_inbound_message_budget(),
+            latentdeck_control::MAX_MESSAGES_PER_SESSION - 1
+        );
+        assert_eq!(
+            client.remaining_outbound_message_budget(),
+            latentdeck_control::MAX_MESSAGES_PER_SESSION
+        );
+
+        let exit = client
             .request_shutdown(ShutdownReason::ApplicationExit, Duration::from_secs(10))
             .await
             .expect("orderly shutdown");
         assert!(exit.success, "helper should exit successfully: {exit}");
+        assert_eq!(
+            client.remaining_inbound_message_budget(),
+            latentdeck_control::MAX_MESSAGES_PER_SESSION - 2
+        );
+        assert_eq!(
+            client.remaining_outbound_message_budget(),
+            latentdeck_control::MAX_MESSAGES_PER_SESSION - 1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_exit_wait_leaves_orderly_shutdown_usable() {
+        let pending = spawn_worker(helper_launch(GOOD_HELPER))
+            .await
+            .expect("spawn worker");
+        let session = pending.connect().await.expect("authenticated session");
+        let mut client = crate::worker_client::WorkerClient::new(session);
+
+        let timed_out =
+            tokio::time::timeout(Duration::from_millis(50), client.wait_for_exit()).await;
+        assert!(timed_out.is_err(), "live worker exit wait should time out");
+
+        let exit = client
+            .request_shutdown(ShutdownReason::ApplicationExit, Duration::from_secs(10))
+            .await
+            .expect("orderly shutdown after cancelled wait");
+        assert!(exit.success, "helper should exit successfully: {exit}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn authenticated_unexpected_exit_is_observed_repeatedly() {
+        let pending = spawn_worker(helper_launch(EXIT_AFTER_HELLO_HELPER))
+            .await
+            .expect("spawn worker");
+        let session = pending.connect().await.expect("authenticated session");
+        let mut client = crate::worker_client::WorkerClient::new(session);
+
+        let first = tokio::time::timeout(Duration::from_secs(10), client.wait_for_exit())
+            .await
+            .expect("unexpected exit observation should not hang")
+            .expect("observe unexpected exit");
+        let repeated = client
+            .wait_for_exit()
+            .await
+            .expect("repeat cached exit observation");
+
+        assert!(
+            first.success,
+            "test helper should exit successfully: {first}"
+        );
+        assert_eq!(repeated, first);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -953,6 +1040,12 @@ mod tests {
     #[ignore = "spawned by the worker supervisor exit-observation test"]
     fn worker_exit_before_connect_helper() {
         let _ = read_child_bootstrap();
+    }
+
+    #[test]
+    #[ignore = "spawned by the worker supervisor exit-observation test"]
+    fn worker_exit_after_hello_helper() {
+        run_worker_hello_then_exit();
     }
 
     fn helper_launch(test_name: &str) -> ValidatedWorkerLaunch {
@@ -1036,6 +1129,46 @@ mod tests {
             write_envelope(&mut client, &ack)
                 .await
                 .expect("write shutdown ack");
+        });
+    }
+
+    fn run_worker_hello_then_exit() {
+        let bootstrap = read_child_bootstrap();
+        assert_eq!(bootstrap.bootstrap_version, BOOTSTRAP_VERSION);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("child runtime");
+        runtime.block_on(async move {
+            let mut client = ClientOptions::new()
+                .open(&bootstrap.pipe_name)
+                .expect("connect to supervisor pipe");
+            let adapters = BoundedVec::try_from_vec(vec!["org.latentdeck.h3".to_owned()])
+                .expect("adapter list");
+            let hello = Envelope::new(
+                bootstrap.session_id,
+                1,
+                WireUuid::new_v4(),
+                1,
+                Message::Event(EventMessage {
+                    caused_by: None,
+                    event: Event::WorkerHello(WorkerHello {
+                        auth_token: bootstrap.auth_token,
+                        worker_version: "test-worker-0.1.0".to_owned(),
+                        protocol_min: WORKER_PROTOCOL_VERSION,
+                        protocol_max: WORKER_PROTOCOL_VERSION,
+                        pid: std::process::id(),
+                        os: "windows".to_owned(),
+                        arch: "x86_64".to_owned(),
+                        python_version: "test-runtime".to_owned(),
+                        available_adapters: adapters,
+                    }),
+                }),
+            );
+            write_envelope(&mut client, &hello)
+                .await
+                .expect("write hello");
+            tokio::time::sleep(Duration::from_millis(100)).await;
         });
     }
 

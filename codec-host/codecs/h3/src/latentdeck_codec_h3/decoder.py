@@ -146,7 +146,9 @@ class H3Decoder:
         """Bind one visual tensor; audio is never materialized by this runtime."""
 
         dtype = self._torch.float16 if source.storage_dtype == "F16" else self._torch.float32
-        cpu_video = self._torch.frombuffer(source.video_bytes, dtype=dtype).reshape(source.shape)
+        cpu_video = self._torch.frombuffer(bytearray(source.video_bytes), dtype=dtype).reshape(
+            source.shape
+        )
         self._source = source
         self._video = cpu_video
         self.reset()
@@ -157,6 +159,37 @@ class H3Decoder:
         self._cadence.reset()
         self._next_cycle_index = 0
 
+    def decode_slot(self, slot: Any) -> tuple[bytes, ...]:
+        """Decode one already-processed F16 H3 slot into RGBA8 frames.
+
+        This is the D2/Q4 pre-decode boundary. The caller owns latent math;
+        this method never converts RGB back into a latent or changes spatial
+        geometry.
+        """
+
+        if self._model is None:
+            raise CodecRuntimeError("H3 decoder is closed")
+        if (
+            not isinstance(slot, self._torch.Tensor)
+            or slot.ndim != 5
+            or tuple(slot.shape[:3]) != (1, 24, 1)
+            or slot.shape[3] <= 0
+            or slot.shape[4] <= 0
+        ):
+            raise CodecRuntimeError("processed H3 slot must be [1,24,1,H,W]")
+        if slot.dtype != self._torch.float16:
+            raise CodecRuntimeError("processed H3 slot runtime dtype must be F16")
+        if not bool(self._torch.isfinite(slot).all().item()):
+            raise CodecRuntimeError("processed H3 slot contains NaN or Inf")
+        model_slot = slot.permute(0, 2, 1, 3, 4).contiguous()
+        model_slot = model_slot.to(device=self._device, dtype=self._torch.float16)
+        frames: list[Any] = []
+        with self._torch.inference_mode():
+            frames.append(self._cadence.feed_slot(model_slot))
+            while (frame := self._cadence.pop_pending()) is not None:
+                frames.append(frame)
+            return self._rgba8(frames)
+
     def decode_cycle(self, cycle_index: int) -> DecodedCycle:
         """Decode exactly the next H3 cycle into interleaved RGBA8 frames."""
 
@@ -165,23 +198,18 @@ class H3Decoder:
         if cycle_index != self._next_cycle_index:
             raise CodecRuntimeError("decode cycle is out of order")
         timing = self._source.cycle(cycle_index)
-        frames: list[Any] = []
-        with self._torch.inference_mode():
-            for latent_index in range(
-                timing.latent_start,
-                timing.latent_start + timing.latent_count,
-            ):
-                slot = self._video[:, :, latent_index : latent_index + 1]
-                slot = slot.permute(0, 2, 1, 3, 4).contiguous()
-                slot = slot.to(device=self._device, dtype=self._torch.float16)
-                frames.append(self._cadence.feed_slot(slot))
-                while (frame := self._cadence.pop_pending()) is not None:
-                    frames.append(frame)
-            if len(frames) != timing.decoded_frame_count:
-                raise CodecRuntimeError("TAEH3 output violated the H3 cadence contract")
-            rgba_frames = self._rgba8(frames)
+        rgba_frames: list[bytes] = []
+        for latent_index in range(
+            timing.latent_start,
+            timing.latent_start + timing.latent_count,
+        ):
+            slot = self._video[:, :, latent_index : latent_index + 1]
+            slot = slot.to(dtype=self._torch.float16)
+            rgba_frames.extend(self.decode_slot(slot))
+        if len(rgba_frames) != timing.decoded_frame_count:
+            raise CodecRuntimeError("TAEH3 output violated the H3 cadence contract")
         self._next_cycle_index += 1
-        return DecodedCycle(timing=timing, rgba_frames=rgba_frames)
+        return DecodedCycle(timing=timing, rgba_frames=tuple(rgba_frames))
 
     def _rgba8(self, frames: list[Any]) -> tuple[bytes, ...]:
         rgb = self._torch.cat(frames, dim=1).squeeze(0)

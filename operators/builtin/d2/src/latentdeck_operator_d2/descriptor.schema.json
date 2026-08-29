@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latentdeck.org/schema/operator-descriptor/0.1.0",
+  "title": "LatentDeck Operator Descriptor 0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "operator_id",
+    "operator_version",
+    "trust",
+    "entrypoint",
+    "supported_profiles",
+    "algorithms",
+    "controls",
+    "limits"
+  ],
+  "properties": {
+    "schema_version": { "const": "0.1.0" },
+    "operator_id": { "const": "org.latentdeck.builtin.ld_d2" },
+    "operator_version": { "type": "string", "pattern": "^0\\.1\\.[0-9]+$" },
+    "trust": { "const": "builtin" },
+    "entrypoint": { "const": "latentdeck_operator_d2:process_slot" },
+    "supported_profiles": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "codec_family",
+          "profile",
+          "profile_version",
+          "timing_contract",
+          "timing_contract_version",
+          "layout",
+          "runtime_dtype"
+        ],
+        "properties": {
+          "codec_family": { "const": "minimax_h3" },
+          "profile": { "const": "h3_av_latent" },
+          "profile_version": { "const": "0.1.0" },
+          "timing_contract": { "const": "minimax_h3_causal" },
+          "timing_contract_version": { "const": "0.1.0" },
+          "layout": { "const": "[1,24,1,H,W]" },
+          "runtime_dtype": { "const": "F16" }
+        }
+      }
+    },
+    "algorithms": {
+      "type": "array",
+      "minItems": 6,
+      "uniqueItems": true,
+      "items": { "enum": ["LINEAR", "XS1", "XS2", "XS3", "XS4", "XS5"] }
+    },
+    "controls": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["type", "default"],
+        "properties": {
+          "type": { "enum": ["enum", "float", "integer"] },
+          "default": {},
+          "minimum": { "type": "number" },
+          "maximum": { "type": "number" },
+          "values": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_spatial_tokens", "top_k_max", "sinkhorn_iterations_max"],
+      "properties": {
+        "max_spatial_tokens": { "type": "integer", "minimum": 1 },
+        "top_k_max": { "type": "integer", "minimum": 1 },
+        "sinkhorn_iterations_max": { "type": "integer", "minimum": 2 }
+      }
+    }
+  }
+}

@@ -2045,12 +2045,20 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 name = "latentdeck-app"
 version = "0.1.0"
 dependencies = [
+ "latentdeck-cartridge",
+ "latentdeck-control",
  "latentdeck-core",
+ "latentdeck-gpu",
  "latentdeck-library",
+ "latentdeck-native-output",
+ "semver",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -2088,6 +2096,7 @@ version = "0.1.0"
 dependencies = [
  "rmp-serde",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "uuid",
 ]
@@ -2147,6 +2156,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "latentdeck-native-output"
+version = "0.1.0"
+dependencies = [
+ "latentdeck-gpu",
+ "tauri",
+ "thiserror 2.0.20",
+ "wgpu",
+]
+
+[[package]]
 name = "latentdeck-output-spout"
 version = "0.1.0"
 dependencies = [
@@ -2161,6 +2180,7 @@ dependencies = [
  "latentdeck-control",
  "latentdeck-core",
  "latentdeck-gpu",
+ "latentdeck-native-output",
  "serde",
  "tauri",
  "tauri-build",

@@ -13,6 +13,7 @@ tauri-build.workspace = true
 latentdeck-control = { path = "../../../crates/control" }
 latentdeck-core = { path = "../../../crates/core" }
 latentdeck-gpu = { path = "../../../crates/gpu" }
+latentdeck-native-output = { path = "../../../crates/native-output" }
 serde.workspace = true
 tauri = { workspace = true, features = ["unstable"] }
 tauri-plugin-dialog.workspace = true

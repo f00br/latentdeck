@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use latentdeck_core::codec_pack::{
     CodecPackErrorCode, discover_codec_packs, validate_external_asset,
 };
+use latentdeck_core::worker_supervisor::{ValidatedWorkerLaunch, WorkerSupervisorError};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -51,6 +52,7 @@ fn write_pack(root: &Path, id: &str, version: &str) -> PathBuf {
         "worker": {
             "executable": "bin/worker.exe",
             "arguments": ["--worker"],
+            "d2_arguments": ["--d2-worker"],
             "working_directory": "bin",
             "probe_timeout_ms": 5000
         },
@@ -103,6 +105,45 @@ fn discovers_a_fully_integrity_checked_h3_pack() {
 }
 
 #[test]
+fn selects_an_explicit_d2_worker_entrypoint_from_the_validated_pack() {
+    let root = TempDir::new().expect("root");
+    write_pack(root.path(), "org.latentdeck.h3", "0.1.0");
+    let pack = discover_codec_packs(&[root.path().to_path_buf()], "0.1.0")
+        .expect("validated pack")
+        .pop()
+        .expect("one pack");
+
+    assert_eq!(
+        pack.manifest.worker.d2_arguments.as_ref(),
+        Some(&vec!["--d2-worker".to_owned()])
+    );
+    ValidatedWorkerLaunch::from_codec_pack_d2(&pack).expect("explicit D2 entrypoint");
+}
+
+#[test]
+fn player_only_pack_stays_valid_but_cannot_be_launched_as_d2() {
+    let root = TempDir::new().expect("root");
+    let pack_path = write_pack(root.path(), "org.latentdeck.h3", "0.1.0");
+    mutate_manifest(&pack_path, |manifest| {
+        manifest["worker"]
+            .as_object_mut()
+            .expect("worker object")
+            .remove("d2_arguments");
+    });
+    let pack = discover_codec_packs(&[root.path().to_path_buf()], "0.1.0")
+        .expect("player-only pack remains valid")
+        .pop()
+        .expect("one pack");
+
+    let error = ValidatedWorkerLaunch::from_codec_pack_d2(&pack)
+        .expect_err("D2 requires its own declared entrypoint");
+    assert!(matches!(
+        error,
+        WorkerSupervisorError::WorkerEntrypointMissing("d2")
+    ));
+}
+
+#[test]
 fn blocks_unknown_fields_and_path_traversal_before_launch() {
     let unknown_root = TempDir::new().expect("unknown root");
     let unknown_pack = write_pack(unknown_root.path(), "org.latentdeck.h3", "0.1.0");
@@ -121,6 +162,21 @@ fn blocks_unknown_fields_and_path_traversal_before_launch() {
     let traversal = discover_codec_packs(&[traversal_root.path().to_path_buf()], "0.1.0")
         .expect_err("traversal");
     assert_eq!(traversal.code, CodecPackErrorCode::PathUnsafe.as_str());
+}
+
+#[test]
+fn blocks_an_empty_or_oversized_d2_entrypoint() {
+    for d2_arguments in [json!([]), json!(vec!["x"; 129])] {
+        let root = TempDir::new().expect("root");
+        let pack = write_pack(root.path(), "org.latentdeck.h3", "0.1.0");
+        mutate_manifest(&pack, |manifest| {
+            manifest["worker"]["d2_arguments"] = d2_arguments;
+        });
+
+        let error = discover_codec_packs(&[root.path().to_path_buf()], "0.1.0")
+            .expect_err("invalid D2 entrypoint");
+        assert_eq!(error.code, CodecPackErrorCode::ManifestInvalid.as_str());
+    }
 }
 
 #[test]

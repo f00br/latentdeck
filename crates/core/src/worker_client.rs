@@ -51,6 +51,11 @@ pub enum WorkerClientError {
     HeartbeatTimeout(CommandName),
     #[error("worker returned a reply for a different sequential command")]
     UnexpectedReply,
+    #[error("worker acknowledgement mismatch: expected {expected:?}, received {actual:?}")]
+    UnexpectedAck {
+        expected: CommandName,
+        actual: CommandName,
+    },
 }
 
 /// One-command-at-a-time client that consumes interleaved worker events.
@@ -82,6 +87,20 @@ impl WorkerClient {
     #[must_use]
     pub const fn session_id(&self) -> WireUuid {
         self.session.session_id()
+    }
+
+    /// Number of additional replies/events the authenticated session can
+    /// validate before the worker must be replaced deliberately.
+    #[must_use]
+    pub fn remaining_inbound_message_budget(&self) -> usize {
+        self.session.remaining_inbound_message_budget()
+    }
+
+    /// Number of additional commands the authenticated session can register
+    /// before the worker must be replaced deliberately.
+    #[must_use]
+    pub fn remaining_outbound_message_budget(&self) -> usize {
+        self.session.remaining_outbound_message_budget()
     }
 
     /// Borrow the authenticated worker process handle for one synchronous
@@ -125,6 +144,12 @@ impl WorkerClient {
     ) -> Result<Ack, WorkerClientError> {
         let command_name = command.name();
         let command_id = self.session.send_command(command).await?;
+        // This client intentionally has no background event pump. Heartbeats
+        // queued while the Deck is paused are consumed by the next call, so
+        // an idle period cannot count as a heartbeat failure for a command
+        // that did not yet exist. The hard timeout starts when this command
+        // becomes pending and is extended by later heartbeat events.
+        let command_started_at = Instant::now();
         let deadline = Instant::now() + command_timeout;
 
         loop {
@@ -133,9 +158,12 @@ impl WorkerClient {
             if remaining.is_zero() {
                 return Err(WorkerClientError::CommandTimeout(command_name));
             }
-            let heartbeat_remaining = self
-                .heartbeat_hard_timeout
-                .map(|heartbeat| (self.last_heartbeat + heartbeat).saturating_duration_since(now));
+            let heartbeat_remaining = heartbeat_remaining(
+                self.last_heartbeat,
+                command_started_at,
+                self.heartbeat_hard_timeout,
+                now,
+            );
             if heartbeat_remaining == Some(Duration::ZERO) {
                 return Err(WorkerClientError::HeartbeatTimeout(command_name));
             }
@@ -198,6 +226,21 @@ impl WorkerClient {
         self.session.force_kill().await.map_err(Into::into)
     }
 
+    /// Wait for the authenticated worker process to exit without changing its
+    /// protocol state or requesting termination.
+    ///
+    /// This wait is cancellation-safe: dropping the returned future leaves the
+    /// session usable for a later command or orderly shutdown. Once the process
+    /// has exited, repeated calls return the same cached, path-free exit result.
+    ///
+    /// # Errors
+    ///
+    /// Returns a supervisor error if operating-system process observation
+    /// fails.
+    pub async fn wait_for_exit(&mut self) -> Result<WorkerExit, WorkerClientError> {
+        self.session.wait_for_exit().await.map_err(Into::into)
+    }
+
     /// Request a typed orderly shutdown and require the worker process to
     /// actually exit before the deadline.
     ///
@@ -216,6 +259,18 @@ impl WorkerClient {
             .await
             .map_err(Into::into)
     }
+}
+
+fn heartbeat_remaining(
+    last_heartbeat: Instant,
+    command_started_at: Instant,
+    hard_timeout: Option<Duration>,
+    now: Instant,
+) -> Option<Duration> {
+    hard_timeout.map(|timeout| {
+        let pending_baseline = last_heartbeat.max(command_started_at);
+        (pending_baseline + timeout).saturating_duration_since(now)
+    })
 }
 
 #[cfg(test)]
@@ -240,5 +295,33 @@ mod tests {
         assert_eq!(remote.code, ErrorCode::CodecCudaUnavailable);
         assert_eq!(remote.diagnostic_id, diagnostic_id);
         assert!(!remote.fatal);
+    }
+
+    #[test]
+    fn idle_time_before_a_command_does_not_exhaust_its_heartbeat_window() {
+        let command_started_at = Instant::now();
+        let stale_heartbeat = command_started_at
+            .checked_sub(Duration::from_secs(30))
+            .expect("test instant supports a short subtraction");
+        let hard_timeout = Duration::from_secs(5);
+
+        assert_eq!(
+            heartbeat_remaining(
+                stale_heartbeat,
+                command_started_at,
+                Some(hard_timeout),
+                command_started_at,
+            ),
+            Some(hard_timeout)
+        );
+        assert_eq!(
+            heartbeat_remaining(
+                command_started_at + Duration::from_secs(2),
+                command_started_at,
+                Some(hard_timeout),
+                command_started_at + Duration::from_secs(3),
+            ),
+            Some(Duration::from_secs(4))
+        );
     }
 }

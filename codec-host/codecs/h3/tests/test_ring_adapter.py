@@ -121,6 +121,25 @@ def test_prime_and_steady_cycles_publish_as_one_preflighted_batch() -> None:
     assert ring.can_publish(5) is False
 
 
+def test_latent_deck_slot_publishes_one_to_four_frames_without_cycle_fiction() -> None:
+    ring = WindowsRingProducer.bind(
+        binding_payload(),
+        16,
+        16,
+        1,
+        native_producer_type=FakeNativeProducer,
+    )
+
+    assert ring.publish_frames(frames(1), stream_generation=1) == (1, 2)
+    assert ring.publish_frames(frames(4), stream_generation=1) == (2, 6)
+    with pytest.raises(H3RingError):
+        ring.publish_frames((), stream_generation=1)
+    with pytest.raises(H3RingError):
+        ring.publish_frames(frames(5), stream_generation=1)
+    with pytest.raises(H3RingError):
+        ring.publish_frames(frames(1), stream_generation=2)
+
+
 @pytest.mark.parametrize(
     ("frame_count", "cycle_index", "decoded_start"),
     [(4, 0, 0), (17, 0, 0), (5, 1, 5), (17, 2, 5)],

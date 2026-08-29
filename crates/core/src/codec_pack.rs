@@ -144,6 +144,11 @@ pub struct CompatibilityDescriptor {
 pub struct WorkerDescriptor {
     pub executable: String,
     pub arguments: Vec<String>,
+    /// Optional trusted entrypoint for the LD-D2 realtime worker. A pack may
+    /// omit it and remain usable by `LatentPlayer`, but the Deck must then report
+    /// D2 as unavailable instead of reusing the Player command implicitly.
+    #[serde(default)]
+    pub d2_arguments: Option<Vec<String>>,
     pub working_directory: String,
     pub probe_timeout_ms: u32,
 }
@@ -541,6 +546,11 @@ fn validate_manifest(
 
 fn validate_launch_and_assets(manifest: &CodecPackManifest) -> Result<(), CodecPackError> {
     if manifest.worker.arguments.len() > MAX_ARGUMENTS
+        || manifest
+            .worker
+            .d2_arguments
+            .as_ref()
+            .is_some_and(|arguments| arguments.is_empty() || arguments.len() > MAX_ARGUMENTS)
         || manifest.external_assets.len() > MAX_EXTERNAL_ASSETS
         || manifest.worker.probe_timeout_ms == 0
         || manifest.worker.probe_timeout_ms > 120_000
@@ -555,7 +565,13 @@ fn validate_launch_and_assets(manifest: &CodecPackManifest) -> Result<(), CodecP
     safe_relative_path(&manifest.license.notice_path)?;
     safe_relative_path(&manifest.integrity.catalog_path)?;
     validate_sha256(&manifest.integrity.catalog_sha256)?;
-    for argument in &manifest.worker.arguments {
+    for argument in manifest.worker.arguments.iter().chain(
+        manifest
+            .worker
+            .d2_arguments
+            .iter()
+            .flat_map(|arguments| arguments.iter()),
+    ) {
         if argument.is_empty() || argument.len() > 4096 || argument.contains('\0') {
             return Err(CodecPackError::new(
                 CodecPackErrorCode::ManifestInvalid,

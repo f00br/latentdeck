@@ -1,0 +1,16 @@
+[package]
+name = "latentdeck-native-output"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Reusable raw Tauri window and native DX12 presentation"
+
+[dependencies]
+latentdeck-gpu = { path = "../gpu" }
+tauri = { workspace = true, features = ["unstable"] }
+thiserror.workspace = true
+wgpu.workspace = true
+
+[lints]
+workspace = true

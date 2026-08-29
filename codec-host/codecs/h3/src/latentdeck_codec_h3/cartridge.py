@@ -10,6 +10,10 @@ import zipfile
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, BinaryIO
+
+if TYPE_CHECKING:
+    from .resample_spool import ResampleAudioSource
 
 MAX_ARCHIVE_BYTES = 16_123_953_152
 MAX_MANIFEST_BYTES = 1024 * 1024
@@ -36,6 +40,54 @@ class H3Cycle:
 
 
 @dataclass(frozen=True)
+class H3AudioSource:
+    """Exact carrier audio retained in its validated source archive."""
+
+    archive_path: Path
+    archive_sha256: str
+    storage_dtype: str
+    shape: tuple[int, int, int, int]
+    payload_data_offset: int
+    byte_length: int
+
+    def copy_to(self, destination: BinaryIO) -> int:
+        """Stream the exact audio range after rechecking the bound archive."""
+
+        with self.archive_path.open("rb") as archive_stream:
+            if _hash_stream(archive_stream) != self.archive_sha256:
+                raise CartridgeLoadError("cartridge archive hash changed after validation")
+            archive_stream.seek(0)
+            with zipfile.ZipFile(archive_stream, "r") as archive:
+                _validate_entries(archive.infolist())
+                with archive.open(H3_PAYLOAD, "r") as payload:
+                    payload.seek(self.payload_data_offset)
+                    remaining = self.byte_length
+                    written_total = 0
+                    while remaining:
+                        chunk = payload.read(min(64 * 1024, remaining))
+                        if not chunk:
+                            raise CartridgeLoadError("audio tensor ended before its declared range")
+                        written = destination.write(chunk)
+                        if written != len(chunk):
+                            raise CartridgeLoadError("audio destination write was incomplete")
+                        remaining -= len(chunk)
+                        written_total += written
+        return written_total
+
+    def to_resample_source(self) -> ResampleAudioSource:
+        """Create the generic bounded-spool audio descriptor lazily."""
+
+        from .resample_spool import ResampleAudioSource
+
+        return ResampleAudioSource(
+            storage_dtype=self.storage_dtype,
+            shape=self.shape,
+            byte_length=self.byte_length,
+            copy_to=self.copy_to,
+        )
+
+
+@dataclass(frozen=True)
 class H3VideoSource:
     """Only the visual tensor bytes and validated presentation metadata."""
 
@@ -49,6 +101,7 @@ class H3VideoSource:
     frame_count: int
     frame_rate_numerator: int
     frame_rate_denominator: int
+    audio: H3AudioSource | None = None
 
     @property
     def latent_slot_count(self) -> int:
@@ -96,6 +149,7 @@ def load_video_source(path: str | Path, expected_archive_sha256: str) -> H3Video
         _validate_entries(entries)
         manifest = _read_json_entry(archive, "manifest.json", MAX_MANIFEST_BYTES)
         visual = _visual_manifest_descriptor(manifest)
+        audio_manifest = _audio_manifest_descriptor(manifest)
         payload_info = archive.getinfo(H3_PAYLOAD)
         with archive.open(payload_info, "r") as payload:
             header_length = struct.unpack("<Q", _read_exact(payload, 8))[0]
@@ -116,6 +170,14 @@ def load_video_source(path: str | Path, expected_archive_sha256: str) -> H3Video
                 raise CartridgeLoadError("manifest and Safetensors video descriptors disagree")
             payload.seek(8 + header_length + offsets[0])
             video_bytes = _read_exact(payload, expected_bytes)
+            audio = _load_audio_source(
+                archive_path=archive_path,
+                archive_sha256=actual_archive_sha256,
+                header=header,
+                manifest_descriptor=audio_manifest,
+                payload_bytes=payload_info.file_size,
+                header_length=header_length,
+            )
 
     timing = _object(manifest.get("timing"), "timing")
     decoded = _object(timing.get("decoded_video"), "decoded video")
@@ -133,6 +195,7 @@ def load_video_source(path: str | Path, expected_archive_sha256: str) -> H3Video
         frame_rate_denominator=_positive_int(
             frame_rate.get("denominator"), "frame-rate denominator"
         ),
+        audio=audio,
     )
     _validate_h3_source(source)
     return source
@@ -191,12 +254,82 @@ def _visual_manifest_descriptor(manifest: dict[str, object]) -> dict[str, object
     return descriptor
 
 
+def _audio_manifest_descriptor(manifest: dict[str, object]) -> dict[str, object] | None:
+    tensors = manifest.get("tensors")
+    if not isinstance(tensors, list):
+        raise CartridgeLoadError("manifest tensors must be an array")
+    audio = [
+        _object(tensor, "tensor descriptor")
+        for tensor in tensors
+        if isinstance(tensor, dict) and tensor.get("name") == "audio"
+    ]
+    if len(audio) > 1:
+        raise CartridgeLoadError("manifest describes duplicate audio tensors")
+    if not audio:
+        return None
+    descriptor = audio[0]
+    if descriptor.get("stream") != "audio" or descriptor.get("payload") != H3_PAYLOAD:
+        raise CartridgeLoadError("manifest audio tensor does not reference the H3 payload")
+    return descriptor
+
+
+def _load_audio_source(
+    *,
+    archive_path: Path,
+    archive_sha256: str,
+    header: dict[str, object],
+    manifest_descriptor: dict[str, object] | None,
+    payload_bytes: int,
+    header_length: int,
+) -> H3AudioSource | None:
+    raw_tensor = header.get("audio")
+    if raw_tensor is None and manifest_descriptor is None:
+        return None
+    if raw_tensor is None or manifest_descriptor is None:
+        raise CartridgeLoadError("manifest and Safetensors audio presence disagree")
+    tensor = _object(raw_tensor, "Safetensors audio descriptor")
+    dtype = tensor.get("dtype")
+    if dtype not in {"F16", "F32"}:
+        raise CartridgeLoadError("Safetensors audio dtype is unsupported")
+    shape = _audio_shape(tensor.get("shape"))
+    offsets = _offsets(tensor.get("data_offsets"))
+    byte_width = 2 if dtype == "F16" else 4
+    expected_bytes = math.prod(shape) * byte_width
+    if offsets[1] - offsets[0] != expected_bytes:
+        raise CartridgeLoadError("Safetensors audio range disagrees with its shape")
+    if (
+        manifest_descriptor.get("storage_dtype") != dtype
+        or tuple(manifest_descriptor.get("shape", ())) != shape
+    ):
+        raise CartridgeLoadError("manifest and Safetensors audio descriptors disagree")
+    data_region_bytes = payload_bytes - 8 - header_length
+    if offsets[1] > data_region_bytes:
+        raise CartridgeLoadError("Safetensors audio range exceeds the payload")
+    return H3AudioSource(
+        archive_path=archive_path,
+        archive_sha256=archive_sha256,
+        storage_dtype=str(dtype),
+        shape=shape,
+        payload_data_offset=8 + header_length + offsets[0],
+        byte_length=expected_bytes,
+    )
+
+
 def _shape(value: object) -> tuple[int, int, int, int, int]:
     if not isinstance(value, list) or len(value) != 5:
         raise CartridgeLoadError("H3 video shape must have five axes")
     axes = tuple(_positive_int(axis, "video shape axis") for axis in value)
     if axes[0] != 1 or axes[1] != 24 or axes[2] < 2 or (axes[2] - 2) % 5:
         raise CartridgeLoadError("H3 video shape must be [1,24,2+5n,H,W]")
+    return axes  # type: ignore[return-value]
+
+
+def _audio_shape(value: object) -> tuple[int, int, int, int]:
+    if not isinstance(value, list) or len(value) != 4:
+        raise CartridgeLoadError("H3 audio shape must have four axes")
+    axes = tuple(_positive_int(axis, "audio shape axis") for axis in value)
+    if axes[:3] != (1, 32, 2):
+        raise CartridgeLoadError("H3 audio shape must be [1,32,2,T]")
     return axes  # type: ignore[return-value]
 
 
@@ -220,13 +353,21 @@ def _validate_h3_source(source: H3VideoSource) -> None:
         raise CartridgeLoadError("manifest decoded geometry disagrees with H3 spatial cadence")
     if source.frame_rate_numerator != 24 or source.frame_rate_denominator != 1:
         raise CartridgeLoadError("LatentDeck H3 playback requires the 24 fps profile")
+    if source.audio is not None:
+        expected_audio_slots = (source.frame_count * 5 + 1) // 3
+        if source.audio.shape[3] != expected_audio_slots:
+            raise CartridgeLoadError("audio latent length disagrees with H3 cadence")
 
 
 def _hash_path(path: Path) -> str:
-    digest = hashlib.sha256()
     with path.open("rb") as stream:
-        while chunk := stream.read(64 * 1024):
-            digest.update(chunk)
+        return _hash_stream(stream)
+
+
+def _hash_stream(stream: BinaryIO) -> str:
+    digest = hashlib.sha256()
+    while chunk := stream.read(64 * 1024):
+        digest.update(chunk)
     return digest.hexdigest()
 
 

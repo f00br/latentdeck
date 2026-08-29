@@ -17,7 +17,10 @@
     type LibraryView,
     type ReindexSummary,
   } from "./library-model";
+  import D2Faceplate from "./D2Faceplate.svelte";
   import { product } from "./product";
+
+  type AppSurface = "library" | "d2";
 
   let view: LibraryView = EMPTY_LIBRARY_VIEW;
   let search = "";
@@ -30,6 +33,7 @@
   let renameDraft = "";
   let tagDrafts: Record<string, string> = {};
   let membershipTargets: Record<string, string> = {};
+  let activeSurface: AppSurface = "library";
 
   let activeCollection: CollectionView | undefined;
   let persistedCollections: CollectionView[] = [];
@@ -43,6 +47,14 @@
   onMount(() => {
     void initialLoad();
   });
+
+  async function selectSurface(surface: AppSurface): Promise<void> {
+    activeSurface = surface;
+    if (surface === "library") {
+      errorMessage = "";
+      await initialLoad();
+    }
+  }
 
   async function initialLoad(): Promise<void> {
     busy = true;
@@ -333,10 +345,16 @@
 </script>
 
 <svelte:head>
-  <title>{product.name} — Library</title>
+  <title
+    >{product.name} — {activeSurface === "library" ? "Library" : "LD-D2"}</title
+  >
 </svelte:head>
 
-<main class="instrument-shell" aria-busy={busy}>
+<main
+  class="instrument-shell"
+  class:d2-active={activeSurface === "d2"}
+  aria-busy={busy}
+>
   <header class="top-rail">
     <div class="identity">
       <span class="status-lamp" class:working={busy}></span>
@@ -352,6 +370,29 @@
       <small>cartridges</small>
     </div>
   </header>
+
+  <nav class="surface-tabs" aria-label="LatentDeck workspace">
+    <button
+      type="button"
+      class:active={activeSurface === "library"}
+      aria-current={activeSurface === "library" ? "page" : undefined}
+      onclick={() => void selectSurface("library")}
+    >
+      <span>01</span>
+      <strong>Library</strong>
+      <small>Cartridges · Collections</small>
+    </button>
+    <button
+      type="button"
+      class:active={activeSurface === "d2"}
+      aria-current={activeSurface === "d2" ? "page" : undefined}
+      onclick={() => void selectSurface("d2")}
+    >
+      <span>02</span>
+      <strong>LD-D2</strong>
+      <small>Dual-source synthesis</small>
+    </button>
+  </nav>
 
   <section class="command-rail" aria-label="Library commands">
     <button
@@ -753,4 +794,7 @@
       </div>
     </aside>
   </div>
+  {#if activeSurface === "d2"}
+    <D2Faceplate />
+  {/if}
 </main>

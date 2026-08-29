@@ -67,8 +67,7 @@ def _record_diagnostic(
                 if diagnostic_code is not None:
                     safe_code = diagnostic_code.replace("\0", "")[:64]
                     if safe_code and all(
-                        character.isascii()
-                        and (character.isalnum() or character in "._-")
+                        character.isascii() and (character.isalnum() or character in "._-")
                         for character in safe_code
                     ):
                         record["cause_code"] = safe_code
@@ -95,6 +94,21 @@ class Connector(Protocol):
     """Connect to the supervisor-created local control transport."""
 
     def connect(self, pipe_name: str) -> Connection: ...
+
+
+class WorkerSessionState(Protocol):
+    """State surface shared by Player and deck-specific H3 workers."""
+
+    @property
+    def shutdown_requested(self) -> bool: ...
+
+    def handle(self, name: str, payload: Mapping[str, object]) -> dict[str, object]: ...
+
+    def status(self) -> dict[str, object]: ...
+
+    def heartbeat(self, last_completed_core_sequence: int) -> dict[str, object]: ...
+
+    def close(self) -> None: ...
 
 
 class StreamConnection:
@@ -161,7 +175,7 @@ class _HeartbeatPump:
         *,
         writer: EnvelopeWriter,
         writer_lock: threading.RLock,
-        state: H3WorkerState,
+        state: WorkerSessionState,
         progress: _SessionProgress,
         interval_ms: int,
         on_failure: Callable[[], None],
@@ -217,7 +231,7 @@ def _hello_payload(auth_token: bytes) -> dict[str, object]:
     }
 
 
-def _fault_payload(state: H3WorkerState, code: str, message: str) -> dict[str, object]:
+def _fault_payload(state: WorkerSessionState, code: str, message: str) -> dict[str, object]:
     return {
         "code": code,
         "message": message,
@@ -271,7 +285,7 @@ def run_worker(
     stdin: BinaryIO,
     *,
     connector: Connector | None = None,
-    state_factory: Callable[[], H3WorkerState] = H3WorkerState,
+    state_factory: Callable[[], WorkerSessionState] = H3WorkerState,
 ) -> int:
     """Run one authenticated worker session until shutdown or fatal failure."""
 
@@ -473,6 +487,7 @@ __all__ = [
     "Connection",
     "Connector",
     "StreamConnection",
+    "WorkerSessionState",
     "WindowsNamedPipeConnector",
     "run_worker",
 ]

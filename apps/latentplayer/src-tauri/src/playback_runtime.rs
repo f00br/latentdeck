@@ -235,7 +235,9 @@ mod windows {
         AppHandle, Arc, CartridgeSummary, Duration, Mutex, PlaybackLaunchConfig,
         PlaybackRuntimeError, PlayerCoordinator, PlayerView, ResizeOutcome, ValidatedCodecPack,
     };
-    use crate::native_output::{NativeOutput, NativeOutputConfig, PresentOutcome};
+    use crate::native_output::{
+        NativeOutput, NativeOutputError, PresentOutcome, native_output_config,
+    };
 
     const CHANNEL_CAPACITY: usize = 8;
     const ACTOR_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -591,7 +593,7 @@ mod windows {
             .open_consumer()
             .map_err(|_| PlaybackRuntimeError::ring())?;
         let mut owner = bind_ring(client, owner).await?;
-        let output = NativeOutput::new(app, NativeOutputConfig::new(slot.width, slot.height))
+        let output = NativeOutput::new(app, native_output_config(slot.width, slot.height))
             .await
             .map_err(|error| PlaybackRuntimeError::output(error.code()))?;
         if output.frame_dimensions() != (slot.width, slot.height)
@@ -1126,9 +1128,10 @@ mod windows {
                         .output
                         .hide()
                         .and_then(|()| {
-                            self.output.window().destroy().map_err(|_| {
-                                crate::native_output::NativeOutputError::WindowVisibility
-                            })
+                            self.output
+                                .window()
+                                .destroy()
+                                .map_err(|_| NativeOutputError::WindowVisibility)
                         })
                         .map(|()| PresenterReply::Unit)
                         .map_err(|error| PlaybackRuntimeError::output(error.code()));
@@ -1444,6 +1447,7 @@ mod windows {
             WorkerClientError::Supervisor(_)
             | WorkerClientError::CommandTimeout(_)
             | WorkerClientError::HeartbeatTimeout(_)
+            | WorkerClientError::UnexpectedAck { .. }
             | WorkerClientError::UnexpectedReply => PlaybackRuntimeError::worker_protocol(),
         }
     }

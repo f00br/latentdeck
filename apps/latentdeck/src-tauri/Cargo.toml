@@ -10,11 +10,21 @@ description = "LatentDeck desktop synthesis instrument"
 tauri-build.workspace = true
 
 [dependencies]
+latentdeck-cartridge = { path = "../../../crates/cartridge" }
+latentdeck-control = { path = "../../../crates/control" }
 latentdeck-core = { path = "../../../crates/core" }
+latentdeck-gpu = { path = "../../../crates/gpu" }
 latentdeck-library = { path = "../../../crates/library" }
+latentdeck-native-output = { path = "../../../crates/native-output" }
+semver.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tauri.workspace = true
 tauri-plugin-dialog.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

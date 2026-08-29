@@ -25,6 +25,28 @@ MAX_MAP_FIELDS = 64
 MAX_ARRAY_ITEMS = 256
 MAX_STRING_BYTES = 32_768
 MAX_BINARY_BYTES = 64
+MAX_D2_CAPTURE_LATENT_SLOTS = 1_048_576
+MAX_D2_CAPTURE_VISUAL_BYTES = 15 * 1024 * 1024 * 1024
+
+D2_CONTROL_FIELDS = {
+    "algorithm",
+    "mix",
+    "mode",
+    "routing",
+    "interaction",
+    "preserve",
+    "chaos",
+    "xs1_channel_a",
+    "xs1_channel_b",
+    "xs1_angle_degrees",
+    "xs2_radius",
+    "xs3_high_gain",
+    "xs4_epsilon",
+    "xs5_routing",
+    "temperature",
+    "top_k",
+    "sinkhorn_iterations",
+}
 
 
 class ProtocolError(ValueError):
@@ -279,6 +301,35 @@ def _validate_command_payload(name: str, payload: Mapping[str, object]) -> None:
             "frames_ready_event_handle",
             "ring_id",
         },
+        "deck.d2.load": {
+            "deck_id",
+            "operator_id",
+            "operator_version",
+            "source_a",
+            "source_b",
+            "controls",
+            "transport",
+            "seed",
+            "stream_generation",
+        },
+        "deck.d2.process_slot": {"deck_id", "deck_revision", "stream_generation"},
+        "deck.d2.reset": {"deck_id", "deck_revision", "new_stream_generation"},
+        "deck.d2.restart": {"deck_id", "deck_revision"},
+        "deck.d2.controls.set": {"deck_id", "deck_revision", "controls"},
+        "deck.d2.transport.set": {"deck_id", "deck_revision", "transport"},
+        "deck.d2.seed.set": {"deck_id", "deck_revision", "seed"},
+        "deck.d2.status": set(),
+        "deck.d2.capture.start": {
+            "deck_id",
+            "deck_revision",
+            "capture_id",
+            "mode",
+            "temporary_root",
+            "max_latent_slots",
+            "max_visual_bytes",
+        },
+        "deck.d2.capture.stop": {"deck_id", "deck_revision", "capture_id"},
+        "deck.d2.capture.status": {"deck_id", "deck_revision", "capture_id"},
         "worker.status": set(),
         "metrics.get": set(),
         "worker.shutdown": {"reason"},
@@ -302,6 +353,139 @@ def _validate_command_payload(name: str, payload: Mapping[str, object]) -> None:
                 {"asset_id", "path", "sha256", "byte_length"},
                 "codec asset",
             )
+    elif name == "deck.d2.load":
+        _text(payload["deck_id"], "deck_id", 128)
+        _text(payload["operator_id"], "operator_id", 128)
+        _text(payload["operator_version"], "operator_version", 128)
+        _validate_d2_source(payload["source_a"], "source_a")
+        _validate_d2_source(payload["source_b"], "source_b")
+        _validate_d2_controls(payload["controls"])
+        _validate_d2_transport(payload["transport"])
+        _safe_seed(payload["seed"], "seed")
+        _positive_int(payload["stream_generation"], "stream_generation")
+    elif name == "deck.d2.process_slot":
+        _validate_d2_identity(payload, generation_field="stream_generation")
+    elif name == "deck.d2.reset":
+        _validate_d2_identity(payload, generation_field="new_stream_generation")
+    elif name == "deck.d2.restart":
+        _validate_d2_identity(payload)
+    elif name == "deck.d2.controls.set":
+        _validate_d2_identity(payload)
+        _validate_d2_controls(payload["controls"])
+    elif name == "deck.d2.transport.set":
+        _validate_d2_identity(payload)
+        _validate_d2_transport(payload["transport"])
+    elif name == "deck.d2.seed.set":
+        _validate_d2_identity(payload)
+        _safe_seed(payload["seed"], "seed")
+    elif name == "deck.d2.capture.start":
+        _validate_d2_capture_identity(payload)
+        _enum(payload["mode"], "capture mode", {"snapshot", "live_capture"})
+        _text(payload["temporary_root"], "temporary_root", MAX_STRING_BYTES)
+        _bounded_int(
+            payload["max_latent_slots"],
+            "max_latent_slots",
+            2,
+            MAX_D2_CAPTURE_LATENT_SLOTS,
+        )
+        _bounded_int(
+            payload["max_visual_bytes"],
+            "max_visual_bytes",
+            1,
+            MAX_D2_CAPTURE_VISUAL_BYTES,
+        )
+    elif name in {"deck.d2.capture.stop", "deck.d2.capture.status"}:
+        _validate_d2_capture_identity(payload)
+
+
+def _validate_d2_identity(
+    payload: Mapping[str, object], *, generation_field: str | None = None
+) -> None:
+    _text(payload["deck_id"], "deck_id", 128)
+    _positive_int(payload["deck_revision"], "deck_revision")
+    if generation_field is not None:
+        _positive_int(payload[generation_field], generation_field)
+
+
+def _validate_d2_capture_identity(payload: Mapping[str, object]) -> None:
+    _validate_d2_identity(payload)
+    _uuid(payload["capture_id"], "capture_id")
+
+
+def _validate_d2_source(raw: object, label: str) -> None:
+    source = _mapping(raw, label)
+    _exact_keys(
+        source,
+        {"cartridge_path", "cartridge_id", "expected_archive_sha256"},
+        label,
+    )
+    _text(source["cartridge_path"], f"{label}.cartridge_path", MAX_STRING_BYTES)
+    _uuid(source["cartridge_id"], f"{label}.cartridge_id")
+    digest = _text(source["expected_archive_sha256"], f"{label}.sha256", 64)
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise ProtocolError(f"{label}.sha256 is not canonical")
+
+
+def _validate_d2_controls(raw: object) -> None:
+    controls = _mapping(raw, "D2 controls")
+    _exact_keys(controls, D2_CONTROL_FIELDS, "D2 controls")
+    _enum(controls["algorithm"], "algorithm", {"LINEAR", "XS1", "XS2", "XS3", "XS4", "XS5"})
+    _number(controls["mix"], "mix", 0.0, 1.0)
+    _enum(controls["mode"], "mode", {"HYBRIDIZE", "INTERACT"})
+    _enum(controls["routing"], "routing", {"A", "B"})
+    _number(controls["interaction"], "interaction", 0.0, 1.0)
+    _number(controls["preserve"], "preserve", 0.0, 1.0)
+    _number(controls["chaos"], "chaos", 0.0, 1.0)
+    _bounded_int(controls["xs1_channel_a"], "xs1_channel_a", 0, 23)
+    _bounded_int(controls["xs1_channel_b"], "xs1_channel_b", 0, 23)
+    if controls["xs1_channel_a"] == controls["xs1_channel_b"]:
+        raise ProtocolError("D2 XS1 channels must differ")
+    _number(controls["xs1_angle_degrees"], "xs1_angle_degrees", -180.0, 180.0)
+    _bounded_int(controls["xs2_radius"], "xs2_radius", 1, 8)
+    _number(controls["xs3_high_gain"], "xs3_high_gain", -2.0, 2.0)
+    _number(controls["xs4_epsilon"], "xs4_epsilon", 1e-8, 1e-3)
+    _enum(controls["xs5_routing"], "xs5_routing", {"TOPK", "SINKHORN"})
+    _number(controls["temperature"], "temperature", 0.02, 1.0)
+    _bounded_int(controls["top_k"], "top_k", 1, 64)
+    _bounded_int(controls["sinkhorn_iterations"], "sinkhorn_iterations", 2, 12)
+
+
+def _validate_d2_transport(raw: object) -> None:
+    transport = _mapping(raw, "D2 transport")
+    _exact_keys(
+        transport,
+        {"playing_a", "playing_b", "loop_a", "loop_b"},
+        "D2 transport",
+    )
+    if not all(isinstance(transport[name], bool) for name in transport):
+        raise ProtocolError("D2 transport fields must be boolean")
+
+
+def _enum(value: object, label: str, allowed: set[str]) -> str:
+    text = _text(value, label, 128)
+    if text not in allowed:
+        raise ProtocolError(f"{label} is outside the closed enum")
+    return text
+
+
+def _number(value: object, label: str, minimum: float, maximum: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ProtocolError(f"{label} must be numeric")
+    parsed = float(value)
+    if not math.isfinite(parsed) or not minimum <= parsed <= maximum:
+        raise ProtocolError(f"{label} is outside its finite bound")
+    return parsed
+
+
+def _bounded_int(value: object, label: str, minimum: int, maximum: int) -> int:
+    integer = _nonnegative_int(value, label)
+    if not minimum <= integer <= maximum:
+        raise ProtocolError(f"{label} is outside its integer bound")
+    return integer
+
+
+def _safe_seed(value: object, label: str) -> int:
+    return _bounded_int(value, label, 0, 9_007_199_254_740_991)
 
 
 def _encode_length_prefixed(value: Mapping[str, object], maximum: int) -> bytes:

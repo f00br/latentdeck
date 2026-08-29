@@ -49,6 +49,18 @@ impl WorkerSession {
         unreachable!("unsupported platform")
     }
 
+    /// Number of additional worker replies/events this session can validate.
+    #[must_use]
+    pub fn remaining_inbound_message_budget(&self) -> usize {
+        unreachable!("unsupported platform")
+    }
+
+    /// Number of additional Core commands this session can register.
+    #[must_use]
+    pub fn remaining_outbound_message_budget(&self) -> usize {
+        unreachable!("unsupported platform")
+    }
+
     pub async fn send_command(
         &mut self,
         _command: Command,

@@ -35,8 +35,16 @@ try {
     Invoke-Checked { & $pnpm test } 'Frontend tests'
     Invoke-Checked { & $pnpm build } 'Frontend builds'
     Invoke-Checked { uv lock --check } 'uv lock'
-    Invoke-Checked { uv sync --all-packages --no-editable --locked } 'Python lock/install'
-    Invoke-Checked { uv run --no-sync ruff check pyproject.toml codec-host comfy/latent-cartridge sdk/python } 'Python lint'
+    Invoke-Checked {
+        uv sync --all-packages --all-extras --no-editable --locked `
+            --reinstall-package latentdeck-cartridge `
+            --reinstall-package latentdeck-codec-h3 `
+            --reinstall-package latentdeck-codec-host `
+            --reinstall-package latentdeck-comfy-cartridge `
+            --reinstall-package latentdeck-operator-d2 `
+            --reinstall-package latentdeck-rgb-ring
+    } 'Python lock/install'
+    Invoke-Checked { uv run --no-sync ruff check pyproject.toml codec-host comfy/latent-cartridge operators sdk/python } 'Python lint'
     Invoke-Checked { uv run --no-sync pytest } 'Python tests'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-PublicTree.ps1 } 'Public-tree audit'
     Invoke-Checked { git diff --check } 'Working-tree whitespace'

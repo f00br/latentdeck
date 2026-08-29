@@ -183,6 +183,7 @@ $manifest = [ordered]@{
     worker           = [ordered]@{
         executable       = 'runtime/python.exe'
         arguments        = @('-s', '-m', 'latentdeck_codec_h3.worker')
+        d2_arguments     = @('-s', '-m', 'latentdeck_codec_h3.d2_worker')
         working_directory = 'runtime'
         probe_timeout_ms = 120000
     }

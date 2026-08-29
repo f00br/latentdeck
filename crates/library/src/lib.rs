@@ -7,10 +7,12 @@ mod error;
 mod import;
 mod migrations;
 mod model;
+mod resolver;
 
 pub use error::{ErrorCode, LibraryError, Result};
 pub use migrations::SCHEMA_VERSION;
 pub use model::*;
+pub use resolver::{DeckSourceIdentity, MAX_DECK_SOURCE_PATH_CANDIDATES, ResolvedDeckSource};
 
 use rusqlite::Connection;
 

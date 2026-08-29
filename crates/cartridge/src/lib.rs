@@ -8,6 +8,7 @@ pub mod manifest;
 pub mod preview;
 pub mod profile;
 pub mod reader;
+pub mod resample;
 pub mod safetensor;
 pub mod writer;
 

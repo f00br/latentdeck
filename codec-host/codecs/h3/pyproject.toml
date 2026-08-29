@@ -6,15 +6,19 @@ requires-python = ">=3.13,<3.14"
 license = "Apache-2.0"
 dependencies = [
     "latentdeck-codec-host==0.1.0",
+    "latentdeck-operator-d2==0.1.0",
     "latentdeck-rgb-ring==0.1.0",
     "safetensors==0.8.0",
 ]
 
 [project.scripts]
 latentdeck-h3-worker = "latentdeck_codec_h3.worker:main"
+latentdeck-h3-d2-worker = "latentdeck_codec_h3.d2_worker:main"
 
 [project.optional-dependencies]
 cu130 = [
+    "latentdeck-operator-d2[cu130]==0.1.0",
+    "numpy==2.5.2",
     "torch==2.13.0",
     "tqdm==4.70.0",
 ]

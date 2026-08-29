@@ -12,6 +12,12 @@ use serde::{
 use thiserror::Error;
 use uuid::Uuid;
 
+use super::d2::{
+    D2ControlsSet, D2ControlsSetAck, D2Load, D2ProcessSlot, D2ProcessSlotAck, D2Reset, D2ResetAck,
+    D2Restart, D2RestartAck, D2SeedSet, D2SeedSetAck, D2Status, D2TransportSet, D2TransportSetAck,
+};
+use super::d2_capture::{D2CaptureStart, D2CaptureStatus, D2CaptureStatusRequest, D2CaptureStop};
+
 pub const WORKER_PROTOCOL_VERSION: u16 = 1;
 pub const MAX_CONTROL_FRAME_BYTES: u32 = 262_144;
 pub const MAX_MESSAGES_PER_SESSION: usize = 65_536;
@@ -330,6 +336,28 @@ pub enum CommandName {
     SlotDecodeCycle,
     #[serde(rename = "ring.bind")]
     RingBind,
+    #[serde(rename = "deck.d2.load")]
+    DeckD2Load,
+    #[serde(rename = "deck.d2.process_slot")]
+    DeckD2ProcessSlot,
+    #[serde(rename = "deck.d2.reset")]
+    DeckD2Reset,
+    #[serde(rename = "deck.d2.restart")]
+    DeckD2Restart,
+    #[serde(rename = "deck.d2.controls.set")]
+    DeckD2ControlsSet,
+    #[serde(rename = "deck.d2.transport.set")]
+    DeckD2TransportSet,
+    #[serde(rename = "deck.d2.seed.set")]
+    DeckD2SeedSet,
+    #[serde(rename = "deck.d2.status")]
+    DeckD2Status,
+    #[serde(rename = "deck.d2.capture.start")]
+    DeckD2CaptureStart,
+    #[serde(rename = "deck.d2.capture.stop")]
+    DeckD2CaptureStop,
+    #[serde(rename = "deck.d2.capture.status")]
+    DeckD2CaptureStatus,
     #[serde(rename = "worker.status")]
     WorkerStatus,
     #[serde(rename = "metrics.get")]
@@ -355,6 +383,28 @@ pub enum Command {
     SlotDecodeCycle(SlotDecodeCycle),
     #[serde(rename = "ring.bind")]
     RingBind(RingBind),
+    #[serde(rename = "deck.d2.load")]
+    DeckD2Load(D2Load),
+    #[serde(rename = "deck.d2.process_slot")]
+    DeckD2ProcessSlot(D2ProcessSlot),
+    #[serde(rename = "deck.d2.reset")]
+    DeckD2Reset(D2Reset),
+    #[serde(rename = "deck.d2.restart")]
+    DeckD2Restart(D2Restart),
+    #[serde(rename = "deck.d2.controls.set")]
+    DeckD2ControlsSet(D2ControlsSet),
+    #[serde(rename = "deck.d2.transport.set")]
+    DeckD2TransportSet(D2TransportSet),
+    #[serde(rename = "deck.d2.seed.set")]
+    DeckD2SeedSet(D2SeedSet),
+    #[serde(rename = "deck.d2.status")]
+    DeckD2Status(EmptyPayload),
+    #[serde(rename = "deck.d2.capture.start")]
+    DeckD2CaptureStart(D2CaptureStart),
+    #[serde(rename = "deck.d2.capture.stop")]
+    DeckD2CaptureStop(D2CaptureStop),
+    #[serde(rename = "deck.d2.capture.status")]
+    DeckD2CaptureStatus(D2CaptureStatusRequest),
     #[serde(rename = "worker.status")]
     WorkerStatus(EmptyPayload),
     #[serde(rename = "metrics.get")]
@@ -374,6 +424,17 @@ impl Command {
             Self::SlotReset(_) => CommandName::SlotReset,
             Self::SlotDecodeCycle(_) => CommandName::SlotDecodeCycle,
             Self::RingBind(_) => CommandName::RingBind,
+            Self::DeckD2Load(_) => CommandName::DeckD2Load,
+            Self::DeckD2ProcessSlot(_) => CommandName::DeckD2ProcessSlot,
+            Self::DeckD2Reset(_) => CommandName::DeckD2Reset,
+            Self::DeckD2Restart(_) => CommandName::DeckD2Restart,
+            Self::DeckD2ControlsSet(_) => CommandName::DeckD2ControlsSet,
+            Self::DeckD2TransportSet(_) => CommandName::DeckD2TransportSet,
+            Self::DeckD2SeedSet(_) => CommandName::DeckD2SeedSet,
+            Self::DeckD2Status(_) => CommandName::DeckD2Status,
+            Self::DeckD2CaptureStart(_) => CommandName::DeckD2CaptureStart,
+            Self::DeckD2CaptureStop(_) => CommandName::DeckD2CaptureStop,
+            Self::DeckD2CaptureStatus(_) => CommandName::DeckD2CaptureStatus,
             Self::WorkerStatus(_) => CommandName::WorkerStatus,
             Self::MetricsGet(_) => CommandName::MetricsGet,
             Self::WorkerShutdown(_) => CommandName::WorkerShutdown,
@@ -384,6 +445,7 @@ impl Command {
         match self {
             Self::SessionConfigure(value) => value.validate(),
             Self::CodecInspect(_)
+            | Self::DeckD2Status(_)
             | Self::WorkerStatus(_)
             | Self::MetricsGet(_)
             | Self::WorkerShutdown(_) => Ok(()),
@@ -392,6 +454,16 @@ impl Command {
             Self::SlotReset(value) => value.validate(),
             Self::SlotDecodeCycle(value) => value.validate(),
             Self::RingBind(value) => value.validate(),
+            Self::DeckD2Load(value) => value.validate(),
+            Self::DeckD2ProcessSlot(value) => value.validate(),
+            Self::DeckD2Reset(value) => value.validate(),
+            Self::DeckD2Restart(value) => value.validate(),
+            Self::DeckD2ControlsSet(value) => value.validate(),
+            Self::DeckD2TransportSet(value) => value.validate(),
+            Self::DeckD2SeedSet(value) => value.validate(),
+            Self::DeckD2CaptureStart(value) => value.validate(),
+            Self::DeckD2CaptureStop(value) => value.validate(),
+            Self::DeckD2CaptureStatus(value) => value.validate(),
         }
     }
 }
@@ -429,6 +501,28 @@ pub enum Ack {
     SlotDecodeCycle(DecodeCycleAck),
     #[serde(rename = "ring.bind")]
     RingBind(RingBound),
+    #[serde(rename = "deck.d2.load")]
+    DeckD2Load(D2Status),
+    #[serde(rename = "deck.d2.process_slot")]
+    DeckD2ProcessSlot(D2ProcessSlotAck),
+    #[serde(rename = "deck.d2.reset")]
+    DeckD2Reset(D2ResetAck),
+    #[serde(rename = "deck.d2.restart")]
+    DeckD2Restart(D2RestartAck),
+    #[serde(rename = "deck.d2.controls.set")]
+    DeckD2ControlsSet(D2ControlsSetAck),
+    #[serde(rename = "deck.d2.transport.set")]
+    DeckD2TransportSet(D2TransportSetAck),
+    #[serde(rename = "deck.d2.seed.set")]
+    DeckD2SeedSet(D2SeedSetAck),
+    #[serde(rename = "deck.d2.status")]
+    DeckD2Status(D2Status),
+    #[serde(rename = "deck.d2.capture.start")]
+    DeckD2CaptureStart(Box<D2CaptureStatus>),
+    #[serde(rename = "deck.d2.capture.stop")]
+    DeckD2CaptureStop(Box<D2CaptureStatus>),
+    #[serde(rename = "deck.d2.capture.status")]
+    DeckD2CaptureStatus(Box<D2CaptureStatus>),
     #[serde(rename = "worker.status")]
     WorkerStatus(StatusSnapshot),
     #[serde(rename = "metrics.get")]
@@ -448,6 +542,17 @@ impl Ack {
             Self::SlotReset(_) => CommandName::SlotReset,
             Self::SlotDecodeCycle(_) => CommandName::SlotDecodeCycle,
             Self::RingBind(_) => CommandName::RingBind,
+            Self::DeckD2Load(_) => CommandName::DeckD2Load,
+            Self::DeckD2ProcessSlot(_) => CommandName::DeckD2ProcessSlot,
+            Self::DeckD2Reset(_) => CommandName::DeckD2Reset,
+            Self::DeckD2Restart(_) => CommandName::DeckD2Restart,
+            Self::DeckD2ControlsSet(_) => CommandName::DeckD2ControlsSet,
+            Self::DeckD2TransportSet(_) => CommandName::DeckD2TransportSet,
+            Self::DeckD2SeedSet(_) => CommandName::DeckD2SeedSet,
+            Self::DeckD2Status(_) => CommandName::DeckD2Status,
+            Self::DeckD2CaptureStart(_) => CommandName::DeckD2CaptureStart,
+            Self::DeckD2CaptureStop(_) => CommandName::DeckD2CaptureStop,
+            Self::DeckD2CaptureStatus(_) => CommandName::DeckD2CaptureStatus,
             Self::WorkerStatus(_) => CommandName::WorkerStatus,
             Self::MetricsGet(_) => CommandName::MetricsGet,
             Self::WorkerShutdown(_) => CommandName::WorkerShutdown,
@@ -463,6 +568,16 @@ impl Ack {
             Self::SlotReset(value) => value.validate(),
             Self::SlotDecodeCycle(value) => value.validate(),
             Self::RingBind(value) => value.validate(),
+            Self::DeckD2Load(value) | Self::DeckD2Status(value) => value.validate(),
+            Self::DeckD2ProcessSlot(value) => value.validate(),
+            Self::DeckD2Reset(value) => value.validate(),
+            Self::DeckD2Restart(value) => value.validate(),
+            Self::DeckD2ControlsSet(value) => value.validate(),
+            Self::DeckD2TransportSet(value) => value.validate(),
+            Self::DeckD2SeedSet(value) => value.validate(),
+            Self::DeckD2CaptureStart(value)
+            | Self::DeckD2CaptureStop(value)
+            | Self::DeckD2CaptureStatus(value) => value.validate(),
             Self::WorkerStatus(value) => value.validate(),
             Self::MetricsGet(_) | Self::WorkerShutdown(_) => Ok(()),
         }
@@ -1295,6 +1410,66 @@ pub enum ErrorCode {
     RingPublishFailed,
     #[serde(rename = "ring.sequence_exhausted")]
     RingSequenceExhausted,
+    #[serde(rename = "operator.not_installed")]
+    OperatorNotInstalled,
+    #[serde(rename = "operator.version_mismatch")]
+    OperatorVersionMismatch,
+    #[serde(rename = "operator.not_trusted")]
+    OperatorNotTrusted,
+    #[serde(rename = "operator.profile_incompatible")]
+    OperatorProfileIncompatible,
+    #[serde(rename = "deck.source_incompatible")]
+    DeckSourceIncompatible,
+    #[serde(rename = "deck.process_failed")]
+    DeckProcessFailed,
+    #[serde(rename = "deck.reset_failed")]
+    DeckResetFailed,
+    #[serde(rename = "deck.reset_not_required")]
+    DeckResetNotRequired,
+    #[serde(rename = "deck.generation_exhausted")]
+    DeckGenerationExhausted,
+    #[serde(rename = "capture.already_active")]
+    CaptureAlreadyActive,
+    #[serde(rename = "capture.boundary_invalid")]
+    CaptureBoundaryInvalid,
+    #[serde(rename = "capture.boundary_unavailable")]
+    CaptureBoundaryUnavailable,
+    #[serde(rename = "capture.carrier_paused")]
+    CaptureCarrierPaused,
+    #[serde(rename = "capture.controls_invalid")]
+    CaptureControlsInvalid,
+    #[serde(rename = "capture.event_limit")]
+    CaptureEventLimit,
+    #[serde(rename = "capture.id_invalid")]
+    CaptureIdInvalid,
+    #[serde(rename = "capture.id_mismatch")]
+    CaptureIdMismatch,
+    #[serde(rename = "capture.invalid_state")]
+    CaptureInvalidState,
+    #[serde(rename = "capture.limit_exceeded")]
+    CaptureLimitExceeded,
+    #[serde(rename = "capture.mapping_changed")]
+    CaptureMappingChanged,
+    #[serde(rename = "capture.mode_invalid")]
+    CaptureModeInvalid,
+    #[serde(rename = "capture.not_found")]
+    CaptureNotFound,
+    #[serde(rename = "capture.provenance_invalid")]
+    CaptureProvenanceInvalid,
+    #[serde(rename = "capture.receipt_too_large")]
+    CaptureReceiptTooLarge,
+    #[serde(rename = "capture.snapshot_frozen")]
+    CaptureSnapshotFrozen,
+    #[serde(rename = "capture.source_cycle_incompatible")]
+    CaptureSourceCycleIncompatible,
+    #[serde(rename = "capture.start_failed")]
+    CaptureStartFailed,
+    #[serde(rename = "capture.temporary_root_invalid")]
+    CaptureTemporaryRootInvalid,
+    #[serde(rename = "capture.transport_locked")]
+    CaptureTransportLocked,
+    #[serde(rename = "capture.write_failed")]
+    CaptureWriteFailed,
     #[serde(rename = "worker.heartbeat_timeout")]
     WorkerHeartbeatTimeout,
     #[serde(rename = "worker.command_timeout")]
@@ -1495,6 +1670,26 @@ impl SessionValidator {
     #[must_use]
     pub const fn next_outbound_sequence(&self) -> u64 {
         self.next_outbound_sequence
+    }
+
+    /// Number of additional inbound envelopes this validator can accept.
+    ///
+    /// Every accepted worker envelope consumes one entry for the remainder of
+    /// the session, including events and completed command replies. Rejected
+    /// envelopes do not consume the budget.
+    #[must_use]
+    pub fn remaining_inbound_message_budget(&self) -> usize {
+        MAX_MESSAGES_PER_SESSION - self.inbound_message_ids.len()
+    }
+
+    /// Number of additional outbound commands this validator can register.
+    ///
+    /// Command IDs remain retained after their reply completes, so receiving a
+    /// reply does not replenish this budget. Rejected commands do not consume
+    /// it.
+    #[must_use]
+    pub fn remaining_outbound_message_budget(&self) -> usize {
+        MAX_MESSAGES_PER_SESSION - self.outbound_commands.len()
     }
 
     #[must_use]

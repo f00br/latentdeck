@@ -2,6 +2,14 @@
 
 from sys import version_info
 
+from .operator_api import (
+    BuiltinOperatorRegistry,
+    LoadedOperator,
+    OperatorDescriptor,
+    OperatorLoadError,
+    validate_descriptor,
+)
+
 __version__ = "0.1.0"
 COMPONENT_NAME = "codec-host"
 
@@ -16,4 +24,13 @@ def runtime_descriptor() -> dict[str, str]:
     }
 
 
-__all__ = ["COMPONENT_NAME", "__version__", "runtime_descriptor"]
+__all__ = [
+    "COMPONENT_NAME",
+    "BuiltinOperatorRegistry",
+    "LoadedOperator",
+    "OperatorDescriptor",
+    "OperatorLoadError",
+    "__version__",
+    "runtime_descriptor",
+    "validate_descriptor",
+]

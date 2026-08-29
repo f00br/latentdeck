@@ -38,14 +38,35 @@ binds:
 - publisher and license notice metadata;
 - Windows x86-64 platform compatibility;
 - supported application, Worker Protocol, LC, and codec-profile versions;
-- one direct worker executable, bounded argument list, working directory, and
-  probe timeout;
+- one direct worker executable, bounded Player argument list, optional bounded
+  D2 argument list, working directory, and probe timeout;
 - a SHA-256-bound integrity catalog;
 - required external assets and their accepted byte length/SHA-256 variants.
 
 Pack and adapter identifiers are lowercase dotted identifiers. Versions are
 canonical SemVer. All pack-internal paths use `/`, contain only relative normal
 components, and resolve within the version directory.
+
+The executable is shared only as an integrity-checked process boundary. Its
+entrypoints are explicit and are never inferred from one another:
+
+```json
+{
+  "worker": {
+    "executable": "runtime/python.exe",
+    "arguments": ["-s", "-m", "latentdeck_codec_h3.worker"],
+    "d2_arguments": ["-s", "-m", "latentdeck_codec_h3.d2_worker"],
+    "working_directory": "runtime",
+    "probe_timeout_ms": 120000
+  }
+}
+```
+
+`d2_arguments` is optional so a validated Player-only pack remains usable.
+When it is absent, LatentDeck reports the D2 worker as unavailable; it never
+silently starts the Player entrypoint as a Deck worker. When present, the list
+must be non-empty and obey the same count and bounded-text rules as
+`arguments`. Neither entrypoint is accepted from UI state or a cartridge.
 
 The integrity catalog is a strict object:
 

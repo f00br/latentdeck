@@ -1,0 +1,41 @@
+[project]
+name = "latentdeck-operator-d2"
+version = "0.1.0"
+description = "Trusted built-in LD-D2 latent synthesis operators for LatentDeck."
+requires-python = ">=3.13,<3.14"
+license = "Apache-2.0"
+dependencies = [
+    "latentdeck-codec-host==0.1.0",
+]
+
+[project.optional-dependencies]
+cu130 = [
+    "torch==2.13.0",
+]
+test = [
+    "pytest==9.1.1",
+]
+
+[build-system]
+requires = ["uv-build==0.12.7"]
+build-backend = "uv_build"
+
+[tool.uv-build]
+package-data = [
+    "src/latentdeck_operator_d2/descriptor.json",
+    "src/latentdeck_operator_d2/descriptor.schema.json",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers --import-mode=importlib"
+testpaths = ["tests"]
+markers = [
+    "cuda: optional CUDA parity checks",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "SIM", "UP"]

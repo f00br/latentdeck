@@ -6,7 +6,8 @@ use std::{
 
 use latentdeck_library::{
     ALL_CARTRIDGES_ID, Availability, CartridgeKey, CartridgeRecord, CollectionId, CollectionRecord,
-    FolderImportOptions, Library, LibraryError, PathState, QueryOptions, ReindexDisposition,
+    DeckSourceIdentity, FolderImportOptions, Library, LibraryError, PathState, QueryOptions,
+    ReindexDisposition, ResolvedDeckSource,
 };
 use serde::Serialize;
 use tauri::State;
@@ -23,7 +24,7 @@ pub(crate) struct CommandError {
 }
 
 impl CommandError {
-    fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
             message: message.into(),
@@ -385,9 +386,23 @@ impl LibraryController {
         }
         Ok(summary)
     }
+
+    fn resolve_deck_source(
+        &self,
+        identity: &DeckSourceIdentity,
+    ) -> Result<ResolvedDeckSource, CommandError> {
+        self.library
+            .resolve_deck_source(identity)
+            .map_err(Into::into)
+    }
 }
 
 pub(crate) struct AppState {
+    controller: Arc<Mutex<LibraryController>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct LibraryImporter {
     controller: Arc<Mutex<LibraryController>>,
 }
 
@@ -396,6 +411,49 @@ impl AppState {
         Self {
             controller: Arc::new(Mutex::new(LibraryController::new(library))),
         }
+    }
+
+    /// Resolve a Deck source through the registered library path only. Full LC
+    /// validation runs on a blocking worker thread and the resulting local path
+    /// remains a backend-only, non-serializable value.
+    pub(crate) async fn resolve_deck_source(
+        &self,
+        identity: DeckSourceIdentity,
+    ) -> Result<ResolvedDeckSource, CommandError> {
+        let controller = Arc::clone(&self.controller);
+        tauri::async_runtime::spawn_blocking(move || {
+            lock_controller(&controller)?.resolve_deck_source(&identity)
+        })
+        .await
+        .map_err(|_| CommandError::task_stopped())?
+    }
+
+    pub(crate) fn importer(&self) -> LibraryImporter {
+        LibraryImporter {
+            controller: Arc::clone(&self.controller),
+        }
+    }
+}
+
+impl LibraryImporter {
+    /// Import one already validated application-generated cartridge. The path
+    /// remains inside the native host and only the content identity crosses
+    /// back to the capture actor.
+    pub(crate) async fn import_generated(
+        &self,
+        path: PathBuf,
+    ) -> Result<CartridgeKey, CommandError> {
+        let controller = Arc::clone(&self.controller);
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut controller = lock_controller(&controller)?;
+            controller
+                .library
+                .import_file(path)
+                .map(|result| result.key)
+                .map_err(Into::into)
+        })
+        .await
+        .map_err(|_| CommandError::task_stopped())?
     }
 }
 

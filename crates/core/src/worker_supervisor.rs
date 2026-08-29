@@ -24,6 +24,7 @@ pub use platform::{PendingWorker, WorkerSession, spawn_worker};
 ///
 /// The fields are intentionally private: runtime code cannot turn an
 /// unvalidated path or a shell command into a worker launch descriptor.
+#[derive(Debug)]
 #[cfg_attr(not(windows), allow(dead_code))]
 pub struct ValidatedWorkerLaunch {
     executable: PathBuf,
@@ -36,15 +37,31 @@ impl ValidatedWorkerLaunch {
     /// Derive the only accepted launch descriptor from a validated codec pack.
     #[must_use]
     pub fn from_codec_pack(pack: &ValidatedCodecPack) -> Self {
+        Self::from_arguments(pack, &pack.manifest.worker.arguments)
+    }
+
+    /// Derive the D2 worker launch only when the validated pack declares the
+    /// dedicated trusted entrypoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkerSupervisorError::WorkerEntrypointMissing`] for a valid
+    /// Player-only pack. Runtime code must surface that state and must not
+    /// silently reuse the Player worker command.
+    pub fn from_codec_pack_d2(pack: &ValidatedCodecPack) -> Result<Self, WorkerSupervisorError> {
+        let arguments = pack
+            .manifest
+            .worker
+            .d2_arguments
+            .as_ref()
+            .ok_or(WorkerSupervisorError::WorkerEntrypointMissing("d2"))?;
+        Ok(Self::from_arguments(pack, arguments))
+    }
+
+    fn from_arguments(pack: &ValidatedCodecPack, arguments: &[String]) -> Self {
         Self {
             executable: pack.worker_executable.clone(),
-            arguments: pack
-                .manifest
-                .worker
-                .arguments
-                .iter()
-                .map(OsString::from)
-                .collect(),
+            arguments: arguments.iter().map(OsString::from).collect(),
             working_directory: pack.worker_working_directory.clone(),
             connect_timeout: Duration::from_millis(u64::from(
                 pack.manifest.worker.probe_timeout_ms,
@@ -58,6 +75,8 @@ impl ValidatedWorkerLaunch {
 pub enum WorkerSupervisorError {
     #[error("codec workers are supported only on Windows in LatentDeck 0.1")]
     UnsupportedPlatform,
+    #[error("validated codec pack does not declare the {0} worker entrypoint")]
+    WorkerEntrypointMissing(&'static str),
     #[error("secure random generation failed")]
     Random,
     #[error("worker bootstrap could not be encoded")]

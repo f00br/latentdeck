@@ -5,9 +5,13 @@
 //! Windows Named Pipe implementation and worker process supervision belong in
 //! the runtime crate.
 
+mod d2;
+mod d2_capture;
 mod framing;
 mod protocol;
 
+pub use d2::*;
+pub use d2_capture::*;
 pub use framing::{FramingError, decode_envelope, encode_envelope, read_envelope, write_envelope};
 pub use protocol::*;
 

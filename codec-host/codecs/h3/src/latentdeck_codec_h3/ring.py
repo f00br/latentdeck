@@ -182,9 +182,29 @@ class WindowsRingProducer:
         expected_start = 0 if cycle == 0 else 5 + (cycle - 1) * 17
         if len(frames) != expected_count or decoded_start != expected_start:
             raise H3RingError("frame batch is not a codec-valid H3 decode cycle")
-        if not self.can_publish(expected_count):
-            raise H3RingError("RGB ring cannot publish the complete H3 cycle")
+        return self._publish(frames, expected_count)
 
+    def publish_frames(
+        self,
+        frames: Sequence[bytes],
+        *,
+        stream_generation: int,
+    ) -> tuple[int, int]:
+        """Publish one D2/Q4 post-operator decoder slot (one to four frames)."""
+
+        if self._closed:
+            raise H3RingError("RGB ring producer is closed")
+        generation = _u64(stream_generation, "stream_generation", nonzero=True)
+        if generation != self._stream_generation:
+            raise H3RingError("latent deck slot generation does not match the bound ring")
+        count = len(frames)
+        if not 1 <= count <= 4:
+            raise H3RingError("latent deck slot must contain one to four H3 frames")
+        return self._publish(frames, count)
+
+    def _publish(self, frames: Sequence[bytes], expected_count: int) -> tuple[int, int]:
+        if not self.can_publish(expected_count):
+            raise H3RingError("RGB ring cannot publish the complete frame batch")
         first_expected = self.write_sequence + 1
         first, last_exclusive = self._native.publish_cycle(frames, time.monotonic_ns())
         if first != first_expected or last_exclusive != first + expected_count:
