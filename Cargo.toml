@@ -22,6 +22,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 anyhow = "=1.0.104"
+atomicwrites = "=0.4.4"
 bytes = "=1.12.1"
 bytemuck = { version = "=1.25.2", features = ["derive"] }
 clap = { version = "=4.6.6", features = ["derive"] }

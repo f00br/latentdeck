@@ -14,6 +14,7 @@ spout-sdk = ["latentdeck-native-output/spout-sdk"]
 tauri-build.workspace = true
 
 [dependencies]
+atomicwrites.workspace = true
 latentdeck-cartridge = { path = "../../../crates/cartridge" }
 latentdeck-control = { path = "../../../crates/control" }
 latentdeck-core = { path = "../../../crates/core" }
@@ -29,6 +30,15 @@ tokio.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+uuid.workspace = true
+wgpu.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_System_ProcessStatus",
+  "Win32_System_Threading",
+] }
 
 [lints]
 workspace = true
