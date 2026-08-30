@@ -280,6 +280,11 @@ $distinctSourceIds = @($sourceIds | Sort-Object -Unique)
 $distinctArchiveHashes = @($sourceArchiveHashes | Sort-Object -Unique)
 $distinctVideoHashes = @($sourceVideoHashes | Sort-Object -Unique)
 $invalidSourceReceipt = ($sourceReceipts.Count -ne 4)
+$lineageAnchorCount = 0
+$allLineageAnchors = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::Ordinal
+)
+$lineagePairwiseDisjoint = $true
 foreach ($source in $sourceReceipts) {
     $parsedCartridgeId = [guid]::Empty
     if (-not [guid]::TryParse([string]$source.cartridge_id, [ref]$parsedCartridgeId) -or
@@ -287,7 +292,40 @@ foreach ($source in $sourceReceipts) {
         -not (Test-Sha256 -Value $source.video_payload_sha256)) {
         $invalidSourceReceipt = $true
     }
+    $lineageBasis = [string]$source.lineage_basis
+    $lineageAnchors = @($source.lineage_anchors)
+    if (@('original_self', 'declared_immediate_parents') -cnotcontains $lineageBasis -or
+        $lineageAnchors.Count -eq 0) {
+        $invalidSourceReceipt = $true
+    }
+    $sourceLineageAnchors = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($anchor in $lineageAnchors) {
+        $parsedAnchorId = [guid]::Empty
+        if (-not [guid]::TryParse([string]$anchor.cartridge_id, [ref]$parsedAnchorId) -or
+            -not (Test-Sha256 -Value $anchor.archive_sha256)) {
+            $invalidSourceReceipt = $true
+            continue
+        }
+        $anchorKey = '{0}:{1}' -f ([string]$anchor.cartridge_id).ToLowerInvariant(), `
+            ([string]$anchor.archive_sha256).ToLowerInvariant()
+        if (-not $sourceLineageAnchors.Add($anchorKey)) {
+            $invalidSourceReceipt = $true
+        }
+        if (-not $allLineageAnchors.Add($anchorKey)) {
+            $lineagePairwiseDisjoint = $false
+        }
+        $lineageAnchorCount++
+    }
+    if ($lineageBasis -ceq 'original_self' -and
+        ($lineageAnchors.Count -ne 1 -or
+        [string]$lineageAnchors[0].cartridge_id -cne [string]$source.cartridge_id -or
+        [string]$lineageAnchors[0].archive_sha256 -cne [string]$source.archive_sha256)) {
+        $invalidSourceReceipt = $true
+    }
 }
+$distinctLineageAnchorCount = $allLineageAnchors.Count
 
 $context = $receipt.execution_context
 $contextFailed = ($null -eq $context -or
@@ -318,6 +356,11 @@ $contextFailed = ($null -eq $context -or
 $commonReceiptFailed = ($receipt.schema_version -ne 2 -or
     $invalidSourceReceipt -or
     $contextFailed -or
+    $receipt.lineage_rule -cne 'declared_immediate_parents_or_original_self' -or
+    $receipt.lineage_anchor_count -ne $lineageAnchorCount -or
+    $receipt.distinct_lineage_anchor_count -ne $distinctLineageAnchorCount -or
+    $receipt.lineage_pairwise_disjoint -isnot [bool] -or
+    $receipt.lineage_pairwise_disjoint -ne $lineagePairwiseDisjoint -or
     -not (Test-Sha256 -Value $receipt.codec_pack.integrity_catalog_sha256) -or
     -not (Test-Sha256 -Value $receipt.codec_pack.decoder_sha256) -or
     $receipt.codec_pack.decoder_byte_length -le 0 -or
@@ -343,6 +386,8 @@ $topologyReceiptFailed = if ($Acceptance -ceq 'FourIndependent') {
         $receipt.distinct_cartridge_id_count -ne 4 -or
         $receipt.distinct_archive_count -ne 4 -or
         $receipt.distinct_video_payload_count -ne 4 -or
+        -not $lineagePairwiseDisjoint -or
+        -not $receipt.lineage_pairwise_disjoint -or
         -not $receipt.four_independent_source_acceptance -or
         $null -ne $receipt.duplicate_binding)
 }
@@ -358,6 +403,8 @@ else {
         $receipt.distinct_cartridge_id_count -ne 3 -or
         $receipt.distinct_archive_count -ne 3 -or
         $receipt.distinct_video_payload_count -ne 3 -or
+        $lineagePairwiseDisjoint -or
+        $receipt.lineage_pairwise_disjoint -or
         $receipt.four_independent_source_acceptance -or
         $null -eq $receipt.duplicate_binding -or
         $sourceIds[0] -cne $sourceIds[3] -or
@@ -370,7 +417,7 @@ if ($commonReceiptFailed -or $topologyReceiptFailed) {
 
 if ($Acceptance -ceq 'FourIndependent') {
     Write-Host 'PRIVATE EXTERNAL AV Q4 RELEASE ACCEPTANCE: PASS' -ForegroundColor Green
-    Write-Host 'Physical slot order: A,B,C,D (four distinct cartridge IDs, archives, and video payloads).'
+    Write-Host 'Physical slot order: A,B,C,D (four distinct cartridge IDs, archives, video payloads, and disjoint declared lineage anchors).'
 }
 else {
     Write-Host 'PRIVATE EXTERNAL AV Q4 FUNCTIONAL ONLY: PASS' -ForegroundColor Yellow

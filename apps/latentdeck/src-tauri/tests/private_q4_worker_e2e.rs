@@ -157,6 +157,13 @@ fn four_source_topology_requires_four_unique_archives_and_keeps_duplicate_proof_
         "four unique IDs and archives must not hide a reused video payload",
     )?;
 
+    let mut disguised_parent_reuse = independent.clone();
+    disguised_parent_reuse[3].lineage_anchors = independent[0].lineage_anchors.clone();
+    require(
+        require_four_independent_topology(&disguised_parent_reuse).is_err(),
+        "different derived outputs from one declared parent must not satisfy four-independent acceptance",
+    )?;
+
     let duplicate = [
         independent[0].clone(),
         independent[1].clone(),
@@ -170,12 +177,20 @@ fn four_source_topology_requires_four_unique_archives_and_keeps_duplicate_proof_
     require_declared_duplicate_sources(&duplicate)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct LineageAnchor {
+    cartridge_id: String,
+    archive_sha256: String,
+}
+
 #[derive(Clone)]
 struct SyntheticSource {
     path: PathBuf,
     cartridge_id: WireUuid,
     archive_sha256: String,
     video_payload_sha256: String,
+    lineage_anchors: BTreeSet<LineageAnchor>,
+    has_declared_parents: bool,
     profile: ValidatedH3Profile,
 }
 
@@ -417,14 +432,36 @@ fn validate_source(path: PathBuf) -> TestResult<SyntheticSource> {
     let path = fs::canonicalize(path)?;
     let mut cartridge = open_validated(&path, &ValidationOptions::default())?;
     let cartridge_id = parse_wire_uuid(&cartridge.manifest().cartridge_id.0)?;
+    let archive_sha256 = cartridge.receipt().archive_sha256.to_string();
+    let has_declared_parents = !cartridge.manifest().parent_cartridges.is_empty();
+    let lineage_anchors = if has_declared_parents {
+        cartridge
+            .manifest()
+            .parent_cartridges
+            .iter()
+            .map(|parent| LineageAnchor {
+                cartridge_id: parent.cartridge_id.0.clone(),
+                archive_sha256: parent.archive_sha256.0.clone(),
+            })
+            .collect()
+    } else {
+        [LineageAnchor {
+            cartridge_id: cartridge.manifest().cartridge_id.0.clone(),
+            archive_sha256: archive_sha256.clone(),
+        }]
+        .into_iter()
+        .collect()
+    };
     let video_payload_sha256 = hash_reader(&mut cartridge.tensor_reader("video")?)?
         .sha256
         .to_string();
     Ok(SyntheticSource {
         path,
         cartridge_id,
-        archive_sha256: cartridge.receipt().archive_sha256.to_string(),
+        archive_sha256,
         video_payload_sha256,
+        lineage_anchors,
+        has_declared_parents,
         profile: cartridge.h3_profile().clone(),
     })
 }
@@ -466,6 +503,7 @@ fn require_declared_duplicate_sources(sources: &[SyntheticSource; 4]) -> TestRes
             && sources[1].cartridge_id == sources[3].cartridge_id
             && sources[1].archive_sha256 == sources[3].archive_sha256
             && sources[1].video_payload_sha256 == sources[3].video_payload_sha256
+            && sources[1].lineage_anchors == sources[3].lineage_anchors
             && sources[1].path == sources[3].path,
         "duplicate-source Q4 fixture must declare exactly that slot D reuses slot B",
     )?;
@@ -493,9 +531,25 @@ fn require_four_independent_topology(sources: &[SyntheticSource; 4]) -> TestResu
         .map(|source| source.video_payload_sha256.clone())
         .collect::<BTreeSet<_>>();
     require(
-        ids.len() == 4 && hashes.len() == 4 && video_payload_hashes.len() == 4,
-        "four-independent Q4 acceptance requires four unique cartridge IDs, archive hashes, and video payload hashes",
+        ids.len() == 4
+            && hashes.len() == 4
+            && video_payload_hashes.len() == 4
+            && lineage_anchors_are_pairwise_disjoint(sources),
+        "four-independent Q4 acceptance requires four unique cartridge IDs, archive hashes, video payload hashes, and pairwise-disjoint declared immediate-parent (or original self) lineage",
     )
+}
+
+fn lineage_anchors_are_pairwise_disjoint(sources: &[SyntheticSource; 4]) -> bool {
+    sources
+        .iter()
+        .all(|source| !source.lineage_anchors.is_empty())
+        && (0..sources.len()).all(|left| {
+            ((left + 1)..sources.len()).all(|right| {
+                sources[left]
+                    .lineage_anchors
+                    .is_disjoint(&sources[right].lineage_anchors)
+            })
+        })
 }
 
 fn require_external_opt_in() -> TestResult<()> {
@@ -590,7 +644,9 @@ fn require_external_sources_unchanged(sources: &[SyntheticSource; 4]) -> TestRes
             measured.path == source.path
                 && measured.cartridge_id == source.cartridge_id
                 && measured.archive_sha256 == source.archive_sha256
-                && measured.video_payload_sha256 == source.video_payload_sha256,
+                && measured.video_payload_sha256 == source.video_payload_sha256
+                && measured.lineage_anchors == source.lineage_anchors
+                && measured.has_declared_parents == source.has_declared_parents,
             "an external AV source changed while the private Q4 proof was running",
         )?;
     }
@@ -787,9 +843,20 @@ async fn run_external_av_acceptance(
         .map(|source| &source.video_payload_sha256)
         .collect::<BTreeSet<_>>()
         .len();
+    let lineage_anchor_count = sources
+        .iter()
+        .map(|source| source.lineage_anchors.len())
+        .sum::<usize>();
+    let distinct_lineage_anchor_count = sources
+        .iter()
+        .flat_map(|source| source.lineage_anchors.iter())
+        .collect::<BTreeSet<_>>()
+        .len();
+    let lineage_pairwise_disjoint = lineage_anchors_are_pairwise_disjoint(sources);
     let four_independent_source_acceptance = distinct_cartridge_id_count == 4
         && distinct_archive_count == 4
-        && distinct_video_payload_count == 4;
+        && distinct_video_payload_count == 4
+        && lineage_pairwise_disjoint;
     let duplicate_binding = if four_independent_source_acceptance {
         Value::Null
     } else {
@@ -810,6 +877,15 @@ async fn run_external_av_acceptance(
                 "cartridge_id": source.cartridge_id.to_string(),
                 "archive_sha256": source.archive_sha256,
                 "video_payload_sha256": source.video_payload_sha256,
+                "lineage_basis": if source.has_declared_parents {
+                    "declared_immediate_parents"
+                } else {
+                    "original_self"
+                },
+                "lineage_anchors": source.lineage_anchors.iter().map(|anchor| json!({
+                    "cartridge_id": anchor.cartridge_id,
+                    "archive_sha256": anchor.archive_sha256
+                })).collect::<Vec<_>>(),
                 "visual_shape": [
                     1,
                     24,
@@ -861,6 +937,10 @@ async fn run_external_av_acceptance(
         "distinct_cartridge_id_count": distinct_cartridge_id_count,
         "distinct_archive_count": distinct_archive_count,
         "distinct_video_payload_count": distinct_video_payload_count,
+        "lineage_rule": "declared_immediate_parents_or_original_self",
+        "lineage_anchor_count": lineage_anchor_count,
+        "distinct_lineage_anchor_count": distinct_lineage_anchor_count,
+        "lineage_pairwise_disjoint": lineage_pairwise_disjoint,
         "four_independent_source_acceptance": four_independent_source_acceptance,
         "duplicate_binding": duplicate_binding,
         "sources": source_evidence,
