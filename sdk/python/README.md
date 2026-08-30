@@ -58,3 +58,18 @@ The packer preserves the Safetensors payload bytes exactly and validates the
 final archive before commit. It does not crop, cast, resize, or re-encode the
 payload, and it never adds raw prompts or model weights. Recorders should store
 only hashes such as `prompt_sha256` and `workflow_sha256` in provenance.
+
+For existing raw H3 AV collections, use the dedicated converter. Renaming a
+`.safetensors` file to `.lc` does **not** create a cartridge: `.lc` is a
+validated deterministic ZIP64 container with a manifest and payload hashes.
+
+```text
+latentdeck-convert old-av-latent.safetensors -o converted.lc
+latentdeck-convert folder-with-latents --output-directory converted
+latentdeck-convert folder-with-latents --recursive --output-directory converted
+```
+
+The converter recognises the H3 visual/optional-audio tensor schema through the
+same Rust validator, preserves the original Safetensors payload bytes exactly,
+preflights output collisions, writes atomically, and validates every resulting
+cartridge. It never edits or deletes the source files.

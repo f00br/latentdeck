@@ -52,6 +52,64 @@ def hash(path: StrPath) -> ResultDict:
     return _result(_native.hash_json(_path_text(path)))
 
 
+def inspect_raw_h3(path: StrPath) -> ResultDict:
+    """Fully validate one raw H3 Safetensors payload without writing a cartridge."""
+
+    return _result(_native.inspect_raw_h3_json(_path_text(path)))
+
+
+def read_h3(
+    path: StrPath,
+    *,
+    max_visual_values: int | None = None,
+    max_tensor_bytes: int | None = None,
+) -> ResultDict:
+    """Read validated H3 tensors with optional pre-allocation admission bounds."""
+
+    encoded, video, audio = _native.read_h3(
+        _path_text(path), max_visual_values, max_tensor_bytes
+    )
+    result = _result(encoded)
+    tensors = result.get("tensors")
+    if not isinstance(tensors, dict) or not isinstance(tensors.get("video"), dict):
+        raise CartridgeError("manifest_json_invalid", "native binding omitted H3 tensor metadata")
+    tensors["video"]["data"] = video
+    if audio is not None:
+        audio_metadata = tensors.get("audio")
+        if not isinstance(audio_metadata, dict):
+            raise CartridgeError(
+                "manifest_json_invalid", "native binding omitted H3 audio metadata"
+            )
+        audio_metadata["data"] = audio
+    return result
+
+
+def read_raw_h3(
+    path: StrPath,
+    *,
+    max_visual_values: int | None = None,
+    max_tensor_bytes: int | None = None,
+) -> ResultDict:
+    """Read validated raw H3 tensors with optional pre-allocation admission bounds."""
+
+    encoded, video, audio = _native.read_raw_h3(
+        _path_text(path), max_visual_values, max_tensor_bytes
+    )
+    result = _result(encoded)
+    tensors = result.get("tensors")
+    if not isinstance(tensors, dict) or not isinstance(tensors.get("video"), dict):
+        raise CartridgeError("manifest_json_invalid", "native binding omitted H3 tensor metadata")
+    tensors["video"]["data"] = video
+    if audio is not None:
+        audio_metadata = tensors.get("audio")
+        if not isinstance(audio_metadata, dict):
+            raise CartridgeError(
+                "manifest_json_invalid", "native binding omitted H3 audio metadata"
+            )
+        audio_metadata["data"] = audio
+    return result
+
+
 def pack(
     manifest: dict[str, object],
     payload_path: StrPath,
@@ -124,8 +182,11 @@ __all__ = [
     "NATIVE_MODULE_NAME",
     "hash",
     "inspect",
+    "inspect_raw_h3",
     "pack",
     "pack_raw_h3",
+    "read_h3",
+    "read_raw_h3",
     "validate",
     "__version__",
 ]

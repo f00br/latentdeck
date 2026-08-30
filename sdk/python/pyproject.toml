@@ -8,6 +8,7 @@ dependencies = []
 
 [project.scripts]
 latentdeck-pack = "latentdeck_cartridge.__main__:pack_main"
+latentdeck-convert = "latentdeck_cartridge.converter:convert_main"
 
 [build-system]
 requires = ["maturin==1.15.0"]

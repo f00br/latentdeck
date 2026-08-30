@@ -126,6 +126,24 @@ def test_python_api_roundtrips_through_the_single_rust_implementation(tmp_path: 
     assert payload_path.read_bytes() == _synthetic_video_payload()
 
 
+def test_read_h3_returns_validated_tensor_bytes_without_archive_extraction(tmp_path: Path) -> None:
+    output_path, _, manifest = _pack_synthetic(tmp_path)
+
+    loaded = cartridge.read_h3(output_path)
+
+    assert loaded["status"] == "ok"
+    assert loaded["command"] == "read_h3"
+    assert loaded["manifest"] == manifest
+    assert loaded["validation"]["validation_level"] == "full"
+    assert loaded["tensors"]["video"] == {
+        "data": bytes(24 * 2 * 2),
+        "dtype": "F16",
+        "shape": [1, 24, 2, 1, 1],
+    }
+    assert "audio" not in loaded["tensors"]
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["result.lc", "source.safetensors"]
+
+
 def test_public_error_carries_stable_code_detail_and_locations(tmp_path: Path) -> None:
     missing = tmp_path / "missing.lc"
 
@@ -164,6 +182,80 @@ def test_raw_h3_authoring_uses_the_authoritative_t7_audio_cadence(tmp_path: Path
     assert inspection["profile"]["visual"]["decoded_frames"] == 22
     assert inspection["profile"]["audio_latent_slots"] == 37
     assert inspection["manifest"]["audio"]["policy"] == "preserved_source"
+
+
+def test_raw_h3_inspection_validates_without_creating_a_cartridge(tmp_path: Path) -> None:
+    payload_path = tmp_path / "inspect-only.safetensors"
+    payload = _synthetic_t7_av_payload()
+    payload_path.write_bytes(payload)
+
+    inspection = cartridge.inspect_raw_h3(payload_path)
+
+    assert inspection["status"] == "ok"
+    assert inspection["command"] == "inspect_raw_h3"
+    assert inspection["byte_length"] == len(payload)
+    assert inspection["sha256"] == hashlib.sha256(payload).hexdigest()
+    assert inspection["profile"]["visual"]["latent_slots"] == 7
+    assert inspection["profile"]["visual"]["decoded_frames"] == 22
+    assert inspection["profile"]["audio_latent_slots"] == 37
+    assert inspection["safetensors"]["video"]["shape"] == [1, 24, 7, 1, 1]
+    assert inspection["safetensors"]["audio"]["shape"] == [1, 32, 2, 37]
+    assert list(tmp_path.iterdir()) == [payload_path]
+
+
+def test_read_raw_h3_returns_av_tensor_bytes_without_converting_to_lc(tmp_path: Path) -> None:
+    payload_path = tmp_path / "raw-av.safetensors"
+    payload_path.write_bytes(_synthetic_t7_av_payload())
+
+    loaded = cartridge.read_raw_h3(payload_path)
+
+    assert loaded["status"] == "ok"
+    assert loaded["command"] == "read_raw_h3"
+    assert loaded["profile"]["codec_family"] == "minimax_h3"
+    assert loaded["profile"]["profile"] == "h3_av_latent"
+    assert loaded["profile"]["visual"]["decoded_frames"] == 22
+    assert loaded["profile"]["audio_latent_slots"] == 37
+    assert loaded["safetensors"]["video"]["shape"] == [1, 24, 7, 1, 1]
+    assert loaded["safetensors"]["audio"]["shape"] == [1, 32, 2, 37]
+    assert loaded["tensors"]["video"] == {
+        "data": bytes(24 * 7 * 2),
+        "dtype": "F16",
+        "shape": [1, 24, 7, 1, 1],
+    }
+    assert loaded["tensors"]["audio"] == {
+        "data": bytes(32 * 2 * 37 * 2),
+        "dtype": "F16",
+        "shape": [1, 32, 2, 37],
+    }
+    assert list(tmp_path.iterdir()) == [payload_path]
+
+
+def test_tensor_read_limits_precede_materializing_valid_payloads(tmp_path: Path) -> None:
+    payload_path = tmp_path / "bounded-raw-av.safetensors"
+    output_path = tmp_path / "bounded.lc"
+    payload_path.write_bytes(_synthetic_t7_av_payload())
+    cartridge.pack_raw_h3(payload_path, output_path)
+
+    for reader, source in (
+        (cartridge.read_raw_h3, payload_path),
+        (cartridge.read_h3, output_path),
+    ):
+        with pytest.raises(cartridge.CartridgeError) as visual_limit:
+            reader(source, max_visual_values=(24 * 7) - 1)
+        assert visual_limit.value.code == "runtime_limit_exceeded"
+        assert visual_limit.value.tensor == "video"
+
+        with pytest.raises(cartridge.CartridgeError) as byte_limit:
+            reader(source, max_tensor_bytes=(32 * 2 * 37 * 2) - 1)
+        assert byte_limit.value.code == "runtime_limit_exceeded"
+        assert byte_limit.value.tensor == "audio"
+
+        loaded = reader(
+            source,
+            max_visual_values=24 * 7,
+            max_tensor_bytes=32 * 2 * 37 * 2,
+        )
+        assert loaded["status"] == "ok"
 
 
 def test_raw_h3_default_identity_is_deterministic_uuid_v8(tmp_path: Path) -> None:

@@ -3,13 +3,13 @@
 use std::{
     collections::BTreeMap,
     fs::File,
-    io::Read,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
 use latentdeck_cartridge::{
     error::{CartridgeError as CoreError, ErrorCode, Result as CoreResult},
-    hash::hash_path,
+    hash::{MeasuredHash, hash_path, hash_reader},
     limits::ValidationLimits,
     manifest::{
         AudioDisposition, CartridgeId, CodecDescriptor, DType, DecodedVideoDescriptor, Identifier,
@@ -22,11 +22,11 @@ use latentdeck_cartridge::{
     reader::{InspectOptions, ValidationOptions, inspect_path, open_validated},
     safetensor::{
         EntryRange, H3SafetensorsPreflight, SafetensorDType, SafetensorTensorDescriptor,
-        preflight_h3_safetensors,
+        preflight_h3_safetensors, scan_h3_safetensors_finite,
     },
     writer::{OverwritePolicy, PackRequest, WriteOptions, pack_atomic},
 };
-use pyo3::{exceptions::PyException, prelude::*};
+use pyo3::{exceptions::PyException, prelude::*, types::PyBytes};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -91,6 +91,71 @@ fn hash_json(py: Python<'_>, path: &str) -> PyResult<String> {
     hash_value(path)
         .map(|value| value.to_string())
         .map_err(|error| into_py_error(py, &error))
+}
+
+#[pyfunction]
+fn inspect_raw_h3_json(py: Python<'_>, path: &str) -> PyResult<String> {
+    inspect_raw_h3_value(path)
+        .map(|value| value.to_string())
+        .map_err(|error| into_py_error(py, &error))
+}
+
+type ReadH3Result = (String, Vec<u8>, Option<Vec<u8>>);
+
+#[derive(Clone, Copy)]
+struct TensorReadLimits {
+    max_visual_values: Option<u64>,
+    max_tensor_bytes: Option<u64>,
+}
+
+#[pyfunction]
+#[pyo3(signature = (path, max_visual_values=None, max_tensor_bytes=None))]
+fn read_h3(
+    py: Python<'_>,
+    path: &str,
+    max_visual_values: Option<u64>,
+    max_tensor_bytes: Option<u64>,
+) -> PyResult<(String, Py<PyBytes>, Option<Py<PyBytes>>)> {
+    read_h3_value(
+        path,
+        TensorReadLimits {
+            max_visual_values,
+            max_tensor_bytes,
+        },
+    )
+    .map(|(metadata, video, audio)| {
+        (
+            metadata,
+            PyBytes::new(py, &video).unbind(),
+            audio.map(|bytes| PyBytes::new(py, &bytes).unbind()),
+        )
+    })
+    .map_err(|error| into_py_error(py, &error))
+}
+
+#[pyfunction]
+#[pyo3(signature = (path, max_visual_values=None, max_tensor_bytes=None))]
+fn read_raw_h3(
+    py: Python<'_>,
+    path: &str,
+    max_visual_values: Option<u64>,
+    max_tensor_bytes: Option<u64>,
+) -> PyResult<(String, Py<PyBytes>, Option<Py<PyBytes>>)> {
+    read_raw_h3_value(
+        path,
+        TensorReadLimits {
+            max_visual_values,
+            max_tensor_bytes,
+        },
+    )
+    .map(|(metadata, video, audio)| {
+        (
+            metadata,
+            PyBytes::new(py, &video).unbind(),
+            audio.map(|bytes| PyBytes::new(py, &bytes).unbind()),
+        )
+    })
+    .map_err(|error| into_py_error(py, &error))
 }
 
 #[pyfunction]
@@ -191,6 +256,313 @@ fn hash_value(path: &str) -> CoreResult<Value> {
     }))
 }
 
+fn inspect_raw_h3_value(path: &str) -> CoreResult<Value> {
+    let limits = ValidationLimits::default();
+    let payload_path = PathBuf::from(path);
+    let (preflight, measured) = inspect_raw_h3_payload(&payload_path, &limits, true)?;
+    let payload_sha256 = measured.sha256.to_string();
+    let manifest = build_h3_manifest(
+        &preflight,
+        measured.byte_length,
+        &payload_sha256,
+        None,
+        AuthoringProvenance::default(),
+        None,
+        &limits,
+    )?;
+    let profile = h3::validate(&manifest, &limits)?;
+
+    Ok(json!({
+        "status": "ok",
+        "command": "inspect_raw_h3",
+        "byte_length": measured.byte_length,
+        "sha256": measured.sha256,
+        "profile": {
+            "codec_family": h3::CODEC_FAMILY,
+            "profile": h3::PROFILE,
+            "profile_version": h3::PROFILE_VERSION,
+            "visual": {
+                "latent_slots": profile.visual.latent_slots,
+                "latent_height": profile.visual.latent_height,
+                "latent_width": profile.visual.latent_width,
+                "decoded_frames": profile.visual.decoded_frame_count,
+                "decoded_height": profile.visual.decoded_height,
+                "decoded_width": profile.visual.decoded_width,
+            },
+            "audio_latent_slots": profile.audio.as_ref().map(|audio| audio.latent_slots),
+        },
+        "safetensors": preflight_value(&preflight),
+    }))
+}
+
+fn read_h3_value(path: &str, read_limits: TensorReadLimits) -> CoreResult<ReadH3Result> {
+    let mut validated = open_validated(path, &ValidationOptions::default())?;
+    let manifest = validated.manifest().clone();
+    let validation = validated.receipt().clone();
+    for descriptor in &manifest.tensors {
+        let values = checked_tensor_values(&descriptor.name.0, &descriptor.shape)?;
+        let byte_width = descriptor.storage_dtype.byte_width().ok_or_else(|| {
+            CoreError::new(
+                ErrorCode::RuntimeLimitExceeded,
+                "validated tensor has no supported storage byte width",
+            )
+            .at_tensor(&descriptor.name.0)
+        })?;
+        let byte_length = values.checked_mul(byte_width).ok_or_else(|| {
+            CoreError::new(
+                ErrorCode::RuntimeLimitExceeded,
+                "validated tensor byte length overflows u64",
+            )
+            .at_tensor(&descriptor.name.0)
+        })?;
+        enforce_tensor_read_limits(&descriptor.name.0, values, byte_length, read_limits)?;
+    }
+    let tensor_metadata = manifest
+        .tensors
+        .iter()
+        .map(|descriptor| {
+            (
+                descriptor.name.0.clone(),
+                json!({
+                    "dtype": descriptor.storage_dtype,
+                    "shape": descriptor.shape,
+                }),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let mut video = Vec::new();
+    validated
+        .tensor_reader("video")?
+        .read_to_end(&mut video)
+        .map_err(|error| {
+            CoreError::new(ErrorCode::IoRead, "cannot read validated H3 visual tensor")
+                .at_tensor("video")
+                .with_source(error)
+        })?;
+    let audio = if tensor_metadata.contains_key("audio") {
+        let mut bytes = Vec::new();
+        validated
+            .tensor_reader("audio")?
+            .read_to_end(&mut bytes)
+            .map_err(|error| {
+                CoreError::new(ErrorCode::IoRead, "cannot read validated H3 audio tensor")
+                    .at_tensor("audio")
+                    .with_source(error)
+            })?;
+        Some(bytes)
+    } else {
+        None
+    };
+    let metadata = json!({
+        "status": "ok",
+        "command": "read_h3",
+        "manifest": manifest,
+        "validation": validation,
+        "tensors": tensor_metadata,
+    })
+    .to_string();
+    Ok((metadata, video, audio))
+}
+
+fn read_raw_h3_value(path: &str, read_limits: TensorReadLimits) -> CoreResult<ReadH3Result> {
+    let limits = ValidationLimits::default();
+    let mut file = File::open(path).map_err(|error| {
+        CoreError::new(ErrorCode::IoOpen, "cannot open raw H3 Safetensors payload")
+            .at_entry(h3::PAYLOAD_PATH)
+            .with_source(error)
+    })?;
+    let payload_bytes = file
+        .metadata()
+        .map_err(|error| {
+            CoreError::new(
+                ErrorCode::IoRead,
+                "cannot inspect raw H3 Safetensors payload",
+            )
+            .at_entry(h3::PAYLOAD_PATH)
+            .with_source(error)
+        })?
+        .len();
+    let range = EntryRange::new(0, payload_bytes);
+    let preflight = preflight_h3_safetensors(&mut file, range, &limits)?;
+    enforce_tensor_read_limits(
+        "video",
+        checked_tensor_values("video", &preflight.video.shape)?,
+        preflight.video.byte_length,
+        read_limits,
+    )?;
+    if let Some(descriptor) = &preflight.audio {
+        enforce_tensor_read_limits(
+            "audio",
+            checked_tensor_values("audio", &descriptor.shape)?,
+            descriptor.byte_length,
+            read_limits,
+        )?;
+    }
+    scan_h3_safetensors_finite(&mut file, range, &preflight)?;
+    file.seek(SeekFrom::Start(0)).map_err(|error| {
+        CoreError::new(
+            ErrorCode::IoRead,
+            "cannot rewind raw H3 payload for hashing",
+        )
+        .at_entry(h3::PAYLOAD_PATH)
+        .with_source(error)
+    })?;
+    let measured = hash_reader(&mut file)?;
+    let payload_sha256 = measured.sha256.to_string();
+    let manifest = build_h3_manifest(
+        &preflight,
+        measured.byte_length,
+        &payload_sha256,
+        None,
+        AuthoringProvenance::default(),
+        None,
+        &limits,
+    )?;
+    let profile = h3::validate(&manifest, &limits)?;
+    let video = read_raw_tensor(&mut file, &preflight, &preflight.video)?;
+    let audio = preflight
+        .audio
+        .as_ref()
+        .map(|descriptor| read_raw_tensor(&mut file, &preflight, descriptor))
+        .transpose()?;
+
+    let tensors = raw_h3_tensor_metadata(&preflight);
+    let metadata = json!({
+        "status": "ok",
+        "command": "read_raw_h3",
+        "byte_length": measured.byte_length,
+        "sha256": measured.sha256,
+        "profile": {
+            "codec_family": h3::CODEC_FAMILY,
+            "profile": h3::PROFILE,
+            "profile_version": h3::PROFILE_VERSION,
+            "visual": {
+                "latent_slots": profile.visual.latent_slots,
+                "latent_height": profile.visual.latent_height,
+                "latent_width": profile.visual.latent_width,
+                "decoded_frames": profile.visual.decoded_frame_count,
+                "decoded_height": profile.visual.decoded_height,
+                "decoded_width": profile.visual.decoded_width,
+            },
+            "audio_latent_slots": profile.audio.as_ref().map(|audio| audio.latent_slots),
+        },
+        "safetensors": preflight_value(&preflight),
+        "tensors": tensors,
+    })
+    .to_string();
+    Ok((metadata, video, audio))
+}
+
+fn raw_h3_tensor_metadata(preflight: &H3SafetensorsPreflight) -> serde_json::Map<String, Value> {
+    let mut tensors = serde_json::Map::new();
+    tensors.insert(
+        "video".to_owned(),
+        json!({
+            "dtype": safetensor_dtype_name(preflight.video.dtype),
+            "shape": preflight.video.shape,
+        }),
+    );
+    if let Some(descriptor) = &preflight.audio {
+        tensors.insert(
+            "audio".to_owned(),
+            json!({
+                "dtype": safetensor_dtype_name(descriptor.dtype),
+                "shape": descriptor.shape,
+            }),
+        );
+    }
+    tensors
+}
+
+fn checked_tensor_values(name: &str, shape: &[u64]) -> CoreResult<u64> {
+    shape.iter().try_fold(1_u64, |values, axis| {
+        values.checked_mul(*axis).ok_or_else(|| {
+            CoreError::new(
+                ErrorCode::RuntimeLimitExceeded,
+                "tensor value count overflows u64",
+            )
+            .at_tensor(name)
+        })
+    })
+}
+
+fn enforce_tensor_read_limits(
+    name: &str,
+    values: u64,
+    byte_length: u64,
+    limits: TensorReadLimits,
+) -> CoreResult<()> {
+    if name == "video"
+        && limits
+            .max_visual_values
+            .is_some_and(|maximum| values > maximum)
+    {
+        return Err(CoreError::new(
+            ErrorCode::RuntimeLimitExceeded,
+            "visual tensor exceeds the caller's value admission bound",
+        )
+        .at_tensor(name));
+    }
+    if limits
+        .max_tensor_bytes
+        .is_some_and(|maximum| byte_length > maximum)
+    {
+        return Err(CoreError::new(
+            ErrorCode::RuntimeLimitExceeded,
+            "tensor exceeds the caller's byte admission bound",
+        )
+        .at_tensor(name));
+    }
+    Ok(())
+}
+
+fn read_raw_tensor(
+    file: &mut File,
+    preflight: &H3SafetensorsPreflight,
+    descriptor: &SafetensorTensorDescriptor,
+) -> CoreResult<Vec<u8>> {
+    let offset = preflight
+        .data_offset
+        .checked_add(descriptor.data_offsets[0])
+        .ok_or_else(|| {
+            CoreError::new(
+                ErrorCode::TensorSizeOverflow,
+                "raw H3 tensor data offset overflows u64",
+            )
+            .at_tensor(descriptor.name.clone())
+        })?;
+    file.seek(SeekFrom::Start(offset)).map_err(|error| {
+        CoreError::new(ErrorCode::IoRead, "cannot seek to validated raw H3 tensor")
+            .at_tensor(descriptor.name.clone())
+            .with_source(error)
+    })?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(descriptor.byte_length)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            CoreError::new(ErrorCode::IoRead, "cannot read validated raw H3 tensor")
+                .at_tensor(descriptor.name.clone())
+                .with_source(error)
+        })?;
+    if u64::try_from(bytes.len()).ok() != Some(descriptor.byte_length) {
+        return Err(CoreError::new(
+            ErrorCode::IoRead,
+            "validated raw H3 tensor was truncated while reading",
+        )
+        .at_tensor(descriptor.name.clone()));
+    }
+    Ok(bytes)
+}
+
+const fn safetensor_dtype_name(dtype: SafetensorDType) -> &'static str {
+    match dtype {
+        SafetensorDType::F16 => "F16",
+        SafetensorDType::F32 => "F32",
+    }
+}
+
 fn pack_value(
     manifest_json: &str,
     payload_path: &str,
@@ -245,28 +617,7 @@ fn pack_raw_h3_value(
 ) -> CoreResult<Value> {
     let limits = ValidationLimits::default();
     let payload_path_buf = PathBuf::from(payload_path);
-    let mut payload_file = File::open(&payload_path_buf).map_err(|error| {
-        CoreError::new(ErrorCode::IoOpen, "cannot open raw H3 Safetensors payload")
-            .at_entry(h3::PAYLOAD_PATH)
-            .with_source(error)
-    })?;
-    let payload_bytes = payload_file
-        .metadata()
-        .map_err(|error| {
-            CoreError::new(
-                ErrorCode::IoRead,
-                "cannot inspect raw H3 Safetensors payload",
-            )
-            .at_entry(h3::PAYLOAD_PATH)
-            .with_source(error)
-        })?
-        .len();
-    let preflight = preflight_h3_safetensors(
-        &mut payload_file,
-        EntryRange::new(0, payload_bytes),
-        &limits,
-    )?;
-    let measured_payload = hash_path(&payload_path_buf)?;
+    let (preflight, measured_payload) = inspect_raw_h3_payload(&payload_path_buf, &limits, false)?;
     let payload_sha256 = measured_payload.sha256.to_string();
     let manifest = build_h3_manifest(
         &preflight,
@@ -287,6 +638,36 @@ fn pack_raw_h3_value(
         &receipt.output_path,
         &receipt.validation,
     ))
+}
+
+fn inspect_raw_h3_payload(
+    payload_path: &Path,
+    limits: &ValidationLimits,
+    verify_finite: bool,
+) -> CoreResult<(H3SafetensorsPreflight, MeasuredHash)> {
+    let mut payload_file = File::open(payload_path).map_err(|error| {
+        CoreError::new(ErrorCode::IoOpen, "cannot open raw H3 Safetensors payload")
+            .at_entry(h3::PAYLOAD_PATH)
+            .with_source(error)
+    })?;
+    let payload_bytes = payload_file
+        .metadata()
+        .map_err(|error| {
+            CoreError::new(
+                ErrorCode::IoRead,
+                "cannot inspect raw H3 Safetensors payload",
+            )
+            .at_entry(h3::PAYLOAD_PATH)
+            .with_source(error)
+        })?
+        .len();
+    let range = EntryRange::new(0, payload_bytes);
+    let preflight = preflight_h3_safetensors(&mut payload_file, range, limits)?;
+    if verify_finite {
+        scan_h3_safetensors_finite(&mut payload_file, range, &preflight)?;
+    }
+    let measured = hash_path(payload_path)?;
+    Ok((preflight, measured))
 }
 
 fn build_h3_manifest(
@@ -669,6 +1050,9 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(inspect_json, module)?)?;
     module.add_function(wrap_pyfunction!(validate_json, module)?)?;
     module.add_function(wrap_pyfunction!(hash_json, module)?)?;
+    module.add_function(wrap_pyfunction!(inspect_raw_h3_json, module)?)?;
+    module.add_function(wrap_pyfunction!(read_h3, module)?)?;
+    module.add_function(wrap_pyfunction!(read_raw_h3, module)?)?;
     module.add_function(wrap_pyfunction!(pack_json, module)?)?;
     module.add_function(wrap_pyfunction!(pack_raw_h3_json, module)?)?;
     module.add("BINDING_ABI_VERSION", BINDING_ABI_VERSION)?;
