@@ -30,7 +30,10 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
-use crate::{d2_capture_host::CaptureHostError, library_state::LibraryImporter};
+use crate::{
+    d2_capture_host::CaptureHostError,
+    library_state::{DeckSessionLease, LibraryImporter},
+};
 
 #[cfg(not(target_os = "windows"))]
 use crate::d2_capture_host::D2CaptureView;
@@ -937,8 +940,9 @@ mod platform {
         AppHandle, Arc, CausalResetPlan, D2_DECK_ID, D2_OPERATOR_ID, D2_OPERATOR_VERSION,
         D2_OUTPUT_WINDOW_LABEL, D2_OUTPUT_WINDOW_TITLE, D2Controls, D2ControlsAckView,
         D2LaunchBackend, D2LaunchConfig, D2ResetReason, D2RuntimeError, D2SeedAckView, D2Status,
-        D2StatusView, D2Transport, D2TransportAckView, Duration, INITIAL_GENERATION,
-        MAX_D2_SAFE_INTEGER, Mutex, Path, PathBuf, TrustedD2Source, ValidatedCodecPack,
+        D2StatusView, D2Transport, D2TransportAckView, DeckSessionLease, Duration,
+        INITIAL_GENERATION, MAX_D2_SAFE_INTEGER, Mutex, Path, PathBuf, TrustedD2Source,
+        ValidatedCodecPack,
     };
 
     const CHANNEL_CAPACITY: usize = 8;
@@ -972,6 +976,7 @@ mod platform {
             shared_status: Arc<Mutex<D2StatusView>>,
             shared_capture_status: Arc<Mutex<D2CaptureView>>,
             config: D2LaunchConfig,
+            deck_session: DeckSessionLease,
         ) -> Result<Self, D2RuntimeError> {
             let launch = ValidatedWorkerLaunch::from_codec_pack_d2(&config.backend.codec_pack)
                 .map_err(|_| D2RuntimeError::d2_entrypoint_missing())?;
@@ -1043,6 +1048,7 @@ mod platform {
                 status,
                 shared_status,
                 shared_capture_status,
+                deck_session,
                 closed: Arc::clone(&closed),
                 pending_frame: None,
                 presented_sequence: 0,
@@ -1639,6 +1645,7 @@ mod platform {
         status: D2Status,
         shared_status: Arc<Mutex<D2StatusView>>,
         shared_capture_status: Arc<Mutex<D2CaptureView>>,
+        deck_session: DeckSessionLease,
         closed: Arc<AtomicBool>,
         pending_frame: Option<latentdeck_gpu::ring::RgbaFrame>,
         presented_sequence: u64,
@@ -2715,6 +2722,7 @@ mod platform {
             if self.closed.swap(true, Ordering::AcqRel) {
                 return;
             }
+            self.deck_session.close();
             self.status.transport.playing_a = false;
             self.status.transport.playing_b = false;
             let stopped = D2StatusView::stopped_from(&self.status);
@@ -2730,6 +2738,7 @@ mod platform {
             if self.closed.swap(true, Ordering::AcqRel) {
                 return Ok(());
             }
+            self.deck_session.close();
             self.status.transport.playing_a = false;
             self.status.transport.playing_b = false;
             let output_result = destroy_output(&self.output);
@@ -3556,6 +3565,7 @@ impl D2Runtime {
         _shared_status: Arc<Mutex<D2StatusView>>,
         _shared_capture_status: Arc<Mutex<D2CaptureView>>,
         _config: D2LaunchConfig,
+        _deck_session: DeckSessionLease,
     ) -> Result<Self, D2RuntimeError> {
         Err(D2RuntimeError::unsupported())
     }

@@ -5,6 +5,7 @@
   import {
     EMPTY_LIBRARY_VIEW,
     canReorderActiveMembers,
+    describeLoadedSlots,
     describeCommandError,
     formatDuration,
     moveItem,
@@ -584,7 +585,7 @@
         <span>Active Bank</span>
         <strong>{activeCollection?.name ?? "All Cartridges"}</strong>
         <small
-          >{view.deckSession.loadedSlots.length} loaded slots · bank changes never
+          >{describeLoadedSlots(view.deckSession.loadedSlots)} · bank changes never
           unload them</small
         >
       </div>

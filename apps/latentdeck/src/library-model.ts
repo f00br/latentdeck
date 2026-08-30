@@ -5,6 +5,7 @@ export type Availability = "present" | "warning" | "missing";
 export type PathState = "present" | "missing" | "invalid" | "content_changed";
 
 export interface SlotAssignmentView {
+  deckType: "d2" | "q4";
   slot: string;
   archiveSha256: string;
 }
@@ -96,6 +97,21 @@ export function selectActiveCollection(
     activeCollectionId,
     loadedSlots: session.loadedSlots,
   };
+}
+
+export function describeLoadedSlots(slots: SlotAssignmentView[]): string {
+  const decks = (["d2", "q4"] as const).flatMap((deckType) => {
+    const deckSlots = slots
+      .filter((slot) => slot.deckType === deckType)
+      .map((slot) => slot.slot)
+      .sort((left, right) => left.localeCompare(right));
+    return deckSlots.length === 0
+      ? []
+      : [`${deckType.toUpperCase()} ${deckSlots.join("/")}`];
+  });
+  return decks.length === 0
+    ? "No retained slots"
+    : `${decks.join(" · ")} retained`;
 }
 
 export function realCollections(

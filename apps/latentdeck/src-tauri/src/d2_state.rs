@@ -6,7 +6,7 @@ use std::sync::{
 };
 
 use latentdeck_core::diagnostics::{LogLevel, record_global};
-use latentdeck_library::{CartridgeKey, DeckSourceIdentity};
+use latentdeck_library::{CartridgeKey, DeckSourceIdentity, ResolvedDeckSource};
 use latentdeck_native_output::NativeSpoutStatus;
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter as _, Manager as _, State};
@@ -20,7 +20,7 @@ use crate::{
         D2ControlsInput, D2LaunchConfig, D2Runtime, D2RuntimeError, D2SeedAckView, D2StatusView,
         D2TransportAckView, D2TransportInput, validate_selected_decoder,
     },
-    library_state::{AppState as LibraryAppState, CommandError},
+    library_state::{AppState as LibraryAppState, CommandError, DeckKind},
 };
 
 #[derive(Clone, Debug, Deserialize)]
@@ -256,7 +256,6 @@ pub(crate) async fn deck_d2_open(
     }
     let identity_a = source_identity(source_a)?;
     let identity_b = source_identity(source_b)?;
-
     let _lifecycle = state.lifecycle.lock().await;
     if let Err(error) = shutdown_runtime_slot(&state.runtime).await {
         D2AppState::emit_error(&app, &error);
@@ -281,6 +280,7 @@ pub(crate) async fn deck_d2_open(
             "LD-D2 source B is not a present, unchanged Library cartridge.",
         )
     })?;
+    let slot_bindings = d2_slot_bindings(&source_a, &source_b);
     let app_local_data = app.path().app_local_data_dir().map_err(|_| {
         CommandError::new(
             "capture.spool_root_invalid",
@@ -314,16 +314,19 @@ pub(crate) async fn deck_d2_open(
             return Err(command_error(error));
         }
     };
+    let deck_session = library.begin_deck_session(DeckKind::D2)?;
     let started = D2Runtime::start(
         app.clone(),
         Arc::clone(&state.status),
         Arc::clone(&state.capture_status),
         config,
+        deck_session.clone(),
     )
     .await;
     let started = match started {
         Ok(value) => value,
         Err(error) => {
+            deck_session.close();
             D2AppState::emit_error(&app, &error);
             return Err(command_error(error));
         }
@@ -337,6 +340,10 @@ pub(crate) async fn deck_d2_open(
         }
     };
     replace_slot(&state.runtime, started).await;
+    if let Err(error) = deck_session.publish(slot_bindings) {
+        let _ = shutdown_runtime_slot(&state.runtime).await;
+        return Err(error);
+    }
     Ok(view)
 }
 
@@ -550,6 +557,16 @@ fn source_identity(input: D2SourceIdentityInput) -> Result<DeckSourceIdentity, C
             "LD-D2 source identity must contain a canonical UUID and lowercase SHA-256.",
         )
     })
+}
+
+fn d2_slot_bindings(
+    source_a: &ResolvedDeckSource,
+    source_b: &ResolvedDeckSource,
+) -> [(&'static str, CartridgeKey); 2] {
+    [
+        ("A", source_a.identity().archive_sha256().clone()),
+        ("B", source_b.identity().archive_sha256().clone()),
+    ]
 }
 
 fn capture_output_path(

@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use latentdeck_core::diagnostics::{LogLevel, record_global};
-use latentdeck_library::{CartridgeKey, DeckSourceIdentity};
+use latentdeck_library::{CartridgeKey, DeckSourceIdentity, ResolvedDeckSource};
 use latentdeck_native_output::NativeSpoutStatus;
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter as _, Manager as _, State};
@@ -11,7 +11,7 @@ use tauri_plugin_dialog::DialogExt as _;
 use tokio::sync::{Mutex as AsyncMutex, watch};
 
 use crate::{
-    library_state::{AppState as LibraryAppState, CommandError},
+    library_state::{AppState as LibraryAppState, CommandError, DeckKind},
     q4_capture_host::Q4CaptureView,
     q4_runtime::{
         Q4BackendController, Q4BackendView, Q4CaptureHostServices, Q4ControlsAckView,
@@ -200,7 +200,6 @@ pub(crate) async fn deck_q4_open(
     let identity_b = source_identity(source_b)?;
     let identity_c = source_identity(source_c)?;
     let identity_d = source_identity(source_d)?;
-
     let _lifecycle = state.lifecycle.lock().await;
     if let Err(error) = shutdown_runtime_slot(&state.runtime).await {
         Q4AppState::emit_error(&app, &error);
@@ -217,6 +216,7 @@ pub(crate) async fn deck_q4_open(
     let source_b = resolve_source(&library, identity_b, "B").await?;
     let source_c = resolve_source(&library, identity_c, "C").await?;
     let source_d = resolve_source(&library, identity_d, "D").await?;
+    let slot_bindings = q4_slot_bindings(&source_a, &source_b, &source_c, &source_d);
     let app_local_data = app.path().app_local_data_dir().map_err(|_| {
         CommandError::new(
             "capture.spool_root_invalid",
@@ -253,16 +253,19 @@ pub(crate) async fn deck_q4_open(
             return Err(command_error(error));
         }
     };
+    let deck_session = library.begin_deck_session(DeckKind::Q4)?;
     let started = Q4Runtime::start(
         app.clone(),
         Arc::clone(&state.status),
         Arc::clone(&state.capture_status),
         config,
+        deck_session.clone(),
     )
     .await;
     let started = match started {
         Ok(value) => value,
         Err(error) => {
+            deck_session.close();
             Q4AppState::emit_error(&app, &error);
             return Err(command_error(error));
         }
@@ -276,6 +279,10 @@ pub(crate) async fn deck_q4_open(
         }
     };
     replace_slot(&state.runtime, started).await;
+    if let Err(error) = deck_session.publish(slot_bindings) {
+        let _ = shutdown_runtime_slot(&state.runtime).await;
+        return Err(error);
+    }
     Ok(view)
 }
 
@@ -515,6 +522,20 @@ fn source_identity(input: Q4SourceIdentityInput) -> Result<DeckSourceIdentity, C
             "LD-Q4 source identity must contain a canonical UUID and lowercase SHA-256.",
         )
     })
+}
+
+fn q4_slot_bindings(
+    source_a: &ResolvedDeckSource,
+    source_b: &ResolvedDeckSource,
+    source_c: &ResolvedDeckSource,
+    source_d: &ResolvedDeckSource,
+) -> [(&'static str, CartridgeKey); 4] {
+    [
+        ("A", source_a.identity().archive_sha256().clone()),
+        ("B", source_b.identity().archive_sha256().clone()),
+        ("C", source_c.identity().archive_sha256().clone()),
+        ("D", source_d.identity().archive_sha256().clone()),
+    ]
 }
 
 fn capture_output_path(

@@ -30,7 +30,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
-use crate::library_state::LibraryImporter;
+use crate::library_state::{DeckSessionLease, LibraryImporter};
 
 #[cfg(not(target_os = "windows"))]
 use crate::q4_capture_host::Q4CaptureView;
@@ -1034,12 +1034,12 @@ mod platform {
     };
 
     use super::{
-        AppHandle, Arc, CausalResetPlan, Duration, INITIAL_GENERATION, LibraryImporter,
-        MAX_Q4_SAFE_INTEGER, Mutex, Path, PathBuf, Q4_DECK_ID, Q4_OPERATOR_ID, Q4_OPERATOR_VERSION,
-        Q4_OUTPUT_WINDOW_LABEL, Q4_OUTPUT_WINDOW_TITLE, Q4Controls, Q4ControlsAckView,
-        Q4LaunchBackend, Q4LaunchConfig, Q4ResetReason, Q4Roles, Q4RolesAckView, Q4RuntimeError,
-        Q4SeedAckView, Q4Slot, Q4Status, Q4StatusView, Q4Transport, Q4TransportAckView,
-        TrustedQ4Source, ValidatedCodecPack,
+        AppHandle, Arc, CausalResetPlan, DeckSessionLease, Duration, INITIAL_GENERATION,
+        LibraryImporter, MAX_Q4_SAFE_INTEGER, Mutex, Path, PathBuf, Q4_DECK_ID, Q4_OPERATOR_ID,
+        Q4_OPERATOR_VERSION, Q4_OUTPUT_WINDOW_LABEL, Q4_OUTPUT_WINDOW_TITLE, Q4Controls,
+        Q4ControlsAckView, Q4LaunchBackend, Q4LaunchConfig, Q4ResetReason, Q4Roles, Q4RolesAckView,
+        Q4RuntimeError, Q4SeedAckView, Q4Slot, Q4Status, Q4StatusView, Q4Transport,
+        Q4TransportAckView, TrustedQ4Source, ValidatedCodecPack,
     };
 
     const CHANNEL_CAPACITY: usize = 8;
@@ -1068,6 +1068,7 @@ mod platform {
             shared_status: Arc<Mutex<Q4StatusView>>,
             shared_capture_status: Arc<Mutex<Q4CaptureView>>,
             config: Q4LaunchConfig,
+            deck_session: DeckSessionLease,
         ) -> Result<Self, Q4RuntimeError> {
             let launch = ValidatedWorkerLaunch::from_codec_pack_q4(&config.backend.codec_pack)
                 .map_err(|_| Q4RuntimeError::q4_entrypoint_missing())?;
@@ -1139,6 +1140,7 @@ mod platform {
                 status,
                 shared_status,
                 shared_capture_status,
+                deck_session,
                 closed: Arc::clone(&closed),
                 pending_frame: None,
                 presented_sequence: 0,
@@ -1779,6 +1781,7 @@ mod platform {
         status: Q4Status,
         shared_status: Arc<Mutex<Q4StatusView>>,
         shared_capture_status: Arc<Mutex<Q4CaptureView>>,
+        deck_session: DeckSessionLease,
         closed: Arc<AtomicBool>,
         pending_frame: Option<latentdeck_gpu::ring::RgbaFrame>,
         presented_sequence: u64,
@@ -2916,6 +2919,7 @@ mod platform {
             if self.closed.swap(true, Ordering::AcqRel) {
                 return;
             }
+            self.deck_session.close();
             stop_transport(&mut self.status.transport);
             let stopped = Q4StatusView::stopped_from(&self.status);
             let _ = replace_shared_status(&self.shared_status, stopped.clone());
@@ -2930,6 +2934,7 @@ mod platform {
             if self.closed.swap(true, Ordering::AcqRel) {
                 return Ok(());
             }
+            self.deck_session.close();
             stop_transport(&mut self.status.transport);
             let output_result = destroy_output(&self.output);
             let worker_result = stop_worker(&mut self.client, reason).await;
@@ -3807,6 +3812,7 @@ impl Q4Runtime {
         _shared_status: Arc<Mutex<Q4StatusView>>,
         _shared_capture_status: Arc<Mutex<Q4CaptureView>>,
         _config: Q4LaunchConfig,
+        _deck_session: DeckSessionLease,
     ) -> Result<Self, Q4RuntimeError> {
         Err(Q4RuntimeError::unsupported())
     }

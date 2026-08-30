@@ -54,6 +54,7 @@ impl From<LibraryError> for CommandError {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct SlotAssignmentView {
+    deck_type: &'static str,
     slot: String,
     archive_sha256: String,
 }
@@ -68,14 +69,40 @@ pub(crate) struct DeckSessionView {
 #[derive(Debug)]
 struct DeckSessionState {
     active_collection_id: CollectionId,
-    loaded_slots: BTreeMap<String, CartridgeKey>,
+    loaded_slots: BTreeMap<(DeckKind, String), CartridgeKey>,
+    runtime_sessions: BTreeMap<DeckKind, DeckRuntimeSession>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum DeckKind {
+    D2,
+    Q4,
+}
+
+impl DeckKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::D2 => "d2",
+            Self::Q4 => "q4",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DeckRuntimeSession {
+    generation: u64,
+    open: bool,
+}
+
+#[derive(Debug)]
+struct DeckSessionClosed;
 
 impl Default for DeckSessionState {
     fn default() -> Self {
         Self {
             active_collection_id: CollectionId::all_cartridges(),
             loaded_slots: BTreeMap::new(),
+            runtime_sessions: BTreeMap::new(),
         }
     }
 }
@@ -91,7 +118,8 @@ impl DeckSessionState {
             loaded_slots: self
                 .loaded_slots
                 .iter()
-                .map(|(slot, key)| SlotAssignmentView {
+                .map(|((deck, slot), key)| SlotAssignmentView {
+                    deck_type: deck.as_str(),
                     slot: slot.clone(),
                     archive_sha256: key.as_str().to_owned(),
                 })
@@ -99,9 +127,48 @@ impl DeckSessionState {
         }
     }
 
-    #[cfg(test)]
-    fn assign_slot(&mut self, slot: &str, key: CartridgeKey) {
-        self.loaded_slots.insert(slot.to_owned(), key);
+    fn begin_deck(&mut self, deck: DeckKind) -> u64 {
+        self.loaded_slots
+            .retain(|(loaded_deck, _), _| *loaded_deck != deck);
+        let session = self.runtime_sessions.entry(deck).or_default();
+        session.generation = session.generation.wrapping_add(1).max(1);
+        session.open = true;
+        session.generation
+    }
+
+    fn publish_deck_slots<const N: usize>(
+        &mut self,
+        deck: DeckKind,
+        generation: u64,
+        slots: [(&str, CartridgeKey); N],
+    ) -> Result<(), DeckSessionClosed> {
+        let current = self
+            .runtime_sessions
+            .get(&deck)
+            .filter(|session| session.open && session.generation == generation)
+            .ok_or(DeckSessionClosed)?;
+        debug_assert_eq!(current.generation, generation);
+        self.loaded_slots
+            .retain(|(loaded_deck, _), _| *loaded_deck != deck);
+        self.loaded_slots.extend(
+            slots
+                .into_iter()
+                .map(|(slot, key)| ((deck, slot.to_owned()), key)),
+        );
+        Ok(())
+    }
+
+    fn close_deck(&mut self, deck: DeckKind, generation: u64) -> bool {
+        let Some(session) = self.runtime_sessions.get_mut(&deck) else {
+            return false;
+        };
+        if session.generation != generation || !session.open {
+            return false;
+        }
+        session.open = false;
+        self.loaded_slots
+            .retain(|(loaded_deck, _), _| *loaded_deck != deck);
+        true
     }
 }
 
@@ -404,6 +471,16 @@ pub(crate) struct AppState {
     controller: Arc<Mutex<LibraryController>>,
 }
 
+/// Generation-scoped writer for one running Deck. A terminal worker failure or
+/// explicit shutdown can only clear the slots that belong to its own runtime;
+/// a late cleanup from an older runtime cannot erase a replacement session.
+#[derive(Clone)]
+pub(crate) struct DeckSessionLease {
+    controller: Arc<Mutex<LibraryController>>,
+    deck: DeckKind,
+    generation: u64,
+}
+
 #[derive(Clone)]
 pub(crate) struct LibraryImporter {
     controller: Arc<Mutex<LibraryController>>,
@@ -434,6 +511,59 @@ impl AppState {
     pub(crate) fn importer(&self) -> LibraryImporter {
         LibraryImporter {
             controller: Arc::clone(&self.controller),
+        }
+    }
+
+    /// Begin a replacement runtime session. Existing slots for this Deck are
+    /// removed immediately because every open attempt first shuts down the
+    /// previous runtime; other concurrently running Deck types are untouched.
+    pub(crate) fn begin_deck_session(
+        &self,
+        deck: DeckKind,
+    ) -> Result<DeckSessionLease, CommandError> {
+        let generation = lock_controller(&self.controller)?
+            .deck_session
+            .begin_deck(deck);
+        Ok(DeckSessionLease {
+            controller: Arc::clone(&self.controller),
+            deck,
+            generation,
+        })
+    }
+}
+
+impl DeckSessionLease {
+    /// Publish identities only after the worker has started and answered its
+    /// first status request. A lease already closed by actor recovery rejects
+    /// the publication, preventing a false loaded state.
+    pub(crate) fn publish<const N: usize>(
+        &self,
+        slots: [(&str, CartridgeKey); N],
+    ) -> Result<(), CommandError> {
+        lock_controller(&self.controller)?
+            .deck_session
+            .publish_deck_slots(self.deck, self.generation, slots)
+            .map_err(|_| {
+                CommandError::new(
+                    "deck.runtime_unavailable",
+                    "The Deck stopped before its loaded slots could be retained.",
+                )
+            })
+    }
+
+    /// Close this runtime's view. Stale generations are deliberately ignored.
+    pub(crate) fn close(&self) {
+        match lock_controller(&self.controller) {
+            Ok(mut controller) => {
+                controller
+                    .deck_session
+                    .close_deck(self.deck, self.generation);
+            }
+            Err(error) => record_global(
+                LogLevel::Error,
+                "library.deck_session_close_failed",
+                Some(&error.code),
+            ),
         }
     }
 }
@@ -693,8 +823,15 @@ mod tests {
             .library
             .create_collection("Second")
             .expect("second collection");
-        controller.deck_session.assign_slot("A", fake_key('a'));
-        controller.deck_session.assign_slot("B", fake_key('b'));
+        let d2 = controller.deck_session.begin_deck(DeckKind::D2);
+        controller
+            .deck_session
+            .publish_deck_slots(
+                DeckKind::D2,
+                d2,
+                [("A", fake_key('a')), ("B", fake_key('b'))],
+            )
+            .expect("current D2 session accepts its slots");
         let slots_before = controller.deck_session.view().loaded_slots;
 
         controller
@@ -712,6 +849,84 @@ mod tests {
         let after_delete = controller.deck_session.view();
         assert_eq!(after_delete.active_collection_id, ALL_CARTRIDGES_ID);
         assert_eq!(after_delete.loaded_slots, slots_before);
+    }
+
+    #[test]
+    fn deck_slots_are_namespaced_and_replaced_per_runtime() {
+        let mut session = DeckSessionState::default();
+        let d2 = session.begin_deck(DeckKind::D2);
+        session
+            .publish_deck_slots(
+                DeckKind::D2,
+                d2,
+                [("A", fake_key('a')), ("B", fake_key('b'))],
+            )
+            .expect("publish D2");
+        let q4 = session.begin_deck(DeckKind::Q4);
+        session
+            .publish_deck_slots(
+                DeckKind::Q4,
+                q4,
+                [
+                    ("A", fake_key('c')),
+                    ("B", fake_key('d')),
+                    ("C", fake_key('e')),
+                    ("D", fake_key('f')),
+                ],
+            )
+            .expect("publish Q4");
+
+        let view = session.view();
+        assert_eq!(view.loaded_slots.len(), 6);
+        assert_eq!(view.loaded_slots[0].deck_type, "d2");
+        assert_eq!(view.loaded_slots[0].slot, "A");
+        assert_eq!(view.loaded_slots[2].deck_type, "q4");
+        assert_eq!(view.loaded_slots[2].slot, "A");
+
+        let replacement = session.begin_deck(DeckKind::D2);
+        assert_eq!(session.view().loaded_slots.len(), 4);
+        session
+            .publish_deck_slots(
+                DeckKind::D2,
+                replacement,
+                [("A", fake_key('1')), ("B", fake_key('2'))],
+            )
+            .expect("replace D2 only");
+        let view = session.view();
+        assert_eq!(view.loaded_slots.len(), 6);
+        assert!(view.loaded_slots.iter().any(|slot| {
+            slot.deck_type == "q4" && slot.slot == "D" && slot.archive_sha256 == "f".repeat(64)
+        }));
+    }
+
+    #[test]
+    fn closed_or_stale_runtime_cannot_publish_or_clear_another_session() {
+        let mut session = DeckSessionState::default();
+        let stale = session.begin_deck(DeckKind::D2);
+        assert!(session.close_deck(DeckKind::D2, stale));
+        assert!(
+            session
+                .publish_deck_slots(
+                    DeckKind::D2,
+                    stale,
+                    [("A", fake_key('a')), ("B", fake_key('b'))],
+                )
+                .is_err()
+        );
+        assert!(session.view().loaded_slots.is_empty());
+
+        let current = session.begin_deck(DeckKind::D2);
+        session
+            .publish_deck_slots(
+                DeckKind::D2,
+                current,
+                [("A", fake_key('c')), ("B", fake_key('d'))],
+            )
+            .expect("publish replacement");
+        assert!(!session.close_deck(DeckKind::D2, stale));
+        assert_eq!(session.view().loaded_slots.len(), 2);
+        assert!(session.close_deck(DeckKind::D2, current));
+        assert!(session.view().loaded_slots.is_empty());
     }
 
     #[test]

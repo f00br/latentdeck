@@ -3,6 +3,7 @@ import {
   ALL_CARTRIDGES_ID,
   EMPTY_LIBRARY_VIEW,
   canReorderActiveMembers,
+  describeLoadedSlots,
   moveItem,
   parseTags,
   selectActiveCollection,
@@ -14,8 +15,8 @@ import {
 describe("active Collection / Bank contract", () => {
   it("changes the browser selection without unloading playing slots", () => {
     const slots = [
-      { slot: "A", archiveSha256: "a".repeat(64) },
-      { slot: "B", archiveSha256: "b".repeat(64) },
+      { deckType: "d2" as const, slot: "A", archiveSha256: "a".repeat(64) },
+      { deckType: "d2" as const, slot: "B", archiveSha256: "b".repeat(64) },
     ];
     const session: DeckSessionView = {
       activeCollectionId: ALL_CARTRIDGES_ID,
@@ -24,6 +25,18 @@ describe("active Collection / Bank contract", () => {
     const selected = selectActiveCollection(session, "collection-id");
     expect(selected.activeCollectionId).toBe("collection-id");
     expect(selected.loadedSlots).toBe(slots);
+  });
+
+  it("reports the retained slots per running Deck", () => {
+    expect(describeLoadedSlots([])).toBe("No retained slots");
+    expect(
+      describeLoadedSlots([
+        { deckType: "d2", slot: "A", archiveSha256: "a".repeat(64) },
+        { deckType: "d2", slot: "B", archiveSha256: "b".repeat(64) },
+        { deckType: "q4", slot: "A", archiveSha256: "c".repeat(64) },
+        { deckType: "q4", slot: "D", archiveSha256: "d".repeat(64) },
+      ]),
+    ).toBe("D2 A/B · Q4 A/D retained");
   });
 });
 
