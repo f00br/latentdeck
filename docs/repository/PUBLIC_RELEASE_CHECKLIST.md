@@ -15,6 +15,9 @@ approve every action in the Publication authority section.
 - [ ] Codec/model assets and cartridges are governed separately and are not
       implied to inherit the LatentDeck license.
 - [ ] An SBOM and dependency-license review exist for the release build.
+- [ ] The application SBOM contains the exact pinned upstream Spout2 component,
+      commit, archive hash, native integration provenance, and BSD-2-Clause
+      license; the hash-bound `THIRD_PARTY_NOTICES.md` accompanies installers.
 
 ## Repository contents
 

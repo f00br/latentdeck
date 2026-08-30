@@ -6,6 +6,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+Import-Module (Join-Path $PSScriptRoot 'ReleaseSpoutMetadata.psm1') -Force
+
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $productVersion = '0.1.0'
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
@@ -151,6 +153,7 @@ try {
         Pop-Location
     }
 
+    $components.Add((New-Spout2CycloneDxComponent))
     $sortedComponents = @($components | Sort-Object -Property @{ Expression = { $_.'bom-ref' } })
     $duplicateReferences = @(
         $sortedComponents |
@@ -213,6 +216,7 @@ try {
         @($roundTrip.components).Count -lt 1) {
         throw 'Generated SBOM failed its structural self-check.'
     }
+    Assert-Spout2CycloneDxComponent -Components @($roundTrip.components) | Out-Null
     [System.IO.File]::Move($partialPath, $outputFullPath, $false)
     $hash = (Get-FileHash -LiteralPath $outputFullPath -Algorithm SHA256).Hash.ToLowerInvariant()
     Write-Host "SBOM: $outputFullPath"

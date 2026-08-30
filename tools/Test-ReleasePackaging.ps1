@@ -5,6 +5,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 Import-Module (Join-Path $PSScriptRoot 'CodecPackPackaging.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'ReleaseSpoutMetadata.psm1') -Force
 
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $artifactsRoot = Join-Path $repoRoot 'artifacts'
@@ -195,6 +196,76 @@ function Write-SyntheticDependencyMetadata {
 
 try {
     [System.IO.Directory]::CreateDirectory($testRoot) | Out-Null
+
+    $generatedReleaseSbom = Join-Path $testRoot 'latentdeck-0.1.0-sbom.cdx.json'
+    & (Join-Path $PSScriptRoot 'New-Sbom.ps1') -OutputPath $generatedReleaseSbom | Out-Null
+    $generatedBom = Get-Content -Raw -LiteralPath $generatedReleaseSbom |
+        ConvertFrom-Json -Depth 100
+    Assert-Spout2CycloneDxComponent -Components @($generatedBom.components) | Out-Null
+
+    $spoutComponent = New-Spout2CycloneDxComponent
+    $badSpoutComponent = $spoutComponent | ConvertTo-Json -Depth 16 | ConvertFrom-Json -Depth 16
+    $badSpoutComponent.licenses[0].license.id = 'Apache-2.0'
+    Assert-Throws -Context 'Spout2 SBOM component must retain BSD-2-Clause' -Action {
+        Assert-Spout2CycloneDxComponent -Components @($badSpoutComponent) | Out-Null
+    }
+    $conflictingSpoutComponent = $spoutComponent |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+    $conflictingSpoutComponent.licenses = @(
+        $conflictingSpoutComponent.licenses[0],
+        [pscustomobject]@{ license = [pscustomobject]@{ id = 'Apache-2.0' } }
+    )
+    Assert-Throws -Context 'Spout2 SBOM component must reject conflicting licenses' -Action {
+        Assert-Spout2CycloneDxComponent -Components @($conflictingSpoutComponent) | Out-Null
+    }
+
+    $noticeSource = Join-Path $repoRoot 'THIRD_PARTY_NOTICES.md'
+    $noticeSourceReceipt = Test-Spout2ThirdPartyNotice -Path $noticeSource
+    $noticeStage = Join-Path $testRoot 'application-release-metadata'
+    [System.IO.Directory]::CreateDirectory($noticeStage) | Out-Null
+    $noticeStageReceipt = Copy-Spout2ThirdPartyNotice `
+        -SourcePath $noticeSource `
+        -DestinationDirectory $noticeStage
+    if ($noticeStageReceipt.Sha256 -cne $noticeSourceReceipt.Sha256 -or
+        $noticeStageReceipt.ByteLength -ne $noticeSourceReceipt.ByteLength -or
+        [System.IO.Path]::GetFileName($noticeStageReceipt.Path) -cne 'THIRD_PARTY_NOTICES.md') {
+        throw 'Application release third-party notice staging contract failed.'
+    }
+    Assert-Throws -Context 'staged third-party notices must not be overwritten' -Action {
+        Copy-Spout2ThirdPartyNotice `
+            -SourcePath $noticeSource `
+            -DestinationDirectory $noticeStage | Out-Null
+    }
+    $badNoticePath = Join-Path $testRoot 'BAD_THIRD_PARTY_NOTICES.md'
+    $badNoticeText = [System.IO.File]::ReadAllText($noticeSource).Replace(
+        '- License: BSD-2-Clause',
+        '- License: Apache-2.0'
+    )
+    Write-Utf8Text -Path $badNoticePath -Content $badNoticeText
+    Assert-Throws -Context 'Spout2 notice must retain the BSD-2-Clause identity' -Action {
+        Test-Spout2ThirdPartyNotice -Path $badNoticePath | Out-Null
+    }
+    $conflictingNoticePath = Join-Path $testRoot 'CONFLICTING_THIRD_PARTY_NOTICES.md'
+    $conflictingNoticeText = [System.IO.File]::ReadAllText($noticeSource).Replace(
+        '- License: BSD-2-Clause',
+        "- License: BSD-2-Clause`n- License: Apache-2.0"
+    )
+    Write-Utf8Text -Path $conflictingNoticePath -Content $conflictingNoticeText
+    Assert-Throws -Context 'Spout2 notice must reject conflicting license metadata' -Action {
+        Test-Spout2ThirdPartyNotice -Path $conflictingNoticePath | Out-Null
+    }
+    $misplacedLegalPath = Join-Path $testRoot 'MISPLACED_SPOUT_LEGAL_TEXT.md'
+    $requiredSpoutLegalLine =
+        '2. Redistributions in binary form must reproduce the above copyright notice,'
+    $misplacedLegalText = [System.IO.File]::ReadAllText($noticeSource).Replace(
+        $requiredSpoutLegalLine,
+        '2. [Spout legal text deliberately removed for contract test]'
+    ) + "`n## Synthetic unrelated component`n`n$requiredSpoutLegalLine`n"
+    Write-Utf8Text -Path $misplacedLegalPath -Content $misplacedLegalText
+    Assert-Throws -Context 'Spout2 legal text must be contained by the Spout2 section' -Action {
+        Test-Spout2ThirdPartyNotice -Path $misplacedLegalPath | Out-Null
+    }
 
     foreach ($invalidToken in @('1variant', 'tae_h3')) {
         Assert-Throws -Context "Rust-incompatible token '$invalidToken' must be rejected" -Action {
@@ -603,7 +674,7 @@ try {
     }
 
     Write-Host 'RELEASE PACKAGING CONTRACT: PASS' -ForegroundColor Green
-    Write-Host 'Verified: independent NSIS config, Spout release feature, strict JSON types, CPython x64 identity, out-of-discovery staging, integrity, side-by-side install, exact-version uninstall, payload rejection.'
+    Write-Host 'Verified: independent NSIS config, pinned Spout2 SBOM/license/notice delivery, Spout release feature, strict JSON types, CPython x64 identity, out-of-discovery staging, integrity, side-by-side install, exact-version uninstall, payload rejection.'
 } finally {
     if (Test-Path -LiteralPath $testRoot) {
         Remove-Item -LiteralPath $testRoot -Recurse -Force

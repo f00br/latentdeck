@@ -69,7 +69,11 @@ pwsh -NoProfile -File tools/New-Sbom.ps1
 Do this before the RC build when the SBOM does not already exist. The builder
 requires an explicit input, validates strict UTF-8, CycloneDX 1.5, the
 `LatentDeck` component version `0.1.0`, a bounded non-empty component list, and
-the absence of machine-local paths or file URIs.
+the absence of machine-local paths or file URIs. It also requires exactly one
+upstream `Spout2` component with tag, commit, pinned archive SHA-256, native C++
+integration provenance, and the `BSD-2-Clause` license. Cargo metadata alone is
+not sufficient because Spout2 is compiled from separately prepared native
+source rather than a Cargo package.
 
 To use an already downloaded Spout2 archive:
 
@@ -115,6 +119,7 @@ installers/
   LatentDeck-0.1.0-windows-x64-unsigned-setup.exe
   LatentPlayer-0.1.0-windows-x64-unsigned-setup.exe
 metadata/
+  THIRD_PARTY_NOTICES.md
   latentdeck-0.1.0-sbom.cdx.json
 ```
 
@@ -124,11 +129,20 @@ assigns canonical unsigned names, records byte lengths and SHA-256 values, and
 then measures the staged files again. The mandatory SBOM
 is copied under `metadata`, with its byte length, component count, and SHA-256
 recorded in `release-candidate.json`; its digest is also included in
-`SHA256SUMS.txt`. Neither receipt hashes itself, so there is no recursive hash
-contract. The builder refuses an unexpected file or an existing destination.
+`SHA256SUMS.txt`. The reviewed Spout2 notice and full BSD-2-Clause text are
+copied to `metadata/THIRD_PARTY_NOTICES.md`; its byte length and SHA-256 are
+bound by the schema-3 RC receipt and the same checksum list. Neither receipt
+hashes itself, so there is no recursive hash contract. The builder refuses an
+unexpected file, an existing destination, a notice with changed required text,
+or an SBOM without the exact pinned upstream component.
 
 `release-candidate.json` explicitly records that the set is local, unsigned,
 Spout-enabled, and contains no Codec Pack, model weights, or cartridges.
+Keep the `metadata` directory with the installers whenever this binary set is
+copied or reviewed. The official D3D12 receiver used for QA is not an
+application dependency. A portable ignored local copy may exist under
+`vendor-local`, but the receiver is never tracked or committed and is never
+included in either installer or the release-candidate set.
 
 ## Install, update, and uninstall behavior
 
@@ -166,7 +180,8 @@ Codec Pack has its own version-scoped removal command.
 Run the following on a disposable, clean Windows 11 x64 machine with NVIDIA
 hardware and without ComfyUI:
 
-1. Verify both installer hashes against `SHA256SUMS.txt`.
+1. Verify both installer, SBOM, and `THIRD_PARTY_NOTICES.md` hashes against
+   `SHA256SUMS.txt`; keep the complete set together during testing.
 2. Install LatentPlayer only; verify launch, missing-codec UI, and uninstall.
 3. Install LatentDeck only; verify launch, missing-codec UI, and uninstall.
 4. Install both in each order; remove each in each order and prove the other

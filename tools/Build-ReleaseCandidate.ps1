@@ -12,13 +12,16 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $ProgressPreference = 'SilentlyContinue'
 
+Import-Module (Join-Path $PSScriptRoot 'ReleaseSpoutMetadata.psm1') -Force
+
 $releaseVersion = '0.1.0'
 $targetTriple = 'x86_64-pc-windows-msvc'
-$spoutTag = '2.007.017'
-$spoutCommit = 'f49e2f469f8cb25f559a6eaa61a3f5b8173fc100'
-$spoutArchiveSha256 = 'cb60c83d4df3c2927cd3c5a505910bb720a8011d505217a71d293968405e4bf4'
-$spoutArchiveBytes = [int64]5099633
-$spoutArchiveUrl = "https://github.com/leadedge/Spout2/archive/$spoutCommit.zip"
+$spoutMetadata = Get-Spout2ReleaseMetadata
+$spoutTag = $spoutMetadata.Tag
+$spoutCommit = $spoutMetadata.Commit
+$spoutArchiveSha256 = $spoutMetadata.ArchiveSha256
+$spoutArchiveBytes = [int64]$spoutMetadata.ArchiveBytes
+$spoutArchiveUrl = $spoutMetadata.ArchiveUrl
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $artifactsRoot = Join-Path $repoRoot 'artifacts'
 [System.IO.Directory]::CreateDirectory($artifactsRoot) | Out-Null
@@ -259,6 +262,8 @@ function Assert-CycloneDxSbom {
             }
             $index += 1
         }
+        $decoded = $text | ConvertFrom-Json -Depth 100
+        Assert-Spout2CycloneDxComponent -Components @($decoded.components) | Out-Null
     } finally {
         $document.Dispose()
     }
@@ -517,6 +522,8 @@ Invoke-Checked `
     -Description 'Pre-build public-tree audit' `
     -Command { & pwsh -NoProfile -File (Join-Path $repoRoot 'tools/Test-PublicTree.ps1') }
 $sbomInput = Assert-CycloneDxSbom -Path $SbomPath
+$noticeInput = Test-Spout2ThirdPartyNotice `
+    -Path (Join-Path $repoRoot 'THIRD_PARTY_NOTICES.md')
 $sourceSnapshotBefore = Get-ReleaseSourceSnapshot -RepositoryRoot $repoRoot
 $gitCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $gitCommit -cnotmatch '^[0-9a-f]{40}$') {
@@ -740,9 +747,32 @@ try {
         component_count = $stagedSbom.ComponentCount
     }
 
+    $noticeFileName = 'THIRD_PARTY_NOTICES.md'
+    $stagedNotice = Copy-Spout2ThirdPartyNotice `
+        -SourcePath $noticeInput.Path `
+        -DestinationDirectory $metadataDirectory
+    $noticeDestination = $stagedNotice.Path
+    if ($stagedNotice.Sha256 -cne $noticeInput.Sha256 -or
+        $stagedNotice.ByteLength -ne $noticeInput.ByteLength) {
+        throw 'Staged third-party notices do not match the reviewed source notice.'
+    }
+    $noticeReceipt = [ordered]@{
+        file_name = "metadata/$noticeFileName"
+        byte_length = $stagedNotice.ByteLength
+        sha256 = $stagedNotice.Sha256
+        components = @(
+            [ordered]@{
+                name = 'Spout2'
+                version = $spoutTag
+                commit = $spoutCommit
+                license = $spoutMetadata.LicenseId
+            }
+        )
+    }
+
     $manifestPath = Join-Path $outputStage 'release-candidate.json'
     $manifest = [ordered]@{
-        schema_version = 2
+        schema_version = 3
         release_version = $releaseVersion
         target = $targetTriple
         local_release_candidate = $true
@@ -778,6 +808,7 @@ try {
             feature = 'spout-sdk'
         }
         sbom = $sbomReceipt
+        third_party_notices = @($noticeReceipt)
         applications = $receipts
     }
     [System.IO.File]::WriteAllText(
@@ -791,6 +822,7 @@ try {
             "$($receipt.sha256)  installers/$($receipt.file_name)"
         }
         "$($sbomReceipt.sha256)  $($sbomReceipt.file_name)"
+        "$($noticeReceipt.sha256)  $($noticeReceipt.file_name)"
     )
     [System.IO.File]::WriteAllText(
         (Join-Path $outputStage 'SHA256SUMS.txt'),
@@ -816,6 +848,7 @@ try {
         'release-candidate.json',
         'SHA256SUMS.txt',
         'metadata/latentdeck-0.1.0-sbom.cdx.json',
+        'metadata/THIRD_PARTY_NOTICES.md',
         'installers/LatentDeck-0.1.0-windows-x64-unsigned-setup.exe',
         'installers/LatentPlayer-0.1.0-windows-x64-unsigned-setup.exe'
     )
@@ -841,6 +874,12 @@ try {
     ).Hash.ToLowerInvariant()
     if ($finalStagedSbomHash -cne $sbomReceipt.sha256) {
         throw 'Staged SBOM hash changed before finalization.'
+    }
+    $finalStagedNoticeHash = (
+        Get-FileHash -LiteralPath $noticeDestination -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ($finalStagedNoticeHash -cne $noticeReceipt.sha256) {
+        throw 'Staged third-party notices changed before finalization.'
     }
 
     [System.IO.Directory]::CreateDirectory($outputRoot) | Out-Null

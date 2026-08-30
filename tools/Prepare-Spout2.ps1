@@ -7,11 +7,14 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $ProgressPreference = 'SilentlyContinue'
 
-$spoutTag = '2.007.017'
-$spoutCommit = 'f49e2f469f8cb25f559a6eaa61a3f5b8173fc100'
-$archiveSha256 = 'cb60c83d4df3c2927cd3c5a505910bb720a8011d505217a71d293968405e4bf4'
-$archiveBytes = [int64]5099633
-$archiveUrl = "https://github.com/leadedge/Spout2/archive/$spoutCommit.zip"
+Import-Module (Join-Path $PSScriptRoot 'ReleaseSpoutMetadata.psm1') -Force
+
+$spoutMetadata = Get-Spout2ReleaseMetadata
+$spoutTag = $spoutMetadata.Tag
+$spoutCommit = $spoutMetadata.Commit
+$archiveSha256 = $spoutMetadata.ArchiveSha256
+$archiveBytes = [int64]$spoutMetadata.ArchiveBytes
+$archiveUrl = $spoutMetadata.ArchiveUrl
 $archiveLeafName = "spout2-$spoutCommit.zip"
 $installLeafName = "$spoutTag-$spoutCommit"
 $upstreamLeafName = "Spout2-$spoutCommit"

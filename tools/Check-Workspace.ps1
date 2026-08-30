@@ -31,6 +31,7 @@ try {
     Invoke-Checked { cargo clippy --workspace --all-targets -- -D warnings } 'Rust Clippy'
     Invoke-Checked { cargo test --workspace --all-targets } 'Rust tests'
     Invoke-Checked { & $pnpm install --frozen-lockfile } 'pnpm lock/install'
+    Invoke-Checked { & $pnpm format:check } 'Frontend format'
     Invoke-Checked { & $pnpm lint } 'Svelte/TypeScript checks'
     Invoke-Checked { & $pnpm test } 'Frontend tests'
     Invoke-Checked { & $pnpm build } 'Frontend builds'

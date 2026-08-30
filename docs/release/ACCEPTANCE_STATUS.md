@@ -29,6 +29,15 @@ recorded.
   synthetic cartridges on the real CUDA worker. It covered TOPK and Sinkhorn,
   carrier reassignment, relative donor influence, deterministic reset/replay,
   Snapshot, Live Capture, bounded spooling, and validated resample packing.
+- A separate release-class LD-Q4 CUDA proof passed at clean commit
+  `6fdca4305fdd` with four independently sourced, full-validated compatible
+  private cartridges. The receipt records four distinct cartridge IDs, archive
+  hashes, visual-payload hashes, and pairwise-disjoint lineage anchors. Three
+  portrait sources and one landscape source reached the common `448x768` grid
+  only through explicit provenance-bearing crop operations. TOPK and Sinkhorn
+  produced distinct decoded results; carrier reassignment, deterministic
+  restart/replay, atomic Snapshot and Live Capture, validation, reload, and
+  cleanup with no remaining partial file all passed.
 - The separate duplicate-source LD-Q4 functional proof passed on the same real
   CUDA worker with three distinct private AV archives assigned across four
   slots, with slot D explicitly reusing slot B. The worker acknowledgement,
@@ -40,19 +49,25 @@ recorded.
   shutdown remained responsive. See
   [Spout acceptance](../repository/SPOUT_ACCEPTANCE.md).
 - `tools/Test-ReleasePackaging.ps1` passed the independent-application and H3
-  Codec Pack lifecycle contract. An earlier application release set contains
-  two unsigned Spout-enabled NSIS installers, a receipt, checksums, build
-  commands, and a CycloneDX SBOM, but it is not the current source candidate and
-  is not accepted as the final local `0.1.0` installer set.
+  Codec Pack lifecycle contract. The current source contract additionally
+  generates and rejects drift from the pinned upstream Spout2 CycloneDX
+  component, BSD-2-Clause identity, archive/commit provenance, and hash-bound
+  third-party notice staging. An earlier application release set contains two
+  unsigned Spout-enabled NSIS installers, a receipt, checksums, build commands,
+  and a CycloneDX SBOM, but it predates that metadata contract, is not the
+  current source candidate, and is not accepted as the final local `0.1.0`
+  installer set.
 - The separate H3 Codec Pack distributable was built offline from the pinned
   CPython 3.13.14 embed archive and exact Windows PyTorch 2.13.0+cu130 closure.
-  The 1,942,789,598-byte archive SHA-256 is
-  `3859aec61a89867b6f7797bd8326b5bdd2eb1764243efc0e5dbb9ae71229839d`.
+  The 1,942,789,596-byte archive SHA-256 is
+  `0ee8a0c1293526334dc832f8f8a48527e7e0f2d6e3acd8f8a40a375a6135acfb`.
   Archive and post-install isolated import/CUDA smokes passed on an RTX 4070.
   The physical pack is currently installed below the current-user Codec Pack
-  root and passed the same isolated CUDA smoke. It includes generated dependency
-  inventory, CycloneDX 1.5 SBOM, and bundled third-party license texts; it
-  contains no model weight, generator, ComfyUI, cartridge, or private media.
+  root and passed the same isolated CUDA smoke. Its installed manifest,
+  integrity catalog, dependency inventory, SBOM, and notices match the archive
+  entries byte for byte. It includes generated dependency inventory, CycloneDX
+  1.5 SBOM, and bundled third-party license texts; it contains no model weight,
+  generator, ComfyUI, cartridge, or private media.
 - `tools/Test-DiagnosticBundle.ps1` passed bounded collection, field allowlists,
   secret/path removal, exact archive layout, atomic finalization, and
   no-overwrite behavior.
@@ -62,12 +77,12 @@ recorded.
 
 ## Open external acceptance gates
 
-- **Real four-source Q4 GPU receipt:** four full-validated compatible private
-  cartridges now exist at 448 by 768. They have four unique cartridge, archive,
-  video-payload, and declared source-lineage identities. Three portrait and one
-  landscape source were brought to the common grid only through explicit
-  provenance-bearing crop operations. The strict non-GPU preflight passes; the
-  current-clean-commit CUDA execution receipt is still pending.
+- **Final-candidate four-source Q4 replay:** the historical clean-commit,
+  release-class CUDA receipt is recorded above, so no corpus-acquisition or
+  four-independent-source gate remains. Later Q4 runtime and UI changes still
+  require the same strict replay from the final clean commit before master-user
+  handoff; that replay is a current-candidate gate, not a missing historical
+  proof.
 - **Realtime stability:** a legacy 1,800-second D2 Linear receipt records
   23.9335 fps, 52.422 ms control-latency p95, and passing recorded gates. On
   2026-08-30 the owner explicitly replaced the remaining pre-master-test
