@@ -171,7 +171,12 @@ def initialize_lc_metadata(
             "validation": _json_copy(dict(validation), label="LC validation"),
         }
     )
-    has_audio = isinstance(manifest.get("audio"), Mapping)
+    tensor_descriptors = manifest.get("tensors")
+    has_audio = isinstance(tensor_descriptors, Sequence) and any(
+        isinstance(descriptor, Mapping)
+        and (descriptor.get("stream") == "audio" or descriptor.get("name") == "audio")
+        for descriptor in tensor_descriptors
+    )
     ledger["audio"] = (
         {
             "policy": "copied_from_carrier_exact",

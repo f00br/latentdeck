@@ -32,6 +32,10 @@ def lc_source(cartridge_id: str, digest: str, marker: float) -> dict[str, object
                 "profile_version": "0.1.0",
             },
             "timing": {"contract": "minimax_h3_causal", "contract_version": "0.1.0"},
+            "tensors": [
+                {"stream": "visual", "name": "video"},
+                {"stream": "audio", "name": "audio"},
+            ],
             "audio": {"policy": "preserved_source"},
         },
         validation={"archive_sha256": digest, "validation_level": "full"},
@@ -106,6 +110,33 @@ def test_raw_operation_uses_source_provenance_without_inventing_a_parent() -> No
             "metadata": {"byte_length": 4096},
         },
     )
+
+
+def test_visual_only_lc_keeps_source_absent_audio_policy() -> None:
+    visual = {"samples": torch.zeros((1, 24, 2, 2, 2), dtype=torch.float16)}
+    source = initialize_lc_metadata(
+        visual,
+        manifest={
+            "cartridge_id": "550e8400-e29b-41d4-a716-4466554400c0",
+            "codec": {},
+            "timing": {},
+            "tensors": [
+                {"stream": "visual", "name": "video", "shape": [1, 24, 2, 2, 2]}
+            ],
+            "audio": {"policy": "source_absent"},
+        },
+        validation={"archive_sha256": "c" * 64},
+    )
+    operated = annotate_operation(
+        source,
+        sources=(("source", source),),
+        structural_role="source",
+        provenance={"operation": "CHANNEL_LAB", "parameters": {"strength": 0.0}},
+    )
+
+    assert derive_resample_inputs(operated).audio_disposition == {
+        "policy": "source_absent"
+    }
 
 
 def test_report_collects_versions_sources_operations_measurements_and_outputs() -> None:
