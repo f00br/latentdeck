@@ -167,6 +167,10 @@ def test_resample_derives_genealogy_history_and_audio_from_workflow_metadata(
             "cartridge_id": PARENT["cartridge_id"],
             "codec": {},
             "timing": {},
+            "tensors": [
+                {"stream": "visual", "name": "video"},
+                {"stream": "audio", "name": "audio"},
+            ],
             "audio": {"policy": "preserved_source"},
         },
         validation={"archive_sha256": PARENT["archive_sha256"]},
