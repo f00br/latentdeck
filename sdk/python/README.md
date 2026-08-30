@@ -64,10 +64,15 @@ For existing raw H3 AV collections, use the dedicated converter. Renaming a
 validated deterministic ZIP64 container with a manifest and payload hashes.
 
 ```text
-latentdeck-convert old-av-latent.safetensors -o converted.lc
+latentdeck-convert old-av-latent.safetensors --output converted.lc
 latentdeck-convert folder-with-latents --output-directory converted
 latentdeck-convert folder-with-latents --recursive --output-directory converted
 ```
+
+`--output` names one exact `.lc` file and is valid only for one explicitly
+named `.safetensors` input. `-o` / `--output-directory` always names a
+directory and preserves each source basename (and relative subdirectories for
+`--recursive`).
 
 The converter recognises the H3 visual/optional-audio tensor schema through the
 same Rust validator, preserves the original Safetensors payload bytes exactly,

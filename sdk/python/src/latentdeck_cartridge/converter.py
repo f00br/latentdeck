@@ -19,29 +19,52 @@ def _parser() -> argparse.ArgumentParser:
         description="Convert existing raw H3 Safetensors files into validated LC cartridges.",
     )
     parser.add_argument("inputs", nargs="+", type=Path)
-    parser.add_argument(
+    destination = parser.add_mutually_exclusive_group(required=True)
+    destination.add_argument(
         "-o",
         "--output-dir",
         "--output-directory",
         dest="output_dir",
-        required=True,
         type=Path,
+        help="directory that receives one <source-stem>.lc file per input",
+    )
+    destination.add_argument(
+        "--output",
+        dest="output_file",
+        type=Path,
+        help="exact .lc destination; valid only for one input file",
     )
     parser.add_argument("--recursive", action="store_true")
     return parser
 
 
 def _conversion_plan(
-    inputs: list[Path], output_dir: Path, *, recursive: bool
+    inputs: list[Path],
+    output_dir: Path | None,
+    *,
+    output_file: Path | None,
+    recursive: bool,
 ) -> list[tuple[Path, Path]]:
+    if output_file is not None:
+        if recursive or len(inputs) != 1:
+            raise ValueError("--output requires exactly one input file and forbids --recursive")
+        source = inputs[0].resolve()
+        if source.is_dir():
+            raise ValueError("--output cannot be used with a directory input")
+        if source.suffix.casefold() != ".safetensors":
+            raise ValueError("--output input must use the .safetensors extension")
+        if output_file.suffix.casefold() != ".lc":
+            raise ValueError("--output destination must use the .lc extension")
+        return [(source, output_file)]
+
+    if output_dir is None:
+        raise ValueError("an output directory is required")
     plan: list[tuple[Path, Path]] = []
     for provided in inputs:
         source = provided.resolve()
         if source.is_dir():
             candidates = (
-                source.rglob("*.safetensors")
-                if recursive
-                else source.glob("*.safetensors")
+                source.rglob("*.safetensors") if recursive else source.glob("*.safetensors")
             )
             for candidate in sorted(candidates, key=lambda path: str(path).casefold()):
                 relative = candidate.relative_to(source).with_suffix(".lc")
@@ -57,12 +80,18 @@ def convert_main(argv: Sequence[str] | None = None) -> int:
     """Convert explicitly named raw H3 inputs and emit one bounded JSON report."""
 
     arguments = _parser().parse_args(argv)
-    output_dir = arguments.output_dir.resolve()
+    output_dir = arguments.output_dir.resolve() if arguments.output_dir is not None else None
+    output_file = arguments.output_file.resolve() if arguments.output_file is not None else None
     try:
-        plan = _conversion_plan(arguments.inputs, output_dir, recursive=arguments.recursive)
+        plan = _conversion_plan(
+            arguments.inputs,
+            output_dir,
+            output_file=output_file,
+            recursive=arguments.recursive,
+        )
     except ValueError as error:
         json.dump(
-            {"status": "error", "code": "input_limit", "detail": str(error)},
+            {"status": "error", "code": "invalid_arguments", "detail": str(error)},
             sys.stdout,
             indent=2,
         )

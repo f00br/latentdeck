@@ -68,6 +68,40 @@ def test_converter_packs_one_existing_raw_h3_file_without_modifying_it(
     assert cartridge.validate(output)["validation"]["validation_level"] == "full"
 
 
+def test_converter_accepts_one_exact_lc_output_path(tmp_path: Path, capsys) -> None:
+    from latentdeck_cartridge.converter import convert_main
+
+    source = tmp_path / "old-h3.safetensors"
+    output = tmp_path / "renamed-cartridge.lc"
+    source.write_bytes(_synthetic_av_payload())
+
+    status = convert_main([str(source), "--output", str(output)])
+
+    report = json.loads(capsys.readouterr().out)
+    assert status == 0
+    assert report["items"][0]["output"] == str(output.resolve())
+    assert cartridge.validate(output)["validation"]["validation_level"] == "full"
+
+
+def test_converter_rejects_exact_output_for_a_directory_before_writing(
+    tmp_path: Path, capsys
+) -> None:
+    from latentdeck_cartridge.converter import convert_main
+
+    source = tmp_path / "latents"
+    source.mkdir()
+    (source / "clip.safetensors").write_bytes(_synthetic_video_payload())
+    output = tmp_path / "invalid.lc"
+
+    status = convert_main([str(source), "--output", str(output)])
+
+    report = json.loads(capsys.readouterr().out)
+    assert status == 2
+    assert report["code"] == "invalid_arguments"
+    assert "directory" in report["detail"]
+    assert not output.exists()
+
+
 def test_converter_recurses_only_when_explicit_and_preserves_relative_names(
     tmp_path: Path, capsys
 ) -> None:
@@ -81,9 +115,7 @@ def test_converter_recurses_only_when_explicit_and_preserves_relative_names(
     (nested / "manifest.json").write_text("{}", encoding="utf-8")
     output_dir = tmp_path / "converted"
 
-    status = convert_main(
-        [str(source_dir), "--recursive", "--output-directory", str(output_dir)]
-    )
+    status = convert_main([str(source_dir), "--recursive", "--output-directory", str(output_dir)])
 
     report = json.loads(capsys.readouterr().out)
     assert status == 0
@@ -106,9 +138,7 @@ def test_converter_rejects_output_collisions_before_writing_any_cartridge(
     second.write_bytes(_synthetic_video_payload())
     output_dir = tmp_path / "converted"
 
-    status = convert_main(
-        [str(first), str(second), "--output-dir", str(output_dir)]
-    )
+    status = convert_main([str(first), str(second), "--output-dir", str(output_dir)])
 
     report = json.loads(capsys.readouterr().out)
     assert status == 2
@@ -141,9 +171,7 @@ def test_converter_preserves_existing_h3_av_streams_and_reports_the_profile(
     assert inspection["manifest"]["audio"]["policy"] == "preserved_source"
 
 
-def test_converter_preflights_existing_outputs_before_batch_writes(
-    tmp_path: Path, capsys
-) -> None:
+def test_converter_preflights_existing_outputs_before_batch_writes(tmp_path: Path, capsys) -> None:
     from latentdeck_cartridge.converter import convert_main
 
     first = tmp_path / "first.safetensors"
