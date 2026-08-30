@@ -3,7 +3,15 @@
   "operator_id": "org.latentdeck.example.channel_roll",
   "operator_version": "0.1.0",
   "trust": "explicit_install",
-  "entrypoint": "latentdeck_example_channel_roll:process_slot",
+  "entrypoint": "latentdeck_example_channel_roll:process_sources",
+  "topology": "dual_source",
+  "input_count": 2,
+  "capabilities": {
+    "full_clip": true,
+    "streaming": true,
+    "chunk": true,
+    "deterministic": true
+  },
   "supported_profiles": [
     {
       "codec_family": "minimax_h3",
@@ -28,6 +36,12 @@
       "minimum": 1,
       "maximum": 23
     }
+  },
+  "bypass": {
+    "controls": {
+      "amount": 0.0
+    },
+    "output_source": 0
   },
   "limits": {
     "max_spatial_tokens": 4096

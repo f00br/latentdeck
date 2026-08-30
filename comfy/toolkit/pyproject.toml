@@ -6,7 +6,10 @@ requires-python = ">=3.13,<3.14"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 dependencies = [
+    "latentdeck-cartridge==0.1.0",
     "latentdeck-operator-d2==0.1.0",
+    "latentdeck-operator-q4==0.1.0",
+    "safetensors==0.8.0",
 ]
 
 [project.optional-dependencies]

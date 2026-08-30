@@ -1,0 +1,254 @@
+{
+  "id": "a91ec116-14d3-43d4-917e-69faf2ce0d05",
+  "revision": 0,
+  "last_node_id": 13,
+  "last_link_id": 14,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LatentDeckToolkitLCLoadInspect",
+      "pos": [30, 260],
+      "size": [300, 110],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {"name": "latent", "type": "LATENT", "links": [1, 6], "slot_index": 0},
+        {"name": "inspection_json", "type": "STRING", "links": [], "slot_index": 1}
+      ],
+      "properties": {"Node name for S&R": "LatentDeckToolkitLCLoadInspect"},
+      "widgets_values": ["source.lc"]
+    },
+    {
+      "id": 2,
+      "type": "VAELoader",
+      "pos": [30, 20],
+      "size": [300, 60],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {"name": "VAE", "type": "VAE", "links": [2], "slot_index": 0}
+      ],
+      "properties": {"Node name for S&R": "VAELoader"},
+      "widgets_values": ["taeh3.safetensors"]
+    },
+    {
+      "id": 3,
+      "type": "LatentDeckToolkitDeclareH3Vae",
+      "pos": [390, 10],
+      "size": [390, 220],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {"name": "vae", "type": "VAE", "link": 2}
+      ],
+      "outputs": [
+        {"name": "declared_vae", "type": "LATENTDECK_H3_VAE", "links": [3], "slot_index": 0}
+      ],
+      "properties": {"Node name for S&R": "LatentDeckToolkitDeclareH3Vae"},
+      "widgets_values": [
+        "FAST",
+        "org.comfy.taeh3",
+        "0.1.0",
+        "replace with selected FAST asset source",
+        "replace with selected FAST asset license",
+        "REPLACE_WITH_LOWERCASE_SHA256"
+      ]
+    },
+    {
+      "id": 4,
+      "type": "VAELoader",
+      "pos": [30, 500],
+      "size": [300, 60],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {"name": "VAE", "type": "VAE", "links": [4], "slot_index": 0}
+      ],
+      "properties": {"Node name for S&R": "VAELoader"},
+      "widgets_values": ["REPLACE_WITH_NATIVE_H3_VAE.safetensors"]
+    },
+    {
+      "id": 5,
+      "type": "LatentDeckToolkitDeclareH3Vae",
+      "pos": [390, 460],
+      "size": [390, 220],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {"name": "vae", "type": "VAE", "link": 4}
+      ],
+      "outputs": [
+        {"name": "declared_vae", "type": "LATENTDECK_H3_VAE", "links": [5, 8], "slot_index": 0}
+      ],
+      "properties": {"Node name for S&R": "LatentDeckToolkitDeclareH3Vae"},
+      "widgets_values": [
+        "HQ",
+        "org.minimax.h3.native-vae",
+        "0.1.0",
+        "replace with selected native H3 VAE source",
+        "replace with selected native H3 VAE license",
+        "REPLACE_WITH_LOWERCASE_SHA256"
+      ]
+    },
+    {
+      "id": 6,
+      "type": "LatentDeckToolkitManifoldProjector",
+      "pos": [850, 330],
+      "size": [350, 140],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {"name": "latent", "type": "LATENT", "link": 1},
+        {"name": "hq_vae", "type": "LATENTDECK_H3_VAE", "link": 5}
+      ],
+      "outputs": [
+        {"name": "projected_latent", "type": "LATENT", "links": [7, 9], "slot_index": 0},
+        {"name": "native_decode", "type": "IMAGE", "links": [], "slot_index": 1},
+        {"name": "projector_json", "type": "STRING", "links": [], "slot_index": 2}
+      ],
+      "properties": {"Node name for S&R": "LatentDeckToolkitManifoldProjector"},
+      "widgets_values": []
+    },
+    {
+      "id": 7,
+      "type": "LatentDeckToolkitProjectorComparison",
+      "pos": [1280, 230],
+      "size": [380, 190],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {"name": "raw_latent", "type": "LATENT", "link": 6},
+        {"name": "projected_latent", "type": "LATENT", "link": 7},
+        {"name": "fast_vae", "type": "LATENTDECK_H3_VAE", "link": 3},
+        {"name": "hq_vae", "type": "LATENTDECK_H3_VAE", "link": 8}
+      ],
+      "outputs": [
+        {"name": "raw_fast", "type": "IMAGE", "links": [10], "slot_index": 0},
+        {"name": "projected_fast", "type": "IMAGE", "links": [11], "slot_index": 1},
+        {"name": "raw_hq", "type": "IMAGE", "links": [12], "slot_index": 2},
+        {"name": "projected_hq", "type": "IMAGE", "links": [13], "slot_index": 3},
+        {"name": "comparison_json", "type": "STRING", "links": [14], "slot_index": 4}
+      ],
+      "properties": {"Node name for S&R": "LatentDeckToolkitProjectorComparison"},
+      "widgets_values": []
+    },
+    {
+      "id": 13,
+      "type": "PreviewAny",
+      "pos": [1280, 500],
+      "size": [380, 220],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [{"name": "source", "type": "*", "link": 14}],
+      "outputs": [
+        {"name": "STRING", "type": "STRING", "links": [], "slot_index": 0}
+      ],
+      "properties": {"Node name for S&R": "PreviewAny"},
+      "widgets_values": []
+    },
+    {
+      "id": 8,
+      "type": "LatentDeckToolkitLCSaveResample",
+      "pos": [850, 570],
+      "size": [430, 300],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {"name": "latent", "type": "LATENT", "link": 9}
+      ],
+      "outputs": [
+        {"name": "latent", "type": "LATENT", "links": [], "slot_index": 0},
+        {"name": "receipt_json", "type": "STRING", "links": [], "slot_index": 1}
+      ],
+      "properties": {"Node name for S&R": "LatentDeckToolkitLCSaveResample"},
+      "widgets_values": [
+        "projected-resample.lc",
+        false
+      ]
+    },
+    {
+      "id": 9,
+      "type": "PreviewImage",
+      "pos": [1750, 10],
+      "size": [320, 250],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [{"name": "images", "type": "IMAGE", "link": 10}],
+      "outputs": [],
+      "properties": {"Node name for S&R": "PreviewImage"},
+      "widgets_values": []
+    },
+    {
+      "id": 10,
+      "type": "PreviewImage",
+      "pos": [2110, 10],
+      "size": [320, 250],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [{"name": "images", "type": "IMAGE", "link": 11}],
+      "outputs": [],
+      "properties": {"Node name for S&R": "PreviewImage"},
+      "widgets_values": []
+    },
+    {
+      "id": 11,
+      "type": "PreviewImage",
+      "pos": [1750, 330],
+      "size": [320, 250],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [{"name": "images", "type": "IMAGE", "link": 12}],
+      "outputs": [],
+      "properties": {"Node name for S&R": "PreviewImage"},
+      "widgets_values": []
+    },
+    {
+      "id": 12,
+      "type": "PreviewImage",
+      "pos": [2110, 330],
+      "size": [320, 250],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [{"name": "images", "type": "IMAGE", "link": 13}],
+      "outputs": [],
+      "properties": {"Node name for S&R": "PreviewImage"},
+      "widgets_values": []
+    }
+  ],
+  "links": [
+    [1, 1, 0, 6, 0, "LATENT"],
+    [2, 2, 0, 3, 0, "VAE"],
+    [3, 3, 0, 7, 2, "LATENTDECK_H3_VAE"],
+    [4, 4, 0, 5, 0, "VAE"],
+    [5, 5, 0, 6, 1, "LATENTDECK_H3_VAE"],
+    [6, 1, 0, 7, 0, "LATENT"],
+    [7, 6, 0, 7, 1, "LATENT"],
+    [8, 5, 0, 7, 3, "LATENTDECK_H3_VAE"],
+    [9, 6, 0, 8, 0, "LATENT"],
+    [10, 7, 0, 9, 0, "IMAGE"],
+    [11, 7, 1, 10, 0, "IMAGE"],
+    [12, 7, 2, 11, 0, "IMAGE"],
+    [13, 7, 3, 12, 0, "IMAGE"],
+    [14, 7, 4, 13, 0, "STRING"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {"ds": {"scale": 0.65, "offset": [20, 20]}},
+  "version": 0.4
+}

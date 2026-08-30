@@ -205,7 +205,10 @@ name = "latentdeck-comfy-toolkit"
 version = "0.1.0"
 source = { editable = "comfy/toolkit" }
 dependencies = [
+    { name = "latentdeck-cartridge" },
     { name = "latentdeck-operator-d2" },
+    { name = "latentdeck-operator-q4" },
+    { name = "safetensors" },
 ]
 
 [package.optional-dependencies]
@@ -218,8 +221,11 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "latentdeck-cartridge", editable = "sdk/python" },
     { name = "latentdeck-operator-d2", editable = "operators/builtin/d2" },
+    { name = "latentdeck-operator-q4", editable = "operators/builtin/q4" },
     { name = "pytest", marker = "extra == 'test'", specifier = "==9.1.1" },
+    { name = "safetensors", specifier = "==0.8.0" },
     { name = "torch", marker = "extra == 'cu130'", specifier = "==2.13.0", index = "https://download.pytorch.org/whl/cu130" },
 ]
 provides-extras = ["cu130", "test"]

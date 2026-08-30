@@ -1,113 +1,147 @@
 # LatentDeck Comfy Toolkit 0.1
 
-LatentDeck Comfy Toolkit is the public clean-room research surface for latent
-operators inside ComfyUI. It is intentionally separate from the lightweight
-`ComfyUI-LatentCartridge` recorder and from the standalone realtime worker.
+LatentDeck Comfy Toolkit is the public clean-room laboratory for inspecting H3
+latent media, developing latent operators, comparing decoders, and writing
+manipulated latent state back to `.lc`. It is separate from the lightweight
+`ComfyUI-LatentCartridge` recorder and from the standalone realtime Deck.
 
-The package contains no model weights, decoder assets, cartridges, workflows,
-prompts, generated media, or private laboratory code. It does not include
-InteractionNet or any checkpoint.
+The package contains no model weight, decoder asset, cartridge, raw latent,
+prompt, generated media, or private laboratory workflow. The six included
+[example workflows](workflows/README.md) are original, sanitized, data-free
+graphs. InteractionNet, MutantNet, prompt conditioning, audio processing,
+MIDI/OSC, Spout, a timeline, and an H3 generation pipeline are not included.
 
-## Nodes
+## Node inventory
 
-The Toolkit exports seven ComfyUI nodes:
+The canonical Comfy registry exports 32 nodes under `LatentDeck / Toolkit`.
 
-- `LatentDeck XS1 — Channel Rotation`
-- `LatentDeck XS2 — Grid Exchange`
-- `LatentDeck XS3 — Temporal Interaction`
-- `LatentDeck XS4 — Statistics Transfer`
-- `LatentDeck XS5 — Affinity Transport`
-- `LatentDeck Compare FAST / HQ Hooks`
-- `LatentDeck Projector (Offline CPU)`
+### Cartridge I/O and compatibility
 
-The five XS nodes are a stable sequence adapter over the already reviewed
-`latentdeck_operator_d2.process_slot` implementation. The Toolkit does not
-copy, fork, or reinterpret XS math. It only validates a complete
-`[1,24,T,H,W]` sequence, supplies independent per-slot history, invokes the
-builtin implementation, and aggregates bounded JSON provenance.
+- **LC Load / Inspect** — strict `.lc` validation plus manifest, codec/profile,
+  tensor schema, timing, provenance, hash, and compatibility receipt.
+- **Raw H3 Latent Import** — reads a validated legacy H3 visual/AV Safetensors
+  directly into the lab without requiring a prior `.lc` conversion.
+- **LC Save / Resample** — writes post-operator latent state as a validated new
+  cartridge with parent cartridges, operation history, and explicit audio
+  disposition derived from the bounded metadata ledger carried by the graph.
+- **Compatibility Checker** — reports exact codec/profile, geometry, temporal,
+  and timing disagreements before synthesis.
+- **Explicit H3 Crop** and **Explicit H3 Pair Align** — visible, user-selected
+  temporal/spatial policies. There is no implicit resize or re-encode.
 
-Inputs remain full-grid F16 H3 0.1 tensors. There is no hidden crop, resize,
-downscale, temporal conversion, or runtime dtype cast. The public bounds are:
+All cartridge bytes are read and written through the shared Rust Cartridge SDK
+binding. The Toolkit does not implement a second ZIP/Safetensors trust path.
+Audio payloads can be preserved as opaque cartridge data when the declared
+policy permits it, but Toolkit 0.1 does not play or synthesize audio.
 
-- at most 512 temporal slots;
-- at most 4096 spatial tokens per slot;
-- at most 50,331,648 values per sequence;
-- the exact H3 profile and causal timing contract from LC Profile 0.1.
+### XS operators and mixer labs
 
-## FAST / HQ comparison hooks
+- **XS1 — Channel Mixer** uses explicit per-channel cross-synthesis weights.
+- **XS2 — Spatial Latent Graft** applies a visible mask on the latent grid.
+- **XS3 — Frequency Cross-Synthesis** performs spatial FFT-band exchange.
+- **XS4 — Statistics Transfer** transfers bounded mean/std statistics.
+- **XS5 — Affinity / Sinkhorn Transport** provides `HYBRIDIZE` and `INTERACT`
+  with TOPK/Sinkhorn routing, bounded parameters, and deterministic seed.
+- **Dual Mixer Lab** provides `carrier + donor → operator` for Linear/XS1–XS5.
+- **Carrier / Donor Router** fixes one carrier, three donor weights, and a
+  deterministic B/C/D processing order.
+- **Quad Mixer Lab** provides the 0.1 `carrier + 3 donors` topology, manual or
+  triangular donor-weight macro, and Linear/XS5 processing.
 
-The comparison API accepts two explicit `DecoderHook` objects. Each object
-contains a caller-supplied callable and an optional opaque, caller-owned asset.
-The Toolkit never searches for, downloads, imports, or bundles a decoder. If an
-asset is provided, a lowercase SHA-256 identity is required for provenance.
+Every synthesis path accepts complete finite H3 grids. It never silently
+downscales, drops a donor, crops a stream, or changes algorithm for speed.
 
-External decoder packages can expose Comfy nodes that return the custom
-`LATENTDECK_DECODER_HOOK` type. The comparison node invokes both hooks over the
-same latent and reports bounded finite MAE, maximum error, RMSE, and PSNR when
-defined. FAST and HQ outputs must have identical shape and device; the Comfy
-node additionally requires standard `[N,H,W,C]` IMAGE layout with one, three,
-or four channels. Each hook receives an independent contiguous clone, so an
-in-place implementation cannot mutate the workflow latent or affect the other
-hook.
+### Research labs and evaluation
 
-Each decoded output is bounded to 402,653,184 F16, BF16, or F32 values. This
-covers the release profile's 243-frame 448×800 case with up to four channels.
-Metrics are accumulated in F64 chunks of at most 1,048,576 values rather than
-materializing full-size F64 copies of both decoded sequences.
+- **Temporal Lab** — explicit offset, reverse, loop, and crop operations.
+- **Feedback Lab** — bounded safe feedback variants; no unbounded recursive
+  graph or hidden persistent state.
+- **Channel Lab** — explicit 24×24 rotation/matrix operations.
+- **Operator Chain Receipt** — aggregates the receipts produced by a visible
+  Comfy node chain; the tensor chain itself remains ordinary node connections.
+- **Latent Scopes / Diagnostics** — mean/std, min/max, NaN/Inf, channel energy,
+  and temporal energy.
+- **Dual Operator Test Hook**, **Operator Benchmark**, **Determinism Test**, and
+  **Streaming Compatibility Test** — measure execution time, CUDA memory delta,
+  shape, repeatability, and full-clip-versus-chunk agreement.
+- **One-click Research Report** — validates bounded JSON receipts and writes
+  deterministic JSON plus Markdown through `.partial` files followed by atomic
+  rename. Duplicate keys, NaN/Inf, unsafe embedded paths, unsafe report names,
+  oversized sections, and implicit overwrite are rejected.
 
-## Offline Projector
+The report contains versions, cartridges, operator IDs/parameters,
+timing/benchmark/VRAM measurements, and outputs. Receipts expose only output
+basenames and content hashes, not the selected machine directory.
+Load, operator, evaluation, save, and report nodes exchange this information
+automatically; parent-cartridge, operator-history, and report-section JSON are
+not manual workflow fields.
 
-`project_offline` is a deterministic centered full-SVD reconstruction. It is
-CPU-only, accepts F16 or F32 `[1,24,T,H,W]`, preserves shape and storage dtype,
-and is bounded to 262,144 latent tokens. The Comfy node makes CPU staging
-explicit in its name and provenance and returns a CPU latent.
+### FAST/HQ decode and projection
 
-The Projector is an offline research processor. It is deliberately absent from
-the standalone realtime codec worker and its provenance always records
-`realtime_eligible: false`.
+- **Declare H3 VAE Asset** attaches explicit role, source, license, version,
+  and SHA-256 identity to a caller-selected Comfy `VAE` object.
+- **FAST Decode** uses the explicitly supplied TAEHV/taeh3-compatible VAE.
+- **HQ Decode** uses the explicitly supplied native H3 VAE.
+- **FAST vs HQ Comparator** decodes the same visual latent through both and
+  reports bounded MAE, maximum error, RMSE, and PSNR when defined.
+- **Manifold Projector — Native H3** performs the explicit offline research path
+  `native H3 decode → native H3 encode → projected latent`.
+- **RAW vs PROJECTED Comparator** sends both latent states through the exact
+  same FAST/HQ pair.
+- **Compare FAST/HQ Hooks** remains the lower-level caller-supplied decoder-hook
+  surface.
+- **PCA Diagnostic (Offline CPU)** remains a clearly named diagnostic; it is
+  not presented as the native H3 manifold projector.
 
-## Explicit external operators
+The Toolkit never discovers, downloads, or bundles a VAE. The caller selects
+the exact external assets and supplies truthful provenance. H3 audio is ignored
+by decode and is never sent into a visual VAE.
 
-The Toolkit includes a versioned explicit-install registry for separately
-distributed research operators. Installation requires application code to pass
-both a closed descriptor and an already imported callable:
+## External operator contract
 
-```python
-from latentdeck_comfy_toolkit import TrustedOperatorRegistry
-from latentdeck_example_channel_roll import install_into
+External operators are separately installed trusted Python packages. A
+cartridge cannot import one, carry Python source, choose a package, or mutate
+the registry. Every descriptor declares one of `single_source`, `dual_source`,
+or `carrier_donors`, its exact input count/order, supported codec/timing
+profiles, deterministic and streaming/chunk capabilities, closed controls,
+resource limit, and exact bypass state.
 
-registry = TrustedOperatorRegistry()
-install_into(registry)  # explicit owner/host action
-operator = registry.load("org.latentdeck.example.channel_roll", "0.1.0")
-```
+Start with the
+[MyLatentOperator developer template](docs/OPERATOR_DEVELOPER_TEMPLATE.md), the
+normative [Operator API 0.1](../../spec/operator-api/README.md), and the public
+[Channel Roll example](../../operators/examples/channel-roll/README.md).
 
-The registry never imports the descriptor's entrypoint string, discovers
-packages, fetches URLs, or reads code from a cartridge. Importing the example
-package alone does not install it. An explicitly installed operator is trusted
-native Python code, not a sandboxed plugin, so users must review its source and
-distribution before making that call.
+## Example workflows
 
-The normative contract is documented in the
-[Operator API 0.1](../../spec/operator-api/README.md). The separate example is
-under [`operators/examples/channel-roll`](../../operators/examples/channel-roll/README.md).
+The [workflow guide](workflows/README.md) covers:
+
+- `01_LC_INSPECT.json`;
+- `02_FAST_HQ_COMPARE.json`;
+- `03_DUAL_SYNTH_LAB.json`;
+- `04_QUAD_CARRIER_DONORS.json`;
+- `05_PROJECT_RESAMPLE.json`;
+- `99_OPERATOR_DEVELOPER_TEMPLATE.json`.
+
+The graphs use relative placeholders only. Replace cartridge inputs and
+external VAE identity fields before queueing. No test cartridge or golden H3
+payload is distributed; users connect their own compatible `.lc` files.
 
 ## Installation
 
-The wheel installs the Python library and its pinned dependencies; it does not
-modify a ComfyUI installation or auto-register custom nodes. Install the
-Toolkit wheel into the same Python environment that starts ComfyUI. Then place
-this `comfy/toolkit` directory in ComfyUI's `custom_nodes` directory so its
-top-level discovery shim is loaded, and restart ComfyUI.
+Install the Toolkit wheel and its pinned dependencies into the same Python
+environment that launches ComfyUI. Then place this `comfy/toolkit` directory in
+ComfyUI's `custom_nodes` directory so the top-level discovery shim is loaded,
+and restart ComfyUI.
 
-The separately packaged `latentdeck-operator-d2` dependency must be installed
-in that same environment. A repository workspace install resolves it from the
-uv workspace; a standalone install must provide both compatible wheels. No
-weight or decoder package is installed by this process.
+The workspace resolves the shared `latentdeck-cartridge`,
+`latentdeck-operator-d2`, and `latentdeck-operator-q4` distributions. A
+standalone installation must provide compatible wheels for all four packages.
+No weight or decoder package is installed by this process.
 
-After restart, verify that the seven nodes listed above appear under
-`LatentDeck / Toolkit`. Installing the optional Channel Roll example wheel does
-not register it automatically; a trusted host still has to call its explicit
-`install_into(registry)` function.
+After restart, confirm that **LatentDeck LC Load / Inspect**, **LatentDeck XS5
+— Affinity / Sinkhorn Transport**, and **LatentDeck One-click Research Report**
+appear. Open `01_LC_INSPECT.json` first to verify the local node installation
+before selecting any external VAE.
 
 ## Local checks
 
@@ -118,5 +152,6 @@ uv run --no-sync pytest comfy/toolkit/tests
 uv run --no-sync ruff check comfy/toolkit
 ```
 
-All tests use finite synthetic tensors created in memory. No media fixture or
-decoder asset is part of the test corpus.
+Tests create finite synthetic tensors and temporary outputs in memory or the
+test temporary directory. They do not use private media, a model asset, or a
+real cartridge fixture.

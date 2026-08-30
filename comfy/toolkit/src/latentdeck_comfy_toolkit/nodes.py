@@ -10,7 +10,14 @@ import torch
 
 from .adapter import process_xs_sequence
 from .decoder_compare import DecoderHook, ToolkitContractError, compare_decoder_hooks
+from .io_nodes import IO_NODE_CLASS_MAPPINGS, IO_NODE_DISPLAY_NAME_MAPPINGS
 from .projector import preflight_projector_input, project_offline
+from .report_nodes import REPORT_NODE_CLASS_MAPPINGS, REPORT_NODE_DISPLAY_NAME_MAPPINGS
+from .research_nodes import (
+    RESEARCH_NODE_CLASS_MAPPINGS,
+    RESEARCH_NODE_DISPLAY_NAME_MAPPINGS,
+)
+from .vae_nodes import VAE_NODE_CLASS_MAPPINGS, VAE_NODE_DISPLAY_NAME_MAPPINGS
 
 _MAX_SAFE_SEED = 9_007_199_254_740_991
 
@@ -51,24 +58,24 @@ class _XsNode:
         required: dict[str, object] = {
             "latent_a": ("LATENT",),
             "latent_b": ("LATENT",),
-            "mix": ("FLOAT", {"default": 0.5, "minimum": 0.0, "maximum": 1.0, "step": 0.01}),
+            "mix": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
             "mode": (["HYBRIDIZE", "INTERACT"],),
             "routing": (["A", "B"],),
             "interaction": (
                 "FLOAT",
-                {"default": 0.7, "minimum": 0.0, "maximum": 1.0, "step": 0.01},
+                {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.01},
             ),
             "preserve": (
                 "FLOAT",
-                {"default": 0.55, "minimum": 0.0, "maximum": 1.0, "step": 0.01},
+                {"default": 0.55, "min": 0.0, "max": 1.0, "step": 0.01},
             ),
             "chaos": (
                 "FLOAT",
-                {"default": 0.0, "minimum": 0.0, "maximum": 1.0, "step": 0.01},
+                {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01},
             ),
             "seed": (
                 "INT",
-                {"default": 0, "minimum": 0, "maximum": _MAX_SAFE_SEED},
+                {"default": 0, "min": 0, "max": _MAX_SAFE_SEED},
             ),
         }
         required.update(cls.EXTRA_INPUTS)
@@ -119,11 +126,11 @@ class LatentDeckToolkitXS1(_XsNode):
     ALGORITHM = "XS1"
     CONTROL_KEYS = ("xs1_channel_a", "xs1_channel_b", "xs1_angle_degrees")
     EXTRA_INPUTS = {
-        "xs1_channel_a": ("INT", {"default": 0, "minimum": 0, "maximum": 23}),
-        "xs1_channel_b": ("INT", {"default": 1, "minimum": 0, "maximum": 23}),
+        "xs1_channel_a": ("INT", {"default": 0, "min": 0, "max": 23}),
+        "xs1_channel_b": ("INT", {"default": 1, "min": 0, "max": 23}),
         "xs1_angle_degrees": (
             "FLOAT",
-            {"default": 30.0, "minimum": -180.0, "maximum": 180.0, "step": 1.0},
+            {"default": 30.0, "min": -180.0, "max": 180.0, "step": 1.0},
         ),
     }
 
@@ -132,7 +139,7 @@ class LatentDeckToolkitXS2(_XsNode):
     ALGORITHM = "XS2"
     CONTROL_KEYS = ("xs2_radius",)
     EXTRA_INPUTS = {
-        "xs2_radius": ("INT", {"default": 1, "minimum": 1, "maximum": 8}),
+        "xs2_radius": ("INT", {"default": 1, "min": 1, "max": 8}),
     }
 
 
@@ -142,7 +149,7 @@ class LatentDeckToolkitXS3(_XsNode):
     EXTRA_INPUTS = {
         "xs3_high_gain": (
             "FLOAT",
-            {"default": 0.5, "minimum": -2.0, "maximum": 2.0, "step": 0.01},
+            {"default": 0.5, "min": -2.0, "max": 2.0, "step": 0.01},
         ),
     }
 
@@ -153,7 +160,7 @@ class LatentDeckToolkitXS4(_XsNode):
     EXTRA_INPUTS = {
         "xs4_epsilon": (
             "FLOAT",
-            {"default": 1e-6, "minimum": 1e-8, "maximum": 1e-3, "step": 1e-6},
+            {"default": 1e-6, "min": 1e-8, "max": 1e-3, "step": 1e-6},
         ),
     }
 
@@ -165,10 +172,10 @@ class LatentDeckToolkitXS5(_XsNode):
         "xs5_routing": (["TOPK", "SINKHORN"],),
         "temperature": (
             "FLOAT",
-            {"default": 0.12, "minimum": 0.02, "maximum": 1.0, "step": 0.01},
+            {"default": 0.12, "min": 0.02, "max": 1.0, "step": 0.01},
         ),
-        "top_k": ("INT", {"default": 8, "minimum": 1, "maximum": 64}),
-        "sinkhorn_iterations": ("INT", {"default": 5, "minimum": 2, "maximum": 12}),
+        "top_k": ("INT", {"default": 8, "min": 1, "max": 64}),
+        "sinkhorn_iterations": ("INT", {"default": 5, "min": 2, "max": 12}),
     }
 
 
@@ -214,7 +221,7 @@ class LatentDeckToolkitOfflineProjector:
         return {
             "required": {
                 "latent": ("LATENT",),
-                "components": ("INT", {"default": 8, "minimum": 1, "maximum": 24}),
+                "components": ("INT", {"default": 8, "min": 1, "max": 24}),
             }
         }
 
@@ -234,23 +241,21 @@ class LatentDeckToolkitOfflineProjector:
 
 
 NODE_CLASS_MAPPINGS = {
-    "LatentDeckToolkitXS1": LatentDeckToolkitXS1,
-    "LatentDeckToolkitXS2": LatentDeckToolkitXS2,
-    "LatentDeckToolkitXS3": LatentDeckToolkitXS3,
-    "LatentDeckToolkitXS4": LatentDeckToolkitXS4,
-    "LatentDeckToolkitXS5": LatentDeckToolkitXS5,
     "LatentDeckToolkitCompareDecoders": LatentDeckToolkitCompareDecoders,
     "LatentDeckToolkitOfflineProjector": LatentDeckToolkitOfflineProjector,
+    **IO_NODE_CLASS_MAPPINGS,
+    **RESEARCH_NODE_CLASS_MAPPINGS,
+    **VAE_NODE_CLASS_MAPPINGS,
+    **REPORT_NODE_CLASS_MAPPINGS,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "LatentDeckToolkitXS1": "LatentDeck XS1 — Channel Rotation",
-    "LatentDeckToolkitXS2": "LatentDeck XS2 — Grid Exchange",
-    "LatentDeckToolkitXS3": "LatentDeck XS3 — Temporal Interaction",
-    "LatentDeckToolkitXS4": "LatentDeck XS4 — Statistics Transfer",
-    "LatentDeckToolkitXS5": "LatentDeck XS5 — Affinity Transport",
     "LatentDeckToolkitCompareDecoders": "LatentDeck Compare FAST / HQ Hooks",
-    "LatentDeckToolkitOfflineProjector": "LatentDeck Projector (Offline CPU)",
+    "LatentDeckToolkitOfflineProjector": "LatentDeck PCA Diagnostic (Offline CPU)",
+    **IO_NODE_DISPLAY_NAME_MAPPINGS,
+    **RESEARCH_NODE_DISPLAY_NAME_MAPPINGS,
+    **VAE_NODE_DISPLAY_NAME_MAPPINGS,
+    **REPORT_NODE_DISPLAY_NAME_MAPPINGS,
 }
 
 

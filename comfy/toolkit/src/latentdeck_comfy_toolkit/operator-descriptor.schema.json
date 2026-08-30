@@ -10,8 +10,12 @@
     "operator_version",
     "trust",
     "entrypoint",
+    "topology",
+    "input_count",
+    "capabilities",
     "supported_profiles",
     "controls",
+    "bypass",
     "limits"
   ],
   "properties": {
@@ -30,6 +34,30 @@
       "type": "string",
       "maxLength": 4096,
       "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$"
+    },
+    "topology": {
+      "enum": ["single_source", "dual_source", "carrier_donors"]
+    },
+    "input_count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 16
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["full_clip", "streaming", "chunk", "deterministic"],
+      "properties": {
+        "full_clip": { "type": "boolean" },
+        "streaming": { "type": "boolean" },
+        "chunk": { "type": "boolean" },
+        "deterministic": { "type": "boolean" }
+      },
+      "anyOf": [
+        { "properties": { "full_clip": { "const": true } } },
+        { "properties": { "streaming": { "const": true } } },
+        { "properties": { "chunk": { "const": true } } }
+      ]
     },
     "supported_profiles": {
       "type": "array",
@@ -136,6 +164,37 @@
         ]
       }
     },
+    "bypass": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["controls", "output_source"],
+      "properties": {
+        "controls": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 128,
+          "propertyNames": {
+            "maxLength": 128,
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+          },
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+              },
+              { "type": "number" }
+            ]
+          }
+        },
+        "output_source": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 15
+        }
+      }
+    },
     "limits": {
       "type": "object",
       "additionalProperties": false,
@@ -148,5 +207,19 @@
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "topology": { "const": "single_source" } } },
+      "then": { "properties": { "input_count": { "const": 1 } } }
+    },
+    {
+      "if": { "properties": { "topology": { "const": "dual_source" } } },
+      "then": { "properties": { "input_count": { "const": 2 } } }
+    },
+    {
+      "if": { "properties": { "topology": { "const": "carrier_donors" } } },
+      "then": { "properties": { "input_count": { "minimum": 2 } } }
+    }
+  ]
 }
