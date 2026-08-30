@@ -8,6 +8,8 @@ members = [
     "latentdeck-codec-h3",
     "latentdeck-codec-host",
     "latentdeck-comfy-cartridge",
+    "latentdeck-comfy-toolkit",
+    "latentdeck-example-channel-roll",
     "latentdeck-operator-d2",
     "latentdeck-operator-q4",
     "latentdeck-python-workspace",
@@ -197,6 +199,54 @@ requires-dist = [
     { name = "latentdeck-cartridge", editable = "sdk/python" },
     { name = "safetensors", specifier = "==0.8.0" },
 ]
+
+[[package]]
+name = "latentdeck-comfy-toolkit"
+version = "0.1.0"
+source = { editable = "comfy/toolkit" }
+dependencies = [
+    { name = "latentdeck-operator-d2" },
+]
+
+[package.optional-dependencies]
+cu130 = [
+    { name = "torch" },
+]
+test = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "latentdeck-operator-d2", editable = "operators/builtin/d2" },
+    { name = "pytest", marker = "extra == 'test'", specifier = "==9.1.1" },
+    { name = "torch", marker = "extra == 'cu130'", specifier = "==2.13.0", index = "https://download.pytorch.org/whl/cu130" },
+]
+provides-extras = ["cu130", "test"]
+
+[[package]]
+name = "latentdeck-example-channel-roll"
+version = "0.1.0"
+source = { editable = "operators/examples/channel-roll" }
+dependencies = [
+    { name = "latentdeck-comfy-toolkit" },
+]
+
+[package.optional-dependencies]
+cu130 = [
+    { name = "torch" },
+]
+test = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "latentdeck-comfy-toolkit", editable = "comfy/toolkit" },
+    { name = "pytest", marker = "extra == 'test'", specifier = "==9.1.1" },
+    { name = "torch", marker = "extra == 'cu130'", specifier = "==2.13.0", index = "https://download.pytorch.org/whl/cu130" },
+]
+provides-extras = ["cu130", "test"]
 
 [[package]]
 name = "latentdeck-operator-d2"

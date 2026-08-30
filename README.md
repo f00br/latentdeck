@@ -21,6 +21,8 @@ active. It currently contains:
 - a deterministic Rust cartridge SDK and command-line tool;
 - the native Python SDK binding and raw H3 `latentdeck-pack` authoring command;
 - the independent `Save Latent Cartridge (.lc)` ComfyUI recorder;
+- the clean-room LatentDeck Comfy Toolkit research nodes and explicit-install
+  external Operator API;
 - a policy for local-only, non-binding interface references.
 
 The product behavior, codec runtime, native output, and release packaging are
@@ -53,6 +55,8 @@ MiniMax H3 is the first intended codec profile. It is not the definition of
 - [Worker Protocol 1](spec/worker-protocol/README.md)
 - [Python Cartridge SDK and raw H3 packer](sdk/python/README.md)
 - [ComfyUI-LatentCartridge recorder](comfy/latent-cartridge/README.md)
+- [LatentDeck Comfy Toolkit](comfy/toolkit/README.md)
+- [Explicit-install Operator API 0.1](spec/operator-api/README.md)
 - [Agent runway](AGENTS.md)
 - [Bootstrap handoff](docs/repository/BOOTSTRAP_HANDOFF.md)
 - [Repository layout](docs/repository/REPOSITORY_LAYOUT.md)

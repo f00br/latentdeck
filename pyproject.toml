@@ -21,16 +21,20 @@ members = [
     "codec-host/rgb-ring",
     "codec-host/codecs/h3",
     "comfy/latent-cartridge",
+    "comfy/toolkit",
     "operators/builtin/d2",
     "operators/builtin/q4",
+    "operators/examples/channel-roll",
     "sdk/python",
 ]
 
 [tool.uv.sources]
 latentdeck-codec-host = { workspace = true }
 latentdeck-cartridge = { workspace = true }
+latentdeck-comfy-toolkit = { workspace = true }
 latentdeck-operator-d2 = { workspace = true }
 latentdeck-operator-q4 = { workspace = true }
+latentdeck-example-channel-roll = { workspace = true }
 latentdeck-rgb-ring = { workspace = true }
 torch = { index = "pytorch-cu130" }
 
@@ -46,8 +50,10 @@ testpaths = [
     "codec-host/rgb-ring/tests",
     "codec-host/codecs/h3/tests",
     "comfy/latent-cartridge/tests",
+    "comfy/toolkit/tests",
     "operators/builtin/d2/tests",
     "operators/builtin/q4/tests",
+    "operators/examples/channel-roll/tests",
     "sdk/python/tests",
 ]
 

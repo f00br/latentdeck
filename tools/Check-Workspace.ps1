@@ -41,11 +41,13 @@ try {
             --reinstall-package latentdeck-codec-h3 `
             --reinstall-package latentdeck-codec-host `
             --reinstall-package latentdeck-comfy-cartridge `
+            --reinstall-package latentdeck-comfy-toolkit `
+            --reinstall-package latentdeck-example-channel-roll `
             --reinstall-package latentdeck-operator-d2 `
             --reinstall-package latentdeck-operator-q4 `
             --reinstall-package latentdeck-rgb-ring
     } 'Python lock/install'
-    Invoke-Checked { uv run --no-sync ruff check pyproject.toml codec-host comfy/latent-cartridge operators sdk/python } 'Python lint'
+    Invoke-Checked { uv run --no-sync ruff check pyproject.toml codec-host comfy operators sdk/python } 'Python lint'
     Invoke-Checked { uv run --no-sync pytest } 'Python tests'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-PublicTree.ps1 } 'Public-tree audit'
     Invoke-Checked { git diff --check } 'Working-tree whitespace'

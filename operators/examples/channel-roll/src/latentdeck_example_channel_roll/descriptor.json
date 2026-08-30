@@ -1,0 +1,35 @@
+{
+  "schema_version": "0.1.0",
+  "operator_id": "org.latentdeck.example.channel_roll",
+  "operator_version": "0.1.0",
+  "trust": "explicit_install",
+  "entrypoint": "latentdeck_example_channel_roll:process_slot",
+  "supported_profiles": [
+    {
+      "codec_family": "minimax_h3",
+      "profile": "h3_av_latent",
+      "profile_version": "0.1.0",
+      "timing_contract": "minimax_h3_causal",
+      "timing_contract_version": "0.1.0",
+      "layout": "[1,24,1,H,W]",
+      "runtime_dtype": "F16"
+    }
+  ],
+  "controls": {
+    "amount": {
+      "type": "float",
+      "default": 0.5,
+      "minimum": 0.0,
+      "maximum": 1.0
+    },
+    "channel_shift": {
+      "type": "integer",
+      "default": 1,
+      "minimum": 1,
+      "maximum": 23
+    }
+  },
+  "limits": {
+    "max_spatial_tokens": 4096
+  }
+}

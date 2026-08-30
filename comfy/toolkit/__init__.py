@@ -1,0 +1,5 @@
+"""ComfyUI discovery shim for the installed LatentDeck Toolkit package."""
+
+from latentdeck_comfy_toolkit import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
