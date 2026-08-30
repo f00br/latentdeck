@@ -80,6 +80,27 @@ preview.webp             # optional
 | Operator API | Explicitly installed trusted Python operators; descriptor + supported profiles/controls + deterministic `process_slot`. Cartridge никогда не устанавливает operator-код. |
 | Deck preset | Versioned JSON: deck type, active collection, slot cartridge IDs/hashes, controls, routing и deterministic seed. Missing cartridges дают warning, а не скрытую замену. |
 
+### Общая geometry/scale policy
+
+- Геометрию определяет общий Core-контракт `SignalGeometry`, а не конкретная
+  дека или её faceplate. Library, Player, встроенные и сторонние Decks получают
+  одни и те же validated codec/profile, latent `T/H/W`, decoded extent и timing.
+- Library и Collections могут одновременно содержать portrait, landscape,
+  square и любые другие валидные размеры. Player показывает intrinsic decoded
+  extent через centered aspect-fit с чёрными полями, без stretch или crop.
+- LD-D2 и LD-Q4 используют Core policy `spatial_synthesis`: для прямого
+  смешивания обязаны совпадать codec/profile/version, runtime dtype/layout,
+  latent `H/W`, decoded `W/H`, timing contract/version и frame rate. Независимые
+  playheads позволяют разный latent `T` и разную длину клипа.
+- Одинаковое бытовое название aspect ratio (`16:9`, `9:16`) само по себе ничего
+  не разрешает: решение принимается по точной validated геометрии. Portrait и
+  landscape с разными spatial grids напрямую не смешиваются.
+- Никакой Deck не делает скрытый resize/crop/re-encode. Explicit Toolkit
+  Align/Crop создаёт новый provenance-bearing `.lc`; только после этого он может
+  пройти общий compatibility gate. Сторонняя Deck обязана выбрать и использовать
+  опубликованную Core policy вместо собственной неявной логики. Полный контракт
+  фиксируется в `spec/deck-api/README.md`.
+
 ### D2, Q4 и resampling
 
 - LD-D2: независимые A/B playheads, Linear baseline, XS1–XS4 и обязательный XS5 TOPK/Sinkhorn с `HYBRIDIZE`/`INTERACT`. `ROUTING` выбирает structural carrier A или B.

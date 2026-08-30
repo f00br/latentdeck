@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { d2Client, type StopD2Listener } from "./d2-client";
   import {
     DEFAULT_D2_BACKEND,
@@ -27,17 +27,33 @@
   } from "./d2-model";
   import {
     EMPTY_LIBRARY_VIEW,
+    compatibilityReasonsByHash,
     describeCommandError,
+    describeIntrinsicFormat,
     shortHash,
     type CartridgeView,
     type CollectionView,
     type LibraryView,
+    type SignalCompatibilityReport,
   } from "./library-model";
   import {
     describeSpout,
     spoutControlsFor,
     type SpoutStatus,
   } from "./output-model";
+  import {
+    buildD2Preset,
+    d2ControlsFromPreset,
+    mergePresetSourceOptions,
+    presetCollectionExists,
+    resolvePresetLoopDraft,
+    resolvePresetSources,
+    stagePresetLibraryLoad,
+    transitionPresetLoopDraft,
+    type D2DeckPreset,
+    type DeckPreset,
+    type PresetLoopDraft,
+  } from "./preset-model";
 
   type HostState = "checking" | "ready" | "pending" | "error";
 
@@ -80,23 +96,50 @@
   let spoutNameDirty = false;
   let spoutPending = false;
   let spoutError = "";
+  let presetBusy = false;
+  let presetMessage = "";
+  let presetResolvedSources: (CartridgeView | null)[] = [];
+  let compatibilityReasons: ReadonlyMap<string, readonly string[]> = new Map();
+  let compatibilityReady = false;
+  let compatibilityRequest = 0;
+  type D2PresetLoops = Pick<D2Transport, "loopA" | "loopB">;
+  let presetLoopDraft: PresetLoopDraft<D2PresetLoops> | null = null;
 
   let activeBank: CollectionView | undefined;
   let sourceA: CartridgeView | undefined;
   let sourceB: CartridgeView | undefined;
+  let sourceOptions: CartridgeView[] = [];
   let presentCount = 0;
   let captureActive = false;
   let spoutControls = spoutControlsFor(null, false);
   let spoutState = describeSpout(null);
+  let selectedCompatibilityReasons: readonly string[] = [];
+  let selectedSourcesCompatible = false;
   $: activeBank = bankView.collections.find(
     (collection) => collection.id === bankView.deckSession.activeCollectionId,
   );
-  $: sourceA = bankView.cartridges.find(
+  $: sourceOptions = mergePresetSourceOptions(
+    bankView.cartridges,
+    presetResolvedSources.filter(
+      (source) =>
+        source !== null &&
+        (source.archiveSha256 === sourceAHash ||
+          source.archiveSha256 === sourceBHash),
+    ),
+  );
+  $: sourceA = sourceOptions.find(
     (cartridge) => cartridge.archiveSha256 === sourceAHash,
   );
-  $: sourceB = bankView.cartridges.find(
+  $: sourceB = sourceOptions.find(
     (cartridge) => cartridge.archiveSha256 === sourceBHash,
   );
+  $: selectedCompatibilityReasons =
+    compatibilityReasons.get(sourceBHash) ?? [];
+  $: selectedSourcesCompatible =
+    compatibilityReady &&
+    sourceA !== undefined &&
+    sourceB !== undefined &&
+    selectedCompatibilityReasons.length === 0;
   $: presentCount = bankView.cartridges.filter(
     (cartridge) => cartridge.availability === "present",
   ).length;
@@ -150,19 +193,38 @@
   });
 
   async function refreshBank(): Promise<void> {
+    if (presetBusy) return;
     bankBusy = true;
     bankError = "";
     try {
       bankView = await invoke<LibraryView>("library_snapshot", {
         search: null,
       });
-      const choices = chooseD2Sources(
+      presetResolvedSources = presetResolvedSources.filter(
+        (source) =>
+          source !== null &&
+          (source.archiveSha256 === sourceAHash ||
+            source.archiveSha256 === sourceBHash),
+      );
+      const availableSources = mergePresetSourceOptions(
         bankView.cartridges,
+        presetResolvedSources,
+      );
+      const choices = chooseD2Sources(
+        availableSources,
         sourceAHash,
         sourceBHash,
       );
+      if (
+        choices.sourceAHash !== sourceAHash ||
+        choices.sourceBHash !== sourceBHash
+      ) {
+        discardPresetLoopDraft();
+      }
       sourceAHash = choices.sourceAHash;
       sourceBHash = choices.sourceBHash;
+      await tick();
+      await refreshSpatialCompatibility();
     } catch (error) {
       bankError = describeCommandError(error);
     } finally {
@@ -172,7 +234,7 @@
 
   async function changeBank(event: Event): Promise<void> {
     const collectionId = (event.currentTarget as HTMLSelectElement).value;
-    if (bankBusy) return;
+    if (bankBusy || presetBusy) return;
     bankBusy = true;
     bankError = "";
     try {
@@ -180,18 +242,191 @@
       bankView = await invoke<LibraryView>("library_snapshot", {
         search: null,
       });
+      presetResolvedSources = [];
       const choices = chooseD2Sources(
         bankView.cartridges,
         sourceAHash,
         sourceBHash,
       );
+      discardPresetLoopDraft();
       sourceAHash = choices.sourceAHash;
       sourceBHash = choices.sourceBHash;
+      await tick();
+      await refreshSpatialCompatibility();
     } catch (error) {
       bankError = describeCommandError(error);
     } finally {
       bankBusy = false;
     }
+  }
+
+  async function savePreset(): Promise<void> {
+    if (presetBusy || bankBusy || hostBusy || captureActive) return;
+    if (
+      activeBank === undefined ||
+      sourceA?.availability !== "present" ||
+      sourceB?.availability !== "present" ||
+      !selectedSourcesCompatible
+    ) {
+      presetMessage =
+        "Choose two compatible present cartridges and an active Bank before saving.";
+      return;
+    }
+    const seed = parseD2Seed(seedDraft);
+    if (seed === null) {
+      presetMessage = `Seed must be an integer from 0 to ${MAX_SAFE_D2_SEED}.`;
+      return;
+    }
+    presetBusy = true;
+    presetMessage = "";
+    try {
+      const loops = resolvePresetLoopDraft(presetLoopDraft, status.transport);
+      const preset = buildD2Preset(
+        activeBank.id,
+        sourceA,
+        sourceB,
+        controlsDraft,
+        loops,
+        seed,
+      );
+      const result = await invoke<{ saved: boolean } | null>(
+        "deck_preset_save",
+        {
+          preset,
+        },
+      );
+      presetMessage =
+        result === null ? "Preset save cancelled." : "D2 preset saved.";
+    } catch (error) {
+      presetMessage = describeCommandError(error);
+    } finally {
+      presetBusy = false;
+    }
+  }
+
+  async function loadPreset(): Promise<void> {
+    if (presetBusy || bankBusy || backendBusy || hostBusy || captureActive)
+      return;
+    presetBusy = true;
+    presetMessage = "";
+    try {
+      const document = await invoke<DeckPreset | null>("deck_preset_load");
+      if (document === null) {
+        presetMessage = "Preset load cancelled.";
+        return;
+      }
+      if (document.deck_type !== "LD-D2") {
+        presetMessage = `This is a ${document.deck_type} preset; LD-D2 was not changed.`;
+        return;
+      }
+      const preset: D2DeckPreset = document;
+      if (!presetCollectionExists(preset, bankView.collections)) {
+        presetMessage =
+          "The saved Collection is missing. The current Bank and sources were not changed.";
+        return;
+      }
+      const identities = [preset.slots.a, preset.slots.b];
+      const { sources: globallyResolved, library: incoming } =
+        await stagePresetLibraryLoad(
+          () =>
+            invoke<(CartridgeView | null)[]>(
+              "library_resolve_preset_sources",
+              { identities },
+            ),
+          () =>
+            invoke<LibraryView>("library_activate_collection_snapshot", {
+              collectionId: preset.active_collection_id,
+              search: null,
+            }),
+        );
+      const sourceOptions = mergePresetSourceOptions(
+        incoming.cartridges,
+        globallyResolved,
+      );
+      const resolution = resolvePresetSources(
+        identities,
+        sourceOptions,
+      );
+      bankView = incoming;
+      presetResolvedSources = globallyResolved;
+      [sourceAHash, sourceBHash] = resolution.hashes;
+      controlsDirty = true;
+      seedDirty = true;
+      controlsDraft = d2ControlsFromPreset(preset);
+      seedDraft = String(preset.seed);
+      presetLoopDraft = transitionPresetLoopDraft(presetLoopDraft, {
+        type: "preset-loaded",
+        loops: {
+          loopA: preset.loops.loop_a,
+          loopB: preset.loops.loop_b,
+        },
+      });
+      await tick();
+      await refreshSpatialCompatibility();
+      presetMessage = [
+        "D2 preset loaded as a draft. Press Load A + B to apply it.",
+        ...resolution.warnings,
+      ].join(" ");
+    } catch (error) {
+      presetMessage = describeCommandError(error);
+    } finally {
+      presetBusy = false;
+    }
+  }
+
+  async function refreshSpatialCompatibility(): Promise<void> {
+    const request = ++compatibilityRequest;
+    const referenceArchiveSha256 = sourceAHash;
+    const candidateArchiveSha256s = sourceOptions.map(
+      (source) => source.archiveSha256,
+    );
+    compatibilityReady = false;
+    if (
+      referenceArchiveSha256 === "" ||
+      candidateArchiveSha256s.length === 0
+    ) {
+      compatibilityReasons = new Map();
+      return;
+    }
+    try {
+      const report = await invoke<SignalCompatibilityReport>(
+        "library_signal_compatibility",
+        {
+          referenceArchiveSha256,
+          candidateArchiveSha256s,
+          policy: "spatial_synthesis",
+        },
+      );
+      if (request !== compatibilityRequest) return;
+      compatibilityReasons = compatibilityReasonsByHash(
+        candidateArchiveSha256s,
+        report,
+      );
+      compatibilityReady = true;
+    } catch (error) {
+      if (request !== compatibilityRequest) return;
+      compatibilityReasons = new Map(
+        candidateArchiveSha256s.map((hash) => [
+          hash,
+          ["compatibility check unavailable"],
+        ]),
+      );
+      bankError = describeCommandError(error);
+    }
+  }
+
+  async function selectSourceA(event: Event): Promise<void> {
+    if (presetBusy) return;
+    discardPresetLoopDraft();
+    sourceAHash = (event.currentTarget as HTMLSelectElement).value;
+    await tick();
+    await refreshSpatialCompatibility();
+  }
+
+  function selectSourceB(event: Event): void {
+    if (presetBusy) return;
+    discardPresetLoopDraft();
+    sourceBHash = (event.currentTarget as HTMLSelectElement).value;
   }
 
   async function refreshHostStatus(): Promise<void> {
@@ -289,6 +524,7 @@
   }
 
   async function openDeck(): Promise<void> {
+    if (presetBusy) return;
     if (backend.state !== "ready") {
       hostState = "error";
       hostMessage =
@@ -301,6 +537,13 @@
       hostMessage = "Choose two present cartridges from the active Bank.";
       return;
     }
+    if (!selectedSourcesCompatible) {
+      hostState = "error";
+      hostMessage = compatibilityReady
+        ? `Cartridge B is incompatible with A: ${selectedCompatibilityReasons.join("; ")}. Use explicit Toolkit Align/Crop to create a new cartridge.`
+        : "Signal compatibility has not been verified; refresh the active Bank.";
+      return;
+    }
     const seed = parseD2Seed(seedDraft);
     if (seed === null) {
       hostState = "error";
@@ -308,14 +551,28 @@
       return;
     }
     await runHostAction(async () => {
+      const pendingLoops = presetLoopDraft?.loops;
+      const transport =
+        pendingLoops === undefined
+          ? status.loaded
+            ? status.transport
+            : DEFAULT_D2_TRANSPORT
+          : {
+              ...DEFAULT_D2_TRANSPORT,
+              loopA: pendingLoops.loopA,
+              loopB: pendingLoops.loopB,
+              playingA: false,
+              playingB: false,
+            };
       const request = buildD2OpenRequest(
         sourceA as CartridgeView,
         sourceB as CartridgeView,
         controlsDraft,
-        status.loaded ? status.transport : DEFAULT_D2_TRANSPORT,
+        transport,
         seed,
       );
       applyHostStatus(await d2Client.open(request));
+      presetLoopDraft = null;
       controlsDirty = false;
       seedDirty = false;
     });
@@ -351,6 +608,7 @@
 
   async function toggleLoop(slot: D2Slot, event: Event): Promise<void> {
     const loop = (event.currentTarget as HTMLInputElement).checked;
+    discardPresetLoopDraft();
     await setTransport(setSlotLoop(status.transport, slot, loop));
   }
 
@@ -408,7 +666,7 @@
   }
 
   async function runHostAction(operation: () => Promise<void>): Promise<void> {
-    if (hostBusy) return;
+    if (hostBusy || presetBusy) return;
     hostBusy = true;
     try {
       await operation();
@@ -494,22 +752,52 @@
   }
 
   function selectAlgorithm(algorithm: D2Algorithm): void {
+    if (presetBusy) return;
+    discardPresetLoopDraft();
     controlsDraft = { ...controlsDraft, algorithm };
     controlsDirty = true;
   }
 
   function updateSeedDraft(event: Event): void {
+    if (presetBusy) return;
+    discardPresetLoopDraft();
     seedDraft = (event.currentTarget as HTMLInputElement).value;
     seedDirty = true;
   }
 
+  function discardPresetLoopDraft(): void {
+    if (presetLoopDraft === null) return;
+    presetLoopDraft = transitionPresetLoopDraft(presetLoopDraft, {
+      type: "manual-divergence",
+    });
+    presetMessage =
+      "Preset loop draft discarded after a manual change; current Deck loop state will be used.";
+  }
+
   function cartridgeLabel(cartridge: CartridgeView): string {
     const fileName = cartridge.paths[0]?.fileName ?? cartridge.cartridgeId;
+    const format = describeIntrinsicFormat(cartridge);
+    const latentGrid =
+      format.latentGrid === null ? "" : ` · LATENT ${format.latentGrid}`;
     const unavailable =
       cartridge.availability === "present"
         ? ""
         : ` · ${cartridge.availability}`;
-    return `${fileName} · ${shortHash(cartridge.archiveSha256)}${unavailable}`;
+    return `${fileName} · ${format.aspectLabel} · ${format.decodedGeometry}${latentGrid} · ${shortHash(cartridge.archiveSha256)}${unavailable}`;
+  }
+
+  function compatibilityLabel(cartridge: CartridgeView): string {
+    const reasons = compatibilityReasons.get(cartridge.archiveSha256) ?? [];
+    return reasons.length === 0
+      ? cartridgeLabel(cartridge)
+      : `${cartridgeLabel(cartridge)} · INCOMPATIBLE: ${reasons.join("; ")}`;
+  }
+
+  function isIncompatibleCandidate(cartridge: CartridgeView): boolean {
+    return (
+      !compatibilityReady ||
+      (compatibilityReasons.get(cartridge.archiveSha256)?.length ?? 0) > 0
+    );
   }
 
   function formatBytes(bytes: number): string {
@@ -520,7 +808,12 @@
   }
 </script>
 
-<section class="d2-faceplate" aria-labelledby="d2-title">
+<section
+  class="d2-faceplate"
+  aria-labelledby="d2-title"
+  aria-busy={presetBusy}
+  inert={presetBusy}
+>
   <header class="d2-header">
     <div>
       <p class="d2-eyebrow">
@@ -622,7 +915,7 @@
         id="d2-bank"
         value={bankView.deckSession.activeCollectionId}
         onchange={(event) => void changeBank(event)}
-        disabled={bankBusy}
+        disabled={bankBusy || presetBusy}
       >
         {#each bankView.collections as collection (collection.id)}
           <option value={collection.id}
@@ -642,6 +935,32 @@
       All Cartridges and Unassigned remain normal Bank selections. No disk scan
       is performed.
     </p>
+    <p>
+      Release performance target: 448×800. Each D2 mode remains pending until
+      its final 30-minute receipt passes; larger intrinsic grids are not yet
+      benchmark-certified and are never downscaled implicitly.
+    </p>
+    <div class="d2-preset-controls">
+      <span>DECK PRESET · JSON</span>
+      <div>
+        <button
+          type="button"
+          onclick={() => void loadPreset()}
+          disabled={presetBusy || bankBusy || backendBusy || hostBusy || captureActive}
+          >Load preset</button
+        >
+        <button
+          type="button"
+          onclick={() => void savePreset()}
+          disabled={presetBusy || bankBusy || hostBusy || captureActive}
+          >Save preset</button
+        >
+      </div>
+      <small
+        >{presetMessage ||
+          "Exact Bank, cartridge IDs/hashes, controls, routing, loops and seed."}</small
+      >
+    </div>
   </section>
 
   <div class="d2-signal-grid">
@@ -656,10 +975,11 @@
       <label for="d2-source-a">Bank cartridge</label>
       <select
         id="d2-source-a"
-        bind:value={sourceAHash}
-        disabled={bankBusy || bankView.cartridges.length === 0}
+        value={sourceAHash}
+        onchange={(event) => void selectSourceA(event)}
+        disabled={presetBusy || bankBusy || bankView.cartridges.length === 0}
       >
-        {#each bankView.cartridges as cartridge (cartridge.archiveSha256)}
+        {#each sourceOptions as cartridge (cartridge.archiveSha256)}
           <option
             value={cartridge.archiveSha256}
             disabled={cartridge.availability !== "present"}
@@ -675,6 +995,11 @@
             : `${sourceA.decodedWidth}×${sourceA.decodedHeight}`}</strong
         >
         <small>{sourceA?.decodedFrameCount ?? 0} decoded frames</small>
+        {#if sourceA !== undefined}<small
+            >{describeIntrinsicFormat(sourceA).aspectLabel} · LATENT {describeIntrinsicFormat(
+              sourceA,
+            ).latentGrid ?? "N/A"}</small
+          >{/if}
       </div>
       <div class="source-transport">
         <button
@@ -723,6 +1048,7 @@
       <form
         class="control-form"
         oninput={() => {
+          discardPresetLoopDraft();
           controlsDirty = true;
         }}
         onsubmit={(event) => {
@@ -999,17 +1325,26 @@
       <label for="d2-source-b">Bank cartridge</label>
       <select
         id="d2-source-b"
-        bind:value={sourceBHash}
-        disabled={bankBusy || bankView.cartridges.length === 0}
+        value={sourceBHash}
+        onchange={selectSourceB}
+        disabled={presetBusy || bankBusy || bankView.cartridges.length === 0}
       >
-        {#each bankView.cartridges as cartridge (cartridge.archiveSha256)}
+        {#each sourceOptions as cartridge (cartridge.archiveSha256)}
           <option
             value={cartridge.archiveSha256}
-            disabled={cartridge.availability !== "present"}
-            >{cartridgeLabel(cartridge)}</option
+            disabled={cartridge.availability !== "present" ||
+              isIncompatibleCandidate(cartridge)}
+            >{compatibilityLabel(cartridge)}</option
           >
         {/each}
       </select>
+      {#if selectedCompatibilityReasons.length > 0}<p
+          class="d2-bank-error"
+          role="status"
+        >
+          B cannot mix with A: {selectedCompatibilityReasons.join("; ")}. Use
+          an explicit Toolkit Align/Crop node to create a compatible `.lc`.
+        </p>{/if}
       <div class="source-readout">
         <span>{sourceB?.codecProfile ?? "NO SOURCE"}</span>
         <strong
@@ -1018,6 +1353,11 @@
             : `${sourceB.decodedWidth}×${sourceB.decodedHeight}`}</strong
         >
         <small>{sourceB?.decodedFrameCount ?? 0} decoded frames</small>
+        {#if sourceB !== undefined}<small
+            >{describeIntrinsicFormat(sourceB).aspectLabel} · LATENT {describeIntrinsicFormat(
+              sourceB,
+            ).latentGrid ?? "N/A"}</small
+          >{/if}
       </div>
       <div class="source-transport">
         <button
@@ -1055,7 +1395,8 @@
           backend.state !== "ready" ||
           bankBusy ||
           sourceA === undefined ||
-          sourceB === undefined}>Load A + B</button
+          sourceB === undefined ||
+          !selectedSourcesCompatible}>Load A + B</button
       >
     </div>
     <div class="restart-module">
@@ -1369,7 +1710,10 @@
 
   .d2-bank-strip {
     display: grid;
-    grid-template-columns: minmax(260px, 420px) 200px minmax(240px, 1fr);
+    grid-template-columns: minmax(260px, 420px) 200px minmax(220px, 1fr) minmax(
+        240px,
+        1fr
+      );
     align-items: center;
     gap: 12px;
     border-bottom: 1px solid var(--d2-line);
@@ -1423,6 +1767,34 @@
     color: #7f8c82;
     font-size: 0.65rem;
     line-height: 1.45;
+  }
+
+  .d2-preset-controls {
+    display: grid;
+    gap: 4px;
+    border-left: 1px solid var(--d2-line);
+    padding-left: 12px;
+  }
+
+  .d2-preset-controls > span,
+  .d2-preset-controls > small {
+    color: #758178;
+    font:
+      700 0.53rem ui-monospace,
+      "Cascadia Mono",
+      Consolas,
+      monospace;
+  }
+
+  .d2-preset-controls > div {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 5px;
+  }
+
+  .d2-preset-controls > small {
+    min-height: 2.3em;
+    line-height: 1.35;
   }
 
   .d2-signal-grid {

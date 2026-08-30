@@ -47,6 +47,19 @@ export interface Q4SourceIdentity {
   archiveSha256: string;
 }
 
+export interface Q4SourceStatus {
+  cartridgeId: string;
+  archiveSha256: string;
+  latentSlotCount: string;
+}
+
+export interface Q4LoadedSources {
+  sourceA: Q4SourceStatus;
+  sourceB: Q4SourceStatus;
+  sourceC: Q4SourceStatus;
+  sourceD: Q4SourceStatus;
+}
+
 export interface Q4OpenRequest {
   sourceA: Q4SourceIdentity;
   sourceB: Q4SourceIdentity;
@@ -80,6 +93,7 @@ export interface Q4SeedAck {
 
 export interface Q4Status {
   loaded: boolean;
+  sources: Q4LoadedSources | null;
   streamGeneration: string;
   streamSequence: string;
   playheadA: number;
@@ -122,11 +136,7 @@ export interface Q4CaptureView {
 }
 
 export type Q4BackendState =
-  | "missing"
-  | "incompatible"
-  | "decoder_missing"
-  | "ready"
-  | "error";
+  "missing" | "incompatible" | "decoder_missing" | "ready" | "error";
 
 export interface Q4DecoderView {
   assetId: string;
@@ -153,6 +163,11 @@ export interface Q4SourceSelection {
   sourceBHash: string;
   sourceCHash: string;
   sourceDHash: string;
+}
+
+export interface Q4DuplicateSource {
+  archiveSha256: string;
+  slots: readonly Q4Slot[];
 }
 
 export const Q4_SLOTS: readonly Q4Slot[] = Object.freeze(["A", "B", "C", "D"]);
@@ -196,6 +211,7 @@ export const DEFAULT_Q4_TRANSPORT: Q4Transport = Object.freeze({
 
 export const DEFAULT_Q4_STATUS: Q4Status = Object.freeze({
   loaded: false,
+  sources: null,
   streamGeneration: "0",
   streamSequence: "0",
   playheadA: 0,
@@ -257,38 +273,79 @@ export type Q4LiveCaptureAction = "start" | "stop" | null;
 export function q4LiveCaptureAction(
   capture: Pick<Q4CaptureView, "mode" | "state">,
 ): Q4LiveCaptureAction {
-  if (capture.mode === "live_capture" && capture.state === "capturing") return "stop";
+  if (capture.mode === "live_capture" && capture.state === "capturing")
+    return "stop";
   return isQ4CaptureActive(capture.state) ? null : "start";
 }
 
 export function chooseQ4Sources(
   cartridges: readonly CartridgeView[],
   current: Readonly<Q4SourceSelection>,
+  options: Readonly<{ preserveExplicitDuplicates?: boolean }> = {},
 ): Q4SourceSelection {
   const present = cartridges
     .filter((cartridge) => cartridge.availability === "present")
     .map((cartridge) => cartridge.archiveSha256)
     .filter((hash, index, hashes) => hashes.indexOf(hash) === index);
+  const presentSet = new Set(present);
   const used = new Set<string>();
-  const choose = (candidate: string): string => {
-    if (present.includes(candidate) && !used.has(candidate)) {
-      used.add(candidate);
-      return candidate;
+  const currentAssignments = [
+    current.sourceAHash,
+    current.sourceBHash,
+    current.sourceCHash,
+    current.sourceDHash,
+  ];
+  // Reserve every still-valid explicit choice before filling any missing slot.
+  // This prevents an early empty slot from consuming a cartridge selected by a
+  // later slot and accidentally manufacturing a duplicate.
+  const assignments = currentAssignments.map((candidate) => {
+    if (!presentSet.has(candidate)) return "";
+    if (options.preserveExplicitDuplicates !== true && used.has(candidate)) {
+      return "";
     }
+    used.add(candidate);
+    return candidate;
+  });
+  for (let index = 0; index < assignments.length; index += 1) {
+    if (assignments[index] !== "") continue;
     const next = present.find((hash) => !used.has(hash)) ?? "";
     if (next !== "") used.add(next);
-    return next;
-  };
+    assignments[index] = next;
+  }
   return {
-    sourceAHash: choose(current.sourceAHash),
-    sourceBHash: choose(current.sourceBHash),
-    sourceCHash: choose(current.sourceCHash),
-    sourceDHash: choose(current.sourceDHash),
+    sourceAHash: assignments[0],
+    sourceBHash: assignments[1],
+    sourceCHash: assignments[2],
+    sourceDHash: assignments[3],
   };
 }
 
+export function findQ4DuplicateSources(
+  selection: Readonly<Q4SourceSelection>,
+): readonly Q4DuplicateSource[] {
+  const assignments: readonly (readonly [Q4Slot, string])[] = [
+    ["A", selection.sourceAHash],
+    ["B", selection.sourceBHash],
+    ["C", selection.sourceCHash],
+    ["D", selection.sourceDHash],
+  ];
+  const slotsByHash = new Map<string, Q4Slot[]>();
+  for (const [slot, archiveSha256] of assignments) {
+    if (archiveSha256 === "") continue;
+    const slots = slotsByHash.get(archiveSha256) ?? [];
+    slots.push(slot);
+    slotsByHash.set(archiveSha256, slots);
+  }
+  return [...slotsByHash]
+    .filter(([, slots]) => slots.length > 1)
+    .map(([archiveSha256, slots]) => ({ archiveSha256, slots }));
+}
+
 export function validateQ4Roles(roles: Q4Roles): boolean {
-  return new Set([roles.carrier, roles.donorB, roles.donorC, roles.donorD]).size === 4;
+  return (
+    new Set([roles.carrier, roles.donorB, roles.donorC, roles.donorD]).size ===
+    4
+  );
 }
 
 export function resolveQ4DonorWeights(
@@ -299,34 +356,55 @@ export function resolveQ4DonorWeights(
     const c = controls.triangleX - 0.5 * controls.triangleY;
     const d = controls.triangleY;
     if (![b, c, d].every(Number.isFinite) || Math.min(b, c, d) < -1e-12) {
-      throw new Error("Q4 triangle point must lie inside the B/C/D influence field.");
+      throw new Error(
+        "Q4 triangle point must lie inside the B/C/D influence field.",
+      );
     }
     const total = b + c + d;
-    return [Math.max(0, b) / total, Math.max(0, c) / total, Math.max(0, d) / total];
+    return [
+      Math.max(0, b) / total,
+      Math.max(0, c) / total,
+      Math.max(0, d) / total,
+    ];
   }
-  const values = [controls.donorWeightB, controls.donorWeightC, controls.donorWeightD];
+  const values = [
+    controls.donorWeightB,
+    controls.donorWeightC,
+    controls.donorWeightD,
+  ];
   const total = values.reduce((sum, value) => sum + value, 0);
-  if (!values.every((value) => Number.isFinite(value) && value >= 0) || total <= 0) {
-    throw new Error("At least one finite non-negative Q4 donor weight is required.");
+  if (
+    !values.every((value) => Number.isFinite(value) && value >= 0) ||
+    total <= 0
+  ) {
+    throw new Error(
+      "At least one finite non-negative Q4 donor weight is required.",
+    );
   }
   return [values[0] / total, values[1] / total, values[2] / total];
 }
 
 export function buildQ4OpenRequest(
-  sources: readonly [CartridgeView, CartridgeView, CartridgeView, CartridgeView],
+  sources: readonly [
+    CartridgeView,
+    CartridgeView,
+    CartridgeView,
+    CartridgeView,
+  ],
   roles: Q4Roles,
   controls: Q4Controls,
   transport: Q4Transport,
   seed: number,
 ): Q4OpenRequest {
   if (sources.some((source) => source.availability !== "present")) {
-    throw new Error("All four Q4 sources must be present before loading the Deck.");
-  }
-  if (new Set(sources.map((source) => source.archiveSha256)).size !== 4) {
-    throw new Error("Q4 requires four distinct cartridges.");
+    throw new Error(
+      "All four Q4 sources must be present before loading the Deck.",
+    );
   }
   if (!validateQ4Roles(roles)) {
-    throw new Error("Q4 carrier and donor roles must be an A/B/C/D permutation.");
+    throw new Error(
+      "Q4 carrier and donor roles must be an A/B/C/D permutation.",
+    );
   }
   if (parseQ4Seed(seed) === null) {
     throw new Error("Q4 seed must be a non-negative u53 integer.");

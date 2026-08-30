@@ -19,6 +19,7 @@ The scaffold follows the monorepo shape accepted by the 0.1 plan.
 | `comfy/latent-cartridge/` | Small cartridge-recording ComfyUI package. |
 | `spec/latent-cartridge/` | Codec-neutral `.lc` specification. |
 | `spec/codec-h3/` | H3 codec-profile contract. |
+| `spec/deck-api/` | Shared geometry, compatibility, and presentation contract for Decks. |
 | `sdk/` | Public SDK surfaces and bindings. |
 | `tests/` | Cross-component tests and explicitly approved tiny fixtures. |
 | `docs/` | Durable public documentation; local concept PNGs remain ignored. |

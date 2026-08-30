@@ -17,11 +17,14 @@ use latentdeck_cartridge::{
 };
 use latentdeck_control::{
     FiniteF64, MAX_Q4_SAFE_INTEGER, Q4Algorithm, Q4Controls, Q4InfluenceMode, Q4Mode,
-    Q4ResetReason, Q4Roles, Q4Slot, Q4Status, Q4Transport, Q4Xs5Routing,
+    Q4ResetReason, Q4Roles, Q4Slot, Q4SourceStatus, Q4Status, Q4Transport, Q4Xs5Routing,
 };
-use latentdeck_core::codec_pack::{
-    ValidatedCodecPack, ValidatedExternalAsset, default_codec_pack_roots, discover_codec_packs,
-    validate_external_asset,
+use latentdeck_core::{
+    codec_pack::{
+        ValidatedCodecPack, ValidatedExternalAsset, default_codec_pack_roots, discover_codec_packs,
+        validate_external_asset,
+    },
+    signal_geometry::{SignalCompatibilityPolicy, SignalGeometry, check_signal_compatibility},
 };
 use latentdeck_library::ResolvedDeckSource;
 #[cfg(not(target_os = "windows"))]
@@ -236,10 +239,41 @@ impl From<Q4Transport> for Q4TransportView {
     }
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Q4SourceStatusView {
+    cartridge_id: String,
+    archive_sha256: String,
+    latent_slot_count: String,
+}
+
+impl From<&Q4SourceStatus> for Q4SourceStatusView {
+    fn from(value: &Q4SourceStatus) -> Self {
+        Self {
+            cartridge_id: value.cartridge_id.to_string(),
+            archive_sha256: value.archive_sha256.clone(),
+            latent_slot_count: value.latent_slot_count.to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct Q4LoadedSourcesView {
+    #[serde(rename = "sourceA")]
+    a: Q4SourceStatusView,
+    #[serde(rename = "sourceB")]
+    b: Q4SourceStatusView,
+    #[serde(rename = "sourceC")]
+    c: Q4SourceStatusView,
+    #[serde(rename = "sourceD")]
+    d: Q4SourceStatusView,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Q4StatusView {
     pub(crate) loaded: bool,
+    sources: Option<Q4LoadedSourcesView>,
     stream_generation: String,
     stream_sequence: String,
     playhead_a: u64,
@@ -259,6 +293,7 @@ impl Default for Q4StatusView {
         let controls = Q4Controls::default();
         Self {
             loaded: false,
+            sources: None,
             stream_generation: "0".to_owned(),
             stream_sequence: "0".to_owned(),
             playhead_a: 0,
@@ -279,6 +314,12 @@ impl Q4StatusView {
     fn from_status(status: &Q4Status) -> Self {
         Self {
             loaded: true,
+            sources: Some(Q4LoadedSourcesView {
+                a: (&status.source_a).into(),
+                b: (&status.source_b).into(),
+                c: (&status.source_c).into(),
+                d: (&status.source_d).into(),
+            }),
             stream_generation: status.stream_generation.to_string(),
             stream_sequence: status.stream_sequence.to_string(),
             playhead_a: status.playhead_a,
@@ -926,12 +967,17 @@ fn inspect_source(resolved: &ResolvedDeckSource) -> Result<TrustedQ4Source, Q4Ru
 }
 
 fn require_compatible_sources(sources: [&ValidatedH3Profile; 4]) -> Result<(), Q4RuntimeError> {
-    let carrier = sources[0];
-    if sources[1..].iter().any(|candidate| {
-        carrier.compatibility_key != candidate.compatibility_key
-            || carrier.visual.decoded_width != candidate.visual.decoded_width
-            || carrier.visual.decoded_height != candidate.visual.decoded_height
-    }) {
+    let reference = SignalGeometry::from_h3(sources[0]);
+    let candidates = sources[1..]
+        .iter()
+        .map(|source| SignalGeometry::from_h3(source))
+        .collect::<Vec<_>>();
+    let report = check_signal_compatibility(
+        SignalCompatibilityPolicy::SpatialSynthesis,
+        &reference,
+        &candidates,
+    );
+    if !report.compatible {
         return Err(Q4RuntimeError::source_incompatible());
     }
     Ok(())
@@ -3958,6 +4004,55 @@ mod common_tests {
         let view = Q4StatusView::from_status(&status);
         assert_eq!(view.stream_generation, u64::MAX.to_string());
         assert_eq!(view.stream_sequence, (u64::MAX - 1).to_string());
+    }
+
+    #[test]
+    fn status_view_preserves_explicit_duplicate_source_identity() {
+        let source_a = Q4SourceStatus {
+            cartridge_id: WireUuid::new_v4(),
+            archive_sha256: "a".repeat(64),
+            latent_slot_count: 72,
+        };
+        let source_b = Q4SourceStatus {
+            cartridge_id: WireUuid::new_v4(),
+            archive_sha256: "b".repeat(64),
+            latent_slot_count: 32,
+        };
+        let source_c = Q4SourceStatus {
+            cartridge_id: WireUuid::new_v4(),
+            archive_sha256: "c".repeat(64),
+            latent_slot_count: 32,
+        };
+        let status = Q4Status {
+            deck_id: Q4_DECK_ID.to_owned(),
+            deck_revision: 1,
+            operator_id: Q4_OPERATOR_ID.to_owned(),
+            operator_version: Q4_OPERATOR_VERSION.to_owned(),
+            stream_generation: 1,
+            stream_sequence: 0,
+            playhead_a: 0,
+            playhead_b: 0,
+            playhead_c: 0,
+            playhead_d: 0,
+            roles: Q4Roles::default(),
+            transport: Q4Transport::default(),
+            controls: Q4Controls::default(),
+            seed: 42,
+            pending_reset: false,
+            pending_reset_reasons: BoundedVec::default(),
+            decoded_start_frame: 0,
+            source_a,
+            source_b: source_b.clone(),
+            source_c,
+            source_d: source_b,
+        };
+
+        let sources = Q4StatusView::from_status(&status)
+            .sources
+            .expect("loaded source identities");
+        assert_eq!(sources.b, sources.d);
+        assert_ne!(sources.a.archive_sha256, sources.b.archive_sha256);
+        assert_ne!(sources.c.archive_sha256, sources.b.archive_sha256);
     }
 
     #[test]

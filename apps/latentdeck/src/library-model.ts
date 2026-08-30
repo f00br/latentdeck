@@ -30,16 +30,92 @@ export interface CartridgePathView {
   warningCode: string | null;
 }
 
+export type SignalOrientation = "portrait" | "landscape" | "square";
+export type SignalCompatibilityPolicy =
+  | "playback"
+  | "spatial_synthesis"
+  | "full_tensor_synthesis";
+
+export interface SignalGeometry {
+  codec_family: string;
+  profile: string;
+  profile_version: string;
+  runtime_dtype: "F16" | "F32";
+  batch: number;
+  latent_channels: number;
+  latent_slots: number;
+  latent_height: number;
+  latent_width: number;
+  decoded_frame_count: number;
+  decoded_height: number;
+  decoded_width: number;
+  timing_contract: string;
+  timing_contract_version: string;
+  frame_rate: { numerator: number; denominator: number };
+}
+
+export interface SignalPresentation {
+  orientation: SignalOrientation;
+  aspect_ratio: { width: number; height: number };
+  decoded_width: number;
+  decoded_height: number;
+}
+
+export interface SignalWorkload {
+  latent_sites_per_slot: number | null;
+  latent_values_per_slot: number | null;
+  latent_values_per_clip: number | null;
+  decoded_pixels_per_frame: number | null;
+}
+
+export type SignalGeometryMismatchCode =
+  | "codec_family"
+  | "profile"
+  | "profile_version"
+  | "runtime_dtype"
+  | "batch"
+  | "latent_channels"
+  | "latent_height"
+  | "latent_width"
+  | "latent_slots"
+  | "decoded_height"
+  | "decoded_width"
+  | "decoded_frame_count"
+  | "timing_contract"
+  | "timing_contract_version"
+  | "frame_rate";
+
+export interface SignalGeometryMismatch {
+  candidate_index: number;
+  code: SignalGeometryMismatchCode;
+  expected: string;
+  actual: string;
+}
+
+export interface SignalCompatibilityReport {
+  policy: SignalCompatibilityPolicy;
+  compatible: boolean;
+  mismatches: SignalGeometryMismatch[];
+}
+
 export interface CartridgeView {
   archiveSha256: string;
   cartridgeId: string;
   codecFamily: string;
   codecProfile: string;
+  codecProfileVersion: string;
+  timingContract: string;
+  timingContractVersion: string;
+  frameRateNumerator: number;
+  frameRateDenominator: number;
   decodedWidth: number;
   decodedHeight: number;
   decodedFrameCount: number;
   durationNumerator: number;
   durationDenominator: number;
+  signalGeometry: SignalGeometry;
+  signalPresentation: SignalPresentation;
+  signalWorkload: SignalWorkload;
   favorite: boolean;
   tags: string[];
   availability: Availability;
@@ -177,6 +253,63 @@ export function formatDuration(numerator: number, denominator: number): string {
     return "—";
   }
   return `${(numerator / denominator).toFixed(2)}s`;
+}
+
+export interface IntrinsicFormatDescription {
+  aspectLabel: string;
+  decodedGeometry: string;
+  latentGrid: string | null;
+}
+
+export function describeIntrinsicFormat(
+  cartridge: CartridgeView,
+): IntrinsicFormatDescription {
+  const presentation = cartridge.signalPresentation;
+  const ratio = presentation.aspect_ratio;
+  const aspectLabel = `${presentation.orientation.toUpperCase()} · ${ratio.width}:${ratio.height}`;
+  return {
+    aspectLabel,
+    decodedGeometry: `${cartridge.decodedWidth}×${cartridge.decodedHeight}`,
+    latentGrid: `${cartridge.signalGeometry.latent_width}×${cartridge.signalGeometry.latent_height}`,
+  };
+}
+
+export function compatibilityReasonsByHash(
+  candidateHashes: readonly string[],
+  report: SignalCompatibilityReport,
+): ReadonlyMap<string, readonly string[]> {
+  const reasons = new Map<string, string[]>();
+  for (const mismatch of report.mismatches) {
+    const hash = candidateHashes[mismatch.candidate_index];
+    if (hash === undefined) continue;
+    const existing = reasons.get(hash) ?? [];
+    existing.push(describeSignalMismatch(mismatch));
+    reasons.set(hash, existing);
+  }
+  return reasons;
+}
+
+export function describeSignalMismatch(
+  mismatch: SignalGeometryMismatch,
+): string {
+  const label: Record<SignalGeometryMismatchCode, string> = {
+    codec_family: "codec",
+    profile: "profile",
+    profile_version: "profile version",
+    runtime_dtype: "runtime dtype",
+    batch: "batch",
+    latent_channels: "latent channels",
+    latent_height: "latent height",
+    latent_width: "latent width",
+    latent_slots: "latent T",
+    decoded_height: "decoded height",
+    decoded_width: "decoded width",
+    decoded_frame_count: "decoded frames",
+    timing_contract: "timing contract",
+    timing_contract_version: "timing version",
+    frame_rate: "frame rate",
+  };
+  return `${label[mismatch.code]} ${mismatch.actual} (needs ${mismatch.expected})`;
 }
 
 export function describeCommandError(error: unknown): string {

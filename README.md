@@ -76,6 +76,7 @@ MiniMax H3 is the first intended codec profile. It is not the definition of
 - [MiniMax H3 Codec Profile 0.1](spec/codec-h3/README.md)
 - [Codec Pack installation contract 0.1](spec/codec-pack/README.md)
 - [Worker Protocol 1](spec/worker-protocol/README.md)
+- [Deck Signal Contract 0.1](spec/deck-api/README.md)
 - [Python Cartridge SDK and raw H3 packer](sdk/python/README.md)
 - [ComfyUI-LatentCartridge recorder](comfy/latent-cartridge/README.md)
 - [LatentDeck Comfy Toolkit](comfy/toolkit/README.md)

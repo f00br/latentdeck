@@ -4,18 +4,30 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use latentdeck_core::diagnostics::{LogLevel, record_global};
+use latentdeck_cartridge::{limits::ValidationLimits, manifest::parse_manifest_json, profile::h3};
+use latentdeck_core::{
+    diagnostics::{LogLevel, record_global},
+    signal_geometry::{
+        SignalCompatibilityPolicy, SignalCompatibilityReport, SignalGeometry, SignalPresentation,
+        SignalWorkload, check_signal_compatibility,
+    },
+};
 use latentdeck_library::{
     ALL_CARTRIDGES_ID, Availability, CartridgeKey, CartridgeRecord, CollectionId, CollectionRecord,
     DeckSourceIdentity, FolderImportOptions, Library, LibraryError, PathState, QueryOptions,
     ReindexDisposition, ResolvedDeckSource,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 const UI_QUERY_LIMIT: usize = 1_000;
 const RECENT_LIMIT: usize = 8;
 const MAX_EXPLICIT_FILES: usize = 1_024;
+const MAX_PRESET_SOURCE_IDENTITIES: usize = 4;
+// A full Bank can expose `UI_QUERY_LIMIT` rows, while a loaded D2/Q4 preset may
+// retain up to four exact sources that are outside that Bank. The compatibility
+// preflight must accept the same closed set the faceplate can render.
+const MAX_COMPATIBILITY_CANDIDATES: usize = UI_QUERY_LIMIT + MAX_PRESET_SOURCE_IDENTITIES;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -210,30 +222,51 @@ pub(crate) struct CartridgeView {
     cartridge_id: String,
     codec_family: String,
     codec_profile: String,
+    codec_profile_version: String,
+    timing_contract: String,
+    timing_contract_version: String,
+    frame_rate_numerator: u64,
+    frame_rate_denominator: u64,
     decoded_width: u32,
     decoded_height: u32,
     decoded_frame_count: u64,
     duration_numerator: u64,
     duration_denominator: u64,
+    signal_geometry: SignalGeometry,
+    signal_presentation: SignalPresentation,
+    signal_workload: SignalWorkload,
     favorite: bool,
     tags: Vec<String>,
     availability: Availability,
     paths: Vec<CartridgePathView>,
 }
 
-impl From<CartridgeRecord> for CartridgeView {
-    fn from(record: CartridgeRecord) -> Self {
+impl TryFrom<CartridgeRecord> for CartridgeView {
+    type Error = CommandError;
+
+    fn try_from(record: CartridgeRecord) -> Result<Self, Self::Error> {
         let metadata = record.metadata;
-        Self {
+        let signal_geometry = signal_geometry_from_manifest(&metadata.manifest_json)?;
+        let signal_presentation = signal_geometry.presentation();
+        let signal_workload = signal_geometry.workload();
+        Ok(Self {
             archive_sha256: record.key.as_str().to_owned(),
             cartridge_id: metadata.cartridge_id,
             codec_family: metadata.codec_family,
             codec_profile: metadata.codec_profile,
+            codec_profile_version: metadata.codec_profile_version,
+            timing_contract: metadata.timing_contract,
+            timing_contract_version: metadata.timing_contract_version,
+            frame_rate_numerator: metadata.frame_rate_numerator,
+            frame_rate_denominator: metadata.frame_rate_denominator,
             decoded_width: metadata.decoded_width,
             decoded_height: metadata.decoded_height,
             decoded_frame_count: metadata.decoded_frame_count,
             duration_numerator: metadata.duration_numerator,
             duration_denominator: metadata.duration_denominator,
+            signal_geometry,
+            signal_presentation,
+            signal_workload,
             favorite: record.favorite,
             tags: record.tags,
             availability: record.availability,
@@ -252,8 +285,25 @@ impl From<CartridgeRecord> for CartridgeView {
                     warning_code: path.warning_code,
                 })
                 .collect(),
-        }
+        })
     }
+}
+
+fn signal_geometry_from_manifest(manifest_json: &str) -> Result<SignalGeometry, CommandError> {
+    let limits = ValidationLimits::default();
+    let manifest = parse_manifest_json(manifest_json.as_bytes(), &limits).map_err(|error| {
+        CommandError::new(
+            error.code(),
+            "Indexed cartridge metadata failed validation; reimport the cartridge.",
+        )
+    })?;
+    let profile = h3::validate(&manifest, &limits).map_err(|error| {
+        CommandError::new(
+            error.code(),
+            "Indexed cartridge profile failed validation; reimport the cartridge.",
+        )
+    })?;
+    Ok(SignalGeometry::from_h3(&profile))
 }
 
 #[derive(Debug, Serialize)]
@@ -266,6 +316,12 @@ pub(crate) struct LibraryView {
     search: String,
     total_indexed: u64,
     active_member_count: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct PresetCartridgeIdentityInput {
+    cartridge_id: String,
+    archive_sha256: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -336,8 +392,14 @@ impl LibraryController {
         Ok(LibraryView {
             deck_session: self.deck_session.view(),
             collections: collections.into_iter().map(Into::into).collect(),
-            cartridges: cartridges.into_iter().map(Into::into).collect(),
-            recent: recent.into_iter().map(Into::into).collect(),
+            cartridges: cartridges
+                .into_iter()
+                .map(CartridgeView::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
+            recent: recent
+                .into_iter()
+                .map(CartridgeView::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
             search: normalized_search,
             total_indexed,
             active_member_count,
@@ -361,6 +423,22 @@ impl LibraryController {
         }
         self.deck_session.select_collection(collection_id);
         Ok(self.deck_session.view())
+    }
+
+    fn activate_collection_snapshot(
+        &mut self,
+        collection_id: CollectionId,
+        search: Option<String>,
+    ) -> Result<LibraryView, CommandError> {
+        let previous = self.deck_session.active_collection_id.clone();
+        self.select_collection(collection_id)?;
+        match self.snapshot(search) {
+            Ok(snapshot) => Ok(snapshot),
+            Err(error) => {
+                self.deck_session.select_collection(previous);
+                Err(error)
+            }
+        }
     }
 
     fn create_collection(&mut self, name: &str) -> Result<DeckSessionView, CommandError> {
@@ -464,6 +542,64 @@ impl LibraryController {
         self.library
             .resolve_deck_source(identity)
             .map_err(Into::into)
+    }
+
+    fn resolve_preset_sources(
+        &self,
+        identities: &[PresetCartridgeIdentityInput],
+    ) -> Result<Vec<Option<CartridgeView>>, CommandError> {
+        if identities.len() > MAX_PRESET_SOURCE_IDENTITIES {
+            return Err(CommandError::new(
+                "invalid_input",
+                "A Deck preset source lookup accepts at most four identities.",
+            ));
+        }
+        identities
+            .iter()
+            .map(|requested| {
+                let identity = DeckSourceIdentity::new(
+                    requested.cartridge_id.clone(),
+                    cartridge_key(requested.archive_sha256.clone()),
+                )?;
+                let record = self.library.get_cartridge(identity.archive_sha256())?;
+                match record {
+                    Some(record) if record.metadata.cartridge_id == requested.cartridge_id => {
+                        CartridgeView::try_from(record).map(Some)
+                    }
+                    Some(_) | None => Ok(None),
+                }
+            })
+            .collect()
+    }
+
+    fn signal_compatibility(
+        &self,
+        reference_archive_sha256: String,
+        candidate_archive_sha256s: Vec<String>,
+        policy: SignalCompatibilityPolicy,
+    ) -> Result<SignalCompatibilityReport, CommandError> {
+        if candidate_archive_sha256s.len() > MAX_COMPATIBILITY_CANDIDATES {
+            return Err(CommandError::new(
+                "invalid_input",
+                "A signal compatibility query exceeds the bounded Bank plus preset-source set.",
+            ));
+        }
+        let reference = self.signal_geometry(&cartridge_key(reference_archive_sha256))?;
+        let candidates = candidate_archive_sha256s
+            .into_iter()
+            .map(|archive_sha256| self.signal_geometry(&cartridge_key(archive_sha256)))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(check_signal_compatibility(policy, &reference, &candidates))
+    }
+
+    fn signal_geometry(&self, key: &CartridgeKey) -> Result<SignalGeometry, CommandError> {
+        let record = self.library.get_cartridge(key)?.ok_or_else(|| {
+            CommandError::new(
+                "not_found",
+                "The requested cartridge is not present in the Library index.",
+            )
+        })?;
+        signal_geometry_from_manifest(&record.metadata.manifest_json)
     }
 }
 
@@ -620,11 +756,46 @@ pub(crate) fn library_snapshot(
 
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
+pub(crate) fn library_resolve_preset_sources(
+    state: State<'_, AppState>,
+    identities: Vec<PresetCartridgeIdentityInput>,
+) -> Result<Vec<Option<CartridgeView>>, CommandError> {
+    lock_controller(&state.controller)?.resolve_preset_sources(&identities)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn library_signal_compatibility(
+    state: State<'_, AppState>,
+    reference_archive_sha256: String,
+    candidate_archive_sha256s: Vec<String>,
+    policy: SignalCompatibilityPolicy,
+) -> Result<SignalCompatibilityReport, CommandError> {
+    lock_controller(&state.controller)?.signal_compatibility(
+        reference_archive_sha256,
+        candidate_archive_sha256s,
+        policy,
+    )
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
 pub(crate) fn library_set_active_collection(
     state: State<'_, AppState>,
     collection_id: String,
 ) -> Result<DeckSessionView, CommandError> {
     lock_controller(&state.controller)?.select_collection(to_collection_id(collection_id))
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn library_activate_collection_snapshot(
+    state: State<'_, AppState>,
+    collection_id: String,
+    search: Option<String>,
+) -> Result<LibraryView, CommandError> {
+    lock_controller(&state.controller)?
+        .activate_collection_snapshot(to_collection_id(collection_id), search)
 }
 
 #[tauri::command]
@@ -805,10 +976,130 @@ pub(crate) fn database_path(app_data_dir: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, io::Cursor};
+
+    use latentdeck_cartridge::{
+        hash::hash_reader,
+        writer::{PackRequest, WriteOptions, pack_atomic},
+    };
+    use serde_json::json;
+    use tempfile::tempdir;
+
     use super::*;
 
     fn fake_key(byte: char) -> CartridgeKey {
         CartridgeKey::new_unchecked(std::iter::repeat_n(byte, 64).collect::<String>())
+    }
+
+    fn write_synthetic_lc(
+        root: &Path,
+        name: &str,
+        cartridge_id: &str,
+        latent_slots: u64,
+        latent_height: u64,
+        latent_width: u64,
+    ) -> PathBuf {
+        let element_count = 24_u64
+            .checked_mul(latent_slots)
+            .and_then(|value| value.checked_mul(latent_height))
+            .and_then(|value| value.checked_mul(latent_width))
+            .expect("small synthetic tensor");
+        let tensor_bytes = vec![0_u8; usize::try_from(element_count * 2).expect("small payload")];
+        let mut header = format!(
+            concat!(
+                r#"{{"video":{{"data_offsets":[0,{}],"dtype":"F16","#,
+                r#""shape":[1,24,{},{},{}]}}}}"#
+            ),
+            tensor_bytes.len(),
+            latent_slots,
+            latent_height,
+            latent_width,
+        )
+        .into_bytes();
+        while !header.len().is_multiple_of(8) {
+            header.push(b' ');
+        }
+        let mut payload = Vec::with_capacity(8 + header.len() + tensor_bytes.len());
+        payload.extend_from_slice(
+            &u64::try_from(header.len())
+                .expect("small header")
+                .to_le_bytes(),
+        );
+        payload.extend_from_slice(&header);
+        payload.extend_from_slice(&tensor_bytes);
+        let payload_hash = hash_reader(&mut Cursor::new(&payload)).expect("payload hash");
+        let decoded_frame_count = ((latent_slots - 2) / 5) * 17 + 5;
+        let duration_divisor = greatest_common_divisor(decoded_frame_count, 24);
+        let duration_numerator = decoded_frame_count / duration_divisor;
+        let duration_denominator = 24 / duration_divisor;
+        let manifest = parse_manifest_json(
+            &serde_json::to_vec(&json!({
+                "spec_version": "0.1.0",
+                "cartridge_id": cartridge_id,
+                "codec": {
+                    "family": "minimax_h3",
+                    "profile": "h3_av_latent",
+                    "profile_version": "0.1.0"
+                },
+                "payloads": [{
+                    "path": "payloads/h3.safetensors",
+                    "media_type": "application/vnd.safetensors",
+                    "byte_length": payload_hash.byte_length,
+                    "sha256": payload_hash.sha256.to_string()
+                }],
+                "tensors": [{
+                    "stream": "visual",
+                    "name": "video",
+                    "payload": "payloads/h3.safetensors",
+                    "storage_dtype": "F16",
+                    "runtime_dtype": "F16",
+                    "shape": [1, 24, latent_slots, latent_height, latent_width]
+                }],
+                "timing": {
+                    "contract": "minimax_h3_causal",
+                    "contract_version": "0.1.0",
+                    "decoded_video": {
+                        "width": latent_width * 16,
+                        "height": latent_height * 16,
+                        "frame_count": decoded_frame_count,
+                        "frame_rate": {"numerator": 24, "denominator": 1},
+                        "duration": {
+                            "numerator": duration_numerator,
+                            "denominator": duration_denominator
+                        }
+                    }
+                },
+                "audio": {"policy": "source_absent"},
+                "provenance": {
+                    "created_by": {"name": "latentdeck-app-tests", "version": "0.1.0"},
+                    "sources": []
+                },
+                "parent_cartridges": [],
+                "operation_history": []
+            }))
+            .expect("manifest JSON"),
+            &ValidationLimits::default(),
+        )
+        .expect("synthetic manifest");
+        let payload_path = root.join(format!("{name}.safetensors"));
+        let output_path = root.join(format!("{name}.lc"));
+        fs::write(&payload_path, payload).expect("synthetic payload");
+        pack_atomic(
+            &PackRequest::new(manifest, &payload_path),
+            &output_path,
+            &WriteOptions::default(),
+        )
+        .expect("synthetic LC");
+        output_path
+    }
+
+    const fn greatest_common_divisor(mut left: u64, mut right: u64) -> u64 {
+        while right != 0 {
+            let remainder = left % right;
+            left = right;
+            right = remainder;
+        }
+        if left == 0 { 1 } else { left }
     }
 
     #[test]
@@ -941,5 +1232,181 @@ mod tests {
             .select_collection(missing)
             .expect_err("unknown collection");
         assert_eq!(error.code, "not_found");
+    }
+
+    #[test]
+    fn preset_collection_activation_and_snapshot_are_one_recoverable_transition() {
+        let library = Library::in_memory().expect("in-memory library");
+        let mut controller = LibraryController::new(library);
+        let target = controller
+            .library
+            .create_collection("Preset Bank")
+            .expect("target collection");
+
+        let snapshot = controller
+            .activate_collection_snapshot(target.id.clone(), None)
+            .expect("atomic activation snapshot");
+        assert_eq!(
+            snapshot.deck_session.active_collection_id,
+            target.id.as_str()
+        );
+
+        let error = controller
+            .activate_collection_snapshot(CollectionId::new_unchecked("missing"), None)
+            .expect_err("missing target must not partially change active collection");
+        assert_eq!(error.code, "not_found");
+        assert_eq!(controller.deck_session.active_collection_id, target.id);
+    }
+
+    #[test]
+    fn preset_source_lookup_is_not_scoped_to_the_active_collection_query() {
+        let temporary = tempdir().expect("temporary directory");
+        let path = write_synthetic_lc(
+            temporary.path(),
+            "global-source",
+            "550e8400-e29b-41d4-a716-446655440000",
+            2,
+            2,
+            1,
+        );
+        let mut library = Library::in_memory().expect("in-memory library");
+        let imported = library.import_file(path).expect("import source");
+        let mut controller = LibraryController::new(library);
+        let empty_bank = controller
+            .library
+            .create_collection("Empty preset Bank")
+            .expect("empty Bank");
+        controller
+            .select_collection(empty_bank.id.clone())
+            .expect("select empty Bank");
+        let requested = PresetCartridgeIdentityInput {
+            cartridge_id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
+            archive_sha256: imported.key.as_str().to_owned(),
+        };
+
+        let resolved = controller
+            .resolve_preset_sources(&[requested])
+            .expect("global exact lookup");
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].as_ref().map(|view| view.cartridge_id.as_str()),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+        assert_eq!(
+            resolved[0]
+                .as_ref()
+                .map(|view| view.signal_presentation.aspect_ratio),
+            Some(latentdeck_core::signal_geometry::AspectRatio {
+                width: 1,
+                height: 2
+            })
+        );
+        assert_eq!(controller.deck_session.active_collection_id, empty_bank.id);
+
+        let mismatch = controller
+            .resolve_preset_sources(&[PresetCartridgeIdentityInput {
+                cartridge_id: "550e8400-e29b-41d4-a716-446655440099".to_owned(),
+                archive_sha256: imported.key.as_str().to_owned(),
+            }])
+            .expect("identity mismatch is a missing exact source");
+        assert!(mismatch[0].is_none());
+    }
+
+    #[test]
+    fn compatibility_report_comes_from_validated_core_geometry() {
+        let temporary = tempdir().expect("temporary directory");
+        let portrait = write_synthetic_lc(
+            temporary.path(),
+            "portrait",
+            "550e8400-e29b-41d4-a716-446655440010",
+            2,
+            2,
+            1,
+        );
+        let landscape = write_synthetic_lc(
+            temporary.path(),
+            "landscape",
+            "550e8400-e29b-41d4-a716-446655440011",
+            7,
+            1,
+            2,
+        );
+        let mut library = Library::in_memory().expect("in-memory library");
+        let portrait = library.import_file(portrait).expect("portrait").key;
+        let landscape = library.import_file(landscape).expect("landscape").key;
+        let controller = LibraryController::new(library);
+
+        let report = controller
+            .signal_compatibility(
+                portrait.as_str().to_owned(),
+                vec![portrait.as_str().to_owned(), landscape.as_str().to_owned()],
+                SignalCompatibilityPolicy::SpatialSynthesis,
+            )
+            .expect("Core compatibility report");
+
+        assert!(!report.compatible);
+        assert!(
+            report
+                .mismatches
+                .iter()
+                .all(|item| item.candidate_index == 1)
+        );
+        assert_eq!(
+            report
+                .mismatches
+                .iter()
+                .map(|item| item.code)
+                .collect::<Vec<_>>(),
+            vec![
+                latentdeck_core::signal_geometry::SignalGeometryMismatchCode::LatentHeight,
+                latentdeck_core::signal_geometry::SignalGeometryMismatchCode::LatentWidth,
+                latentdeck_core::signal_geometry::SignalGeometryMismatchCode::DecodedHeight,
+                latentdeck_core::signal_geometry::SignalGeometryMismatchCode::DecodedWidth,
+            ]
+        );
+    }
+
+    #[test]
+    fn preset_source_lookup_rejects_more_than_one_deck_can_address() {
+        let controller = LibraryController::new(Library::in_memory().expect("in-memory library"));
+        let requested = (0..5)
+            .map(|_| PresetCartridgeIdentityInput {
+                cartridge_id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
+                archive_sha256: "a".repeat(64),
+            })
+            .collect::<Vec<_>>();
+
+        let error = controller
+            .resolve_preset_sources(&requested)
+            .expect_err("five preset slots exceed the D2/Q4 boundary");
+
+        assert_eq!(error.code, "invalid_input");
+    }
+
+    #[test]
+    fn compatibility_bound_includes_a_full_bank_and_four_global_preset_sources() {
+        let controller = LibraryController::new(Library::in_memory().expect("in-memory library"));
+        let allowed = vec!["a".repeat(64); MAX_COMPATIBILITY_CANDIDATES];
+        let allowed_error = controller
+            .signal_compatibility(
+                "b".repeat(64),
+                allowed,
+                SignalCompatibilityPolicy::SpatialSynthesis,
+            )
+            .expect_err("empty test Library has no reference source");
+        let candidates = vec!["a".repeat(64); MAX_COMPATIBILITY_CANDIDATES + 1];
+
+        let error = controller
+            .signal_compatibility(
+                "b".repeat(64),
+                candidates,
+                SignalCompatibilityPolicy::SpatialSynthesis,
+            )
+            .expect_err("candidate set above the rendered maximum must be rejected first");
+
+        assert_eq!(MAX_COMPATIBILITY_CANDIDATES, 1_004);
+        assert_eq!(allowed_error.code, "not_found");
+        assert_eq!(error.code, "invalid_input");
     }
 }

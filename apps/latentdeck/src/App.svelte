@@ -5,6 +5,7 @@
   import {
     EMPTY_LIBRARY_VIEW,
     canReorderActiveMembers,
+    describeIntrinsicFormat,
     describeLoadedSlots,
     describeCommandError,
     formatDuration,
@@ -665,10 +666,19 @@
                 </header>
 
                 <div class="format-line">
-                  <span>{cartridge.codecFamily}</span>
-                  <span>{cartridge.decodedWidth}×{cartridge.decodedHeight}</span
+                  <span>{describeIntrinsicFormat(cartridge).aspectLabel}</span>
+                  <span>{describeIntrinsicFormat(cartridge).decodedGeometry}</span>
+                  {#if describeIntrinsicFormat(cartridge).latentGrid !== null}<span
+                      >LATENT {describeIntrinsicFormat(cartridge).latentGrid}</span
+                    >{/if}
+                  <span
+                    >{cartridge.codecFamily}/{cartridge.codecProfile}@{cartridge.codecProfileVersion}</span
                   >
                   <span>{cartridge.decodedFrameCount}f</span>
+                  <span
+                    >{cartridge.frameRateNumerator}/{cartridge.frameRateDenominator}
+                    FPS</span
+                  >
                   <span
                     >{formatDuration(
                       cartridge.durationNumerator,

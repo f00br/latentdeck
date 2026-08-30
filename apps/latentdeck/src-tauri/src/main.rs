@@ -8,6 +8,7 @@ mod d2_capture_host;
 mod d2_runtime;
 mod d2_state;
 mod library_state;
+mod preset_state;
 mod q4_capture_host;
 mod q4_runtime;
 mod q4_state;
@@ -21,12 +22,14 @@ use d2_state::{
     deck_d2_transport_set,
 };
 use library_state::{
-    AppState, database_path, library_add_membership, library_create_collection,
-    library_delete_collection, library_import_files, library_import_folder, library_mark_recent,
-    library_reindex, library_remove_membership, library_rename_collection,
-    library_reorder_collections, library_reorder_members, library_set_active_collection,
-    library_set_favorite, library_set_tags, library_snapshot,
+    AppState, database_path, library_activate_collection_snapshot, library_add_membership,
+    library_create_collection, library_delete_collection, library_import_files,
+    library_import_folder, library_mark_recent, library_reindex, library_remove_membership,
+    library_rename_collection, library_reorder_collections, library_reorder_members,
+    library_resolve_preset_sources, library_set_active_collection, library_set_favorite,
+    library_set_tags, library_signal_compatibility, library_snapshot,
 };
+use preset_state::{deck_preset_load, deck_preset_save};
 use q4_runtime::Q4_OUTPUT_WINDOW_LABEL;
 use q4_state::{
     Q4AppState, deck_q4_backend_status_get, deck_q4_capture_live_start, deck_q4_capture_live_stop,
@@ -101,6 +104,9 @@ fn handle_q4_output_event(window: &Window, event: &WindowEvent) {
     }
 }
 
+// Tauri's composition root deliberately lists every exposed command and
+// lifecycle hook in one auditable place.
+#[allow(clippy::too_many_lines)]
 fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -161,6 +167,9 @@ fn main() {
             deck_q4_spout_status_get,
             deck_q4_spout_configure,
             library_snapshot,
+            library_activate_collection_snapshot,
+            library_resolve_preset_sources,
+            library_signal_compatibility,
             library_set_active_collection,
             library_import_files,
             library_import_folder,
@@ -175,6 +184,8 @@ fn main() {
             library_set_favorite,
             library_set_tags,
             library_mark_recent,
+            deck_preset_save,
+            deck_preset_load,
         ])
         .build(tauri::generate_context!())
         .expect("LatentDeck application runtime failed");

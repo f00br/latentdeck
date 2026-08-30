@@ -19,9 +19,12 @@ use latentdeck_control::{
     D2Algorithm, D2Controls, D2Mode, D2ResetReason, D2Routing, D2Status, D2Transport, D2Xs5Routing,
     FiniteF64, MAX_D2_SAFE_INTEGER,
 };
-use latentdeck_core::codec_pack::{
-    ValidatedCodecPack, ValidatedExternalAsset, default_codec_pack_roots, discover_codec_packs,
-    validate_external_asset,
+use latentdeck_core::{
+    codec_pack::{
+        ValidatedCodecPack, ValidatedExternalAsset, default_codec_pack_roots, discover_codec_packs,
+        validate_external_asset,
+    },
+    signal_geometry::{SignalCompatibilityPolicy, SignalGeometry, check_signal_compatibility},
 };
 use latentdeck_library::ResolvedDeckSource;
 #[cfg(not(target_os = "windows"))]
@@ -831,12 +834,14 @@ fn require_compatible_sources(
     source_a: &ValidatedH3Profile,
     source_b: &ValidatedH3Profile,
 ) -> Result<(), D2RuntimeError> {
-    let a = &source_a.compatibility_key;
-    let b = &source_b.compatibility_key;
-    if a != b
-        || source_a.visual.decoded_width != source_b.visual.decoded_width
-        || source_a.visual.decoded_height != source_b.visual.decoded_height
-    {
+    let reference = SignalGeometry::from_h3(source_a);
+    let candidate = SignalGeometry::from_h3(source_b);
+    let report = check_signal_compatibility(
+        SignalCompatibilityPolicy::SpatialSynthesis,
+        &reference,
+        &[candidate],
+    );
+    if !report.compatible {
         return Err(D2RuntimeError::source_incompatible());
     }
     Ok(())
