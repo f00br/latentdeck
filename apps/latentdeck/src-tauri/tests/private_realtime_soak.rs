@@ -1990,8 +1990,8 @@ fn select_pack(root: &Path, mode: SoakMode) -> TestResult<ValidatedCodecPack> {
 }
 
 fn validate_self_contained_pack(pack: &ValidatedCodecPack) -> TestResult<u64> {
-    const MAX_CATALOG_BYTES: u64 = 16 * 1024 * 1024;
-    const MAX_PACK_FILES: usize = 250_000;
+    const MAX_CATALOG_BYTES: u64 = 1024 * 1024;
+    const MAX_PACK_FILES: usize = 32_768;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
     let catalog_path = pack.root.join(&pack.manifest.integrity.catalog_path);

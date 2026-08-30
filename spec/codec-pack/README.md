@@ -90,6 +90,13 @@ notice files must be present in the catalog. Duplicate catalog paths, size or
 hash mismatches, oversized JSON, and more than the bounded pack/file counts are
 errors.
 
+The integrity catalog contains between 1 and 32,768 files and its JSON remains
+within 1 MiB. The builder, installer, application discovery, and private
+evidence harness enforce the same independent count and byte bounds; a runtime
+cannot pass packaging and then fail launch under a smaller application-only
+limit. The curator separately applies the same 32,768-file upstream bound while
+constructing the runtime site-packages inventory.
+
 ## Filesystem safety
 
 Discovery rejects symlinks, junctions, and other Windows reparse points at the

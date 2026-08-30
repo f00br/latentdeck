@@ -504,13 +504,13 @@ function Get-PhysicalPackInventory {
     )
 
     $catalogItem = Get-Item -LiteralPath $CatalogPath -Force
-    if ($catalogItem.Length -le 0 -or $catalogItem.Length -gt 16MB) {
+    if ($catalogItem.Length -le 0 -or $catalogItem.Length -gt 1MB) {
         throw 'Codec-pack integrity catalog is outside the bounded physical-pack contract.'
     }
     $catalog = Get-Content -Raw -LiteralPath $CatalogPath | ConvertFrom-Json -Depth 20
     $entries = @($catalog.files)
     if ($catalog.manifest_version -cne '1.0.0' -or
-        $entries.Count -eq 0 -or $entries.Count -gt 250000) {
+        $entries.Count -eq 0 -or $entries.Count -gt 32768) {
         throw 'Codec-pack integrity catalog version or file count is invalid.'
     }
 
@@ -555,7 +555,7 @@ function Get-PhysicalPackInventory {
                 continue
             }
             $relative = [System.IO.Path]::GetRelativePath($PackRoot, $item.FullName).Replace('\', '/')
-            if ($actual.ContainsKey($relative) -or $actual.Count -ge 250002) {
+            if ($actual.ContainsKey($relative) -or $actual.Count -ge 32770) {
                 throw 'Physical codec-pack inventory is duplicated or oversized.'
             }
             $actual[$relative] = $null

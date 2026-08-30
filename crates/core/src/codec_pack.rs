@@ -21,7 +21,10 @@ const H3_PROFILE_VERSION: &str = "0.1.0";
 const MAX_JSON_BYTES: u64 = 1024 * 1024;
 const MAX_PACK_IDS: usize = 64;
 const MAX_VERSIONS_PER_PACK: usize = 16;
-const MAX_CATALOG_FILES: usize = 4096;
+// Keep the launch-time validator identical to the pack builder, curator, and
+// installer contract. The self-contained Windows PyTorch runtime legitimately
+// contains more than 4,096 individually catalogued files.
+const MAX_CATALOG_FILES: usize = 32_768;
 const MAX_ARGUMENTS: usize = 64;
 const MAX_EXTERNAL_ASSETS: usize = 16;
 const MAX_VARIANTS_PER_ASSET: usize = 32;
@@ -631,8 +634,7 @@ fn validate_launch_and_assets(manifest: &CodecPackManifest) -> Result<(), CodecP
 
 fn validate_catalog(root: &Path, catalog: &IntegrityCatalog) -> Result<(), CodecPackError> {
     if catalog.manifest_version != INTEGRITY_CATALOG_VERSION
-        || catalog.files.is_empty()
-        || catalog.files.len() > MAX_CATALOG_FILES
+        || !valid_catalog_file_count(catalog.files.len())
     {
         return Err(CodecPackError::new(
             CodecPackErrorCode::IntegrityCatalogInvalid,
@@ -658,6 +660,10 @@ fn validate_catalog(root: &Path, catalog: &IntegrityCatalog) -> Result<(), Codec
         }
     }
     Ok(())
+}
+
+fn valid_catalog_file_count(count: usize) -> bool {
+    (1..=MAX_CATALOG_FILES).contains(&count)
 }
 
 fn require_catalog_path(
@@ -940,4 +946,17 @@ fn reject_reparse_metadata(metadata: &fs::Metadata) -> Result<(), CodecPackError
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_CATALOG_FILES, valid_catalog_file_count};
+
+    #[test]
+    fn catalog_file_bound_matches_the_physical_packaging_contract() {
+        assert!(!valid_catalog_file_count(0));
+        assert!(valid_catalog_file_count(4_978));
+        assert!(valid_catalog_file_count(MAX_CATALOG_FILES));
+        assert!(!valid_catalog_file_count(MAX_CATALOG_FILES + 1));
+    }
 }
