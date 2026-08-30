@@ -5,6 +5,7 @@ not authorize publication, Git tags, remote changes, signing, or uploads.
 
 - [Windows application release candidate](WINDOWS_LOCAL_RC.md)
 - [H3 Codec Pack packaging and lifecycle](H3_CODEC_PACK.md)
+- [Isolated ComfyUI user-test environment](ISOLATED_COMFY_TEST_ENVIRONMENT.md)
 - [Verified and open 0.1.0 acceptance gates](ACCEPTANCE_STATUS.md)
 
 Application installers and Codec Packs are independent artifacts with
