@@ -28,23 +28,29 @@ def _latent(temporal: int, *, height: int = 3, width: int = 4) -> dict[str, obje
                 "timing": {
                     "contract": "minimax_h3_causal",
                     "contract_version": "0.1.0",
-                    "decoded_video": {
-                        "frame_rate": {"numerator": 24, "denominator": 1}
-                    },
+                    "decoded_video": {"frame_rate": {"numerator": 24, "denominator": 1}},
                 },
             },
         },
     }
 
 
-def test_compatibility_allows_independent_h3_playhead_lengths() -> None:
+def test_compatibility_requires_explicit_temporal_alignment() -> None:
     report = check_h3_compatibility([_latent(32), _latent(72)])
 
-    assert report["compatible"] is True
-    assert report["mismatches"] == []
+    assert report["compatible"] is False
+    assert report["mismatches"] == [
+        {
+            "input_index": 1,
+            "field": "temporal_slots",
+            "reference": 32,
+            "actual": 72,
+        }
+    ]
     assert report["inputs"][0]["temporal_slots"] == 32
     assert report["inputs"][1]["temporal_slots"] == 72
-    assert "temporal_slots" not in report["compatibility_key"]
+    assert report["compatibility_key"]["temporal_slots"] == 32
+    assert report["conversion_performed"] is False
 
 
 def test_compatibility_reports_each_mismatched_contract_field_without_conversion() -> None:

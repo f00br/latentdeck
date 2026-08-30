@@ -17,6 +17,7 @@ _KEY_FIELDS = (
     "runtime_dtype",
     "batch",
     "channels",
+    "temporal_slots",
     "latent_height",
     "latent_width",
     "timing_contract",
@@ -68,9 +69,7 @@ def _video(latent: object) -> torch.Tensor:
 def _visual_manifest_tensor(manifest: Mapping[str, object]) -> Mapping[str, object]:
     tensors = manifest.get("tensors")
     if not isinstance(tensors, list):
-        raise ToolkitIOError(
-            "compatibility.metadata_invalid", "manifest tensors must be an array"
-        )
+        raise ToolkitIOError("compatibility.metadata_invalid", "manifest tensors must be an array")
     visual = [
         tensor
         for tensor in tensors
@@ -101,6 +100,7 @@ def _from_manifest(
             "runtime_dtype": visual.get("runtime_dtype"),
             "batch": video.shape[0],
             "channels": video.shape[1],
+            "temporal_slots": video.shape[2],
             "latent_height": video.shape[3],
             "latent_width": video.shape[4],
             "timing_contract": timing.get("contract"),
@@ -122,6 +122,7 @@ def _from_raw(metadata: Mapping[str, object], video: torch.Tensor) -> tuple[dict
             "runtime_dtype": "F16",
             "batch": video.shape[0],
             "channels": video.shape[1],
+            "temporal_slots": video.shape[2],
             "latent_height": video.shape[3],
             "latent_width": video.shape[4],
             "timing_contract": "minimax_h3_causal",
