@@ -47,15 +47,18 @@ function Resolve-ExistingFile {
         [string]$Path,
 
         [Parameter(Mandatory)]
-        [string]$Label
+        [string]$Label,
+
+        [switch]$AllowEmpty
     )
 
     $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
     $item = Get-Item -LiteralPath $resolved -Force
-    if (-not $item.PSIsContainer -and $item.Length -gt 0) {
+    if (-not $item.PSIsContainer -and ($AllowEmpty -or $item.Length -gt 0)) {
         return $item.FullName
     }
-    throw "$Label must be an existing non-empty file."
+    $requirement = if ($AllowEmpty) { 'file' } else { 'non-empty file' }
+    throw "$Label must be an existing $requirement."
 }
 
 function Resolve-ExistingDirectory {
@@ -458,7 +461,9 @@ function Resolve-BoundPackFile {
         [string]$RelativePath,
 
         [Parameter(Mandatory)]
-        [string]$Label
+        [string]$Label,
+
+        [switch]$AllowEmpty
     )
 
     if ([string]::IsNullOrWhiteSpace($RelativePath) -or
@@ -488,7 +493,7 @@ function Resolve-BoundPackFile {
             throw "$Label ancestry is invalid."
         }
     }
-    return Resolve-ExistingFile -Path $candidate -Label $Label
+    return Resolve-ExistingFile -Path $candidate -Label $Label -AllowEmpty:$AllowEmpty
 }
 
 function Get-PhysicalPackInventory {
@@ -530,7 +535,7 @@ function Get-PhysicalPackInventory {
             throw 'Codec-pack integrity catalog contains an unsafe or duplicate path.'
         }
         $filePath = Resolve-BoundPackFile -PackRoot $PackRoot -RelativePath $relative `
-            -Label 'cataloged codec-pack file'
+            -Label 'cataloged codec-pack file' -AllowEmpty
         $identity = Get-FileIdentity -Path $filePath
         if ($identity.sha256 -cne [string]$entry.sha256 -or
             $identity.byte_length -ne [long]$entry.byte_length) {
