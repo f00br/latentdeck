@@ -5,20 +5,20 @@ that require additional private media, hardware time, a clean machine, or
 publication credentials. It does not authorize a remote, push, tag, upload, or
 public release.
 
-Status recorded on 2026-08-30: the `0.1.0` source candidate contains the planned
-product surfaces, while the current installer set predates later source commits
-and must be rebuilt. Hardware, current-profile ComfyUI, clean-machine, and
-publication gates listed below remain separate until their exact evidence is
-recorded.
+Status recorded on 2026-08-31: the `0.1.0` source candidate contains the planned
+product surfaces. The current installer set predates later source commits and
+must be rebuilt. Final-binary Spout, clean-machine, publisher-trust, signing,
+and publication gates listed below remain separate until their exact evidence
+is recorded.
 
 ## Verified locally
 
-- The previous aggregate workspace run passed. After the subsequent source
-  changes, targeted Rust, pinned-Node-24 frontend, Python, packaging,
-  diagnostic-bundle, and public-tree checks also passed. A final aggregate run
-  from the final clean commit is still required before rebuilding installers.
-- The current Python workspace reports 345 passed tests plus 53 subtests. The
-  optional D2 and Q4 CUDA parity selection reports 32 passed tests plus 40
+- The aggregate workspace run passed at clean source commit `379405ba0d76`.
+  Rust, pinned-Node-24 frontend, Python, packaging, diagnostic-bundle, and
+  public-tree checks all passed from that source state.
+- The current Python workspace reports 375 passed tests plus 53 subtests, with
+  the two explicitly opt-in CUDA selections skipped by the default command.
+  The separate D2 and Q4 CUDA parity selection reports 32 passed tests plus 40
   subtests on the local RTX 4070.
 - The private LD-D2 worker proof passed 3 of 3 tests using two independent real
   H3 cartridges and an explicitly selected external decoder. It covered Linear
@@ -38,6 +38,14 @@ recorded.
   produced distinct decoded results; carrier reassignment, deterministic
   restart/replay, atomic Snapshot and Live Capture, validation, reload, and
   cleanup with no remaining partial file all passed.
+- The same strict four-independent-source Q4 proof was repeated after the final
+  runtime and UI fixes at clean commit `379405ba0d76`. Four distinct archives,
+  cartridge IDs, visual payloads, and pairwise-disjoint lineage anchors were
+  verified. TOPK and Sinkhorn remained distinct, deterministic restart/replay
+  passed, carrier reassignment changed the output, Snapshot and Live Capture
+  validated and reloaded, and no `.partial` remained. The private, path-free
+  receipt SHA-256 is
+  `b2b22294a8081ea03f8179b1f904ef0946a2e809654746a9aa0892b07e21964e`.
 - The separate duplicate-source LD-Q4 functional proof passed on the same real
   CUDA worker with three distinct private AV archives assigned across four
   slots, with slot D explicitly reusing slot B. The worker acknowledgement,
@@ -74,25 +82,29 @@ recorded.
 - Public screenshots were captured from the running Tauri applications against
   isolated empty data and codec roots, not from concept sketches or private
   cartridges.
+- A fresh isolated ComfyUI profile was built from clean commit
+  `379405ba0d76` with `dirty_at_build=false`. CPU-only server discovery found
+  all 33 Toolkit nodes. Recorder E2E imported an external 16:9 H3 AV
+  Safetensors payload, preserved its exact `1x24x107x48x84` visual geometry and
+  `1x32x2x603` audio cadence, explicitly cast visual storage to FP16, passed
+  full Rust cartridge validation, and left no temporary residue. All eight
+  queue-ready master workflows were generated with no placeholder or absolute
+  machine path.
+- The owner-approved pre-master stability suite ran D2 XS5, Q4 TOPK, and Q4
+  Sinkhorn for 360 seconds each at clean commit `379405ba0d76`. The measured
+  output rates were respectively 23.8279, 23.8862, and 23.9577 fps; control to
+  processed-frame p95 was 61.714, 55.7192, and 52.0285 ms; intervals over two
+  frames were 0.0979%, 0.1535%, and 0.0278%. Every mode reported zero ring
+  backpressure, an empty final queue, no progressive host/worker/CUDA allocator
+  growth, and no `.partial` residue. On 2026-08-31 the owner accepted the small
+  D2 XS5 and Q4 TOPK frame-rate deviations for `0.1` user-test readiness and
+  deferred tighter frame-pacing work to a future version. This is explicitly a
+  6-minute stability acceptance, not a claim that the original 30-minute
+  performance gate was exercised. The path-free suite receipt SHA-256 is
+  `e2aff6b59939772f395f75de62b97252f31cb35ec01adb9809e3411dd29b64ca`.
 
 ## Open external acceptance gates
 
-- **Final-candidate four-source Q4 replay:** the historical clean-commit,
-  release-class CUDA receipt is recorded above, so no corpus-acquisition or
-  four-independent-source gate remains. Later Q4 runtime and UI changes still
-  require the same strict replay from the final clean commit before master-user
-  handoff; that replay is a current-candidate gate, not a missing historical
-  proof.
-- **Realtime stability:** a legacy 1,800-second D2 Linear receipt records
-  23.9335 fps, 52.422 ms control-latency p95, and passing recorded gates. On
-  2026-08-30 the owner explicitly replaced the remaining pre-master-test
-  30-minute runs with separate 360-second D2 XS5, Q4 TOPK, and Q4 Sinkhorn runs.
-  Those shortened runs are still pending and must be labelled as owner-approved
-  pre-master-test stability evidence, not as 30-minute performance proof.
-- **Current isolated ComfyUI profile:** the existing generated profile and its
-  earlier Recorder/API receipts predate the latest Toolkit cadence fix. Rebuild
-  it from the final clean commit, then repeat server discovery and Recorder E2E
-  before handing it to the master user.
 - **Current application artifacts and Spout replay:** rebuild the two unsigned
   installers and SBOM from the final clean commit. The recorded Spout proof is
   valid historical evidence, but the receiver/shutdown check must be repeated
