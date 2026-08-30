@@ -11,6 +11,7 @@ import torch
 
 from .decoder_compare import ToolkitContractError
 from .mixer_labs import dual_mixer_lab, quad_mixer_lab, route_carrier_donors
+from .operator_api import InstalledOperator, OperatorContext
 from .research_evaluation import (
     benchmark_operator,
     evaluate_determinism,
@@ -31,7 +32,7 @@ from .research_ops import (
     xs4_statistics_transfer,
     xs5_affinity_transport,
 )
-from .workflow_metadata import annotate_evaluation
+from .workflow_metadata import annotate_evaluation, annotate_operation
 
 MAX_JSON_INPUT_BYTES = 1_048_576
 MAX_SAFE_SEED = 9_007_199_254_740_991
@@ -563,6 +564,163 @@ class LatentDeckResearchOperatorHook:
     descriptor: dict[str, object]
 
 
+def _installed_sequence(
+    installed: InstalledOperator,
+    sources: tuple[torch.Tensor, ...],
+    *,
+    controls: Mapping[str, object],
+    seed: int,
+    processing_mode: str,
+    slot_offset: int = 0,
+) -> tuple[torch.Tensor, list[dict[str, object]]]:
+    reference = sources[0]
+    if any(
+        source.shape != reference.shape
+        or source.dtype != reference.dtype
+        or source.device != reference.device
+        for source in sources[1:]
+    ):
+        raise ToolkitContractError(
+            "operator_hook.source_incompatible",
+            "all explicit operator sources must match shape, dtype, and device exactly",
+        )
+
+    slots: list[torch.Tensor] = []
+    receipts: list[dict[str, object]] = []
+    for local_slot in range(reference.shape[2]):
+        result = installed.process_sources(
+            tuple(
+                source[:, :, local_slot : local_slot + 1].contiguous()
+                for source in sources
+            ),
+            controls,
+            OperatorContext(
+                seed=seed,
+                slot_index=slot_offset + local_slot,
+                processing_mode=processing_mode,
+            ),
+        )
+        slots.append(result.output)
+        receipts.append(result.provenance)
+    return torch.cat(slots, dim=2).contiguous(), receipts
+
+
+def build_installed_operator_research_hook(
+    installed: InstalledOperator,
+    *,
+    captured_sources: tuple[object, ...],
+    controls: Mapping[str, object],
+    seed: int,
+    name: str | None = None,
+) -> LatentDeckResearchOperatorHook:
+    """Build an evaluation hook from already imported, explicitly installed code.
+
+    The latent passed to Benchmark/Determinism/Streaming is always source zero.
+    A topology-specific external Comfy node captures its remaining explicit
+    sources in stable order. This helper never resolves or imports the
+    descriptor entrypoint string.
+    """
+
+    if not isinstance(installed, InstalledOperator):
+        raise ToolkitContractError(
+            "operator_hook.operator_invalid", "an explicitly InstalledOperator is required"
+        )
+    if not isinstance(captured_sources, tuple):
+        raise ToolkitContractError(
+            "operator_hook.sources_invalid", "captured_sources must be an ordered tuple"
+        )
+    expected_captured = installed.descriptor.input_count - 1
+    if len(captured_sources) != expected_captured:
+        raise ToolkitContractError(
+            "operator_hook.source_count_invalid",
+            "captured sources must match the descriptor input_count minus source zero",
+        )
+    if not isinstance(controls, Mapping) or not all(
+        isinstance(key, str) for key in controls
+    ):
+        raise ToolkitContractError(
+            "operator_hook.controls_invalid", "controls must be a string-keyed mapping"
+        )
+
+    parsed_controls = dict(controls)
+    OperatorContext(seed=seed).validate(installed.descriptor)
+    captured_surfaces = tuple(
+        visual_latent(source, f"captured_source[{index + 1}]")
+        for index, source in enumerate(captured_sources)
+    )
+
+    topology = installed.descriptor.topology
+    roles = (
+        ("source",)
+        if topology == "single_source"
+        else ("carrier", *(f"donor_{index}" for index in range(1, len(captured_sources) + 1)))
+    )
+
+    def full(value: object) -> object:
+        primary = visual_latent(value, "source[0]")
+        output, receipts = _installed_sequence(
+            installed,
+            (primary.visual, *(surface.visual for surface in captured_surfaces)),
+            controls=parsed_controls,
+            seed=seed,
+            processing_mode="full_clip",
+        )
+        repacked = primary.repack(output)
+        if not isinstance(repacked, Mapping):
+            return repacked
+        return annotate_operation(
+            repacked,
+            sources=tuple(zip(roles, (value, *captured_sources), strict=True)),
+            structural_role=roles[0],
+            provenance={"operation": receipts[0]["operation"]},
+        )
+
+    def chunk(
+        value: torch.Tensor,
+        state: object | None,
+        offset: int,
+    ) -> tuple[object, object | None]:
+        primary = visual_latent(value, "source[0] chunk")
+        stop = offset + primary.visual.shape[2]
+        captured_chunks = tuple(
+            surface.visual[:, :, offset:stop].contiguous()
+            for surface in captured_surfaces
+        )
+        if any(chunk.shape[2] != primary.visual.shape[2] for chunk in captured_chunks):
+            raise ToolkitContractError(
+                "operator_hook.source_range_invalid",
+                "a captured source does not cover the requested temporal chunk",
+            )
+        output, _ = _installed_sequence(
+            installed,
+            (primary.visual, *captured_chunks),
+            controls=parsed_controls,
+            seed=seed,
+            processing_mode="chunk",
+            slot_offset=offset,
+        )
+        return output, state
+
+    descriptor = installed.descriptor
+    return LatentDeckResearchOperatorHook(
+        name=name or f"external/{descriptor.operator_id}",
+        full=full,
+        chunk=chunk,
+        streaming_declared=descriptor.capabilities.streaming,
+        descriptor={
+            "schema_version": descriptor.schema_version,
+            "operator_id": descriptor.operator_id,
+            "operator_version": descriptor.operator_version,
+            "topology": descriptor.topology,
+            "input_count": descriptor.input_count,
+            "deterministic": descriptor.capabilities.deterministic,
+            "streaming_declared": descriptor.capabilities.streaming,
+            "controls": parsed_controls,
+            "seed": seed,
+        },
+    )
+
+
 class LatentDeckToolkitDualOperatorHook:
     RETURN_TYPES = ("LATENTDECK_OPERATOR_HOOK",)
     RETURN_NAMES = ("operator_hook",)
@@ -796,4 +954,5 @@ __all__ = [
     "RESEARCH_NODE_CLASS_MAPPINGS",
     "RESEARCH_NODE_DISPLAY_NAME_MAPPINGS",
     "LatentDeckResearchOperatorHook",
+    "build_installed_operator_research_hook",
 ]

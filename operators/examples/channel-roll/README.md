@@ -12,6 +12,28 @@ carrier with a donor whose channels are rotated by a bounded control plus the
 deterministic context seed. It preserves the F16 `[1,24,1,H,W]` slot shape,
 processes the full grid, and returns bounded JSON provenance.
 
+## Install in ComfyUI
+
+Install the LatentDeck Comfy Toolkit in the same Python environment first.
+Then copy this complete `channel-roll` directory into ComfyUI's
+`custom_nodes` directory under any unambiguous folder name, for example
+`latentdeck-example-channel-roll`, and restart ComfyUI. The checked-in root
+`__init__.py` is the normal ComfyUI discovery entrypoint; no generated shim is
+required. This is an explicit installation of trusted executable Python and is
+entirely separate from loading an untrusted data-only `.lc` cartridge.
+
+ComfyUI exposes two nodes:
+
+- `MyLatentOperator Channel Roll` processes a carrier and donor directly;
+- `Channel Roll Test Hook` connects the same installed operator to the Toolkit
+  Benchmark, Determinism Test, and Streaming Compatibility Test nodes.
+
+The second node is the topology-specific `dual_source` builder. It passes its
+already installed operator and explicit donor to
+`build_installed_operator_research_hook()`; no descriptor entrypoint is
+dynamically imported. Single-source builders capture no extra latent, while
+carrier-plus-donors builders expose every donor as a fixed ordered node input.
+
 Importing the package has no registry side effect. A trusted host must create a
 `TrustedOperatorRegistry` and call `install_into(registry)` explicitly. The
 registry receives the callable directly and verifies that its exported identity

@@ -47,6 +47,30 @@ inputs and are not part of this repository.
   hook, benchmark, determinism test, full-vs-chunk streaming test, and a
   JSON/Markdown report exporter that reads the accumulated graph ledger.
 
+### Replace the built-in hook with an installed external operator
+
+`99_OPERATOR_DEVELOPER_TEMPLATE.json` deliberately ships with
+`LatentDeckToolkitDualOperatorHook`, so the graph remains loadable when only the
+Toolkit is installed. To evaluate separately installed trusted code:
+
+1. explicitly install the external operator package as a ComfyUI custom node
+   and restart ComfyUI;
+2. delete `LatentDeckToolkitDualOperatorHook` from the graph;
+3. add that package's topology-specific hook-builder node. For the checked-in
+   Channel Roll example, add `LatentDeckExampleChannelRollHook` and connect the
+   donor plus its visible controls;
+4. connect the hook builder's `LATENTDECK_OPERATOR_HOOK` output to **Operator
+   Benchmark**, **Determinism Test**, and **Streaming Compatibility Test**;
+5. keep the carrier connected directly to those three evaluation nodes. A
+   `single_source` hook captures no additional latent, a `dual_source` hook
+   captures one donor, and a `carrier_donors` hook exposes every donor as a
+   fixed, ordered Comfy input.
+
+Do not paste an entrypoint string into the graph or add a dynamic loader. The
+external package imports its own trusted implementation during explicit
+installation and gives the Toolkit an already constructed hook value. Loading
+a cartridge never installs or imports operator code.
+
 ## Expected execution behavior
 
 `PreviewAny` is a ComfyUI core utility used only to expose JSON receipts on the

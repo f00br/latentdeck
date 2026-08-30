@@ -142,6 +142,13 @@ def test_workflow_and_operator_template_guides_cover_every_public_example() -> N
         "zero/bypass",
     ):
         assert contract_term in operator_guide
+    for replacement_term in (
+        "LatentDeckToolkitDualOperatorHook",
+        "LatentDeckExampleChannelRollHook",
+        "LATENTDECK_OPERATOR_HOOK",
+    ):
+        assert replacement_term in workflow_guide
+    assert "dynamic loader" in workflow_guide
     assert "workflows/README.md" in toolkit_readme
     assert "docs/OPERATOR_DEVELOPER_TEMPLATE.md" in toolkit_readme
 

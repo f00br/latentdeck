@@ -35,6 +35,10 @@ from .projector import (
     preflight_projector_input,
     project_offline,
 )
+from .research_nodes import (
+    LatentDeckResearchOperatorHook,
+    build_installed_operator_research_hook,
+)
 
 __version__ = "0.1.0"
 
@@ -52,6 +56,7 @@ __all__ = [
     "DecoderHook",
     "ExternalOperatorDescriptor",
     "InstalledOperator",
+    "LatentDeckResearchOperatorHook",
     "OPERATOR_API_VERSION",
     "OperatorContext",
     "PROJECTOR_VERSION",
@@ -63,6 +68,7 @@ __all__ = [
     "XsSequenceResult",
     "__version__",
     "compare_decoder_hooks",
+    "build_installed_operator_research_hook",
     "get_operator_descriptor_schema",
     "project_offline",
     "preflight_projector_input",

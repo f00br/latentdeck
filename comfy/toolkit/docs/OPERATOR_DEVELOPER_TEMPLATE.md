@@ -68,6 +68,33 @@ the standalone realtime Deck. Its declared streaming behavior must match the
 measured chunk path, and the exact same full-grid algorithm must meet the
 release performance gate without hidden downscale or donor removal.
 
+The public `LatentDeckResearchOperatorHook` value is the bridge from a trusted
+external Comfy node to those three evaluation nodes. A copied operator package
+must provide its own hook-builder node, capture all explicit sources and
+controls, and implement both a full-clip callable and an ordered chunk callable.
+The checked-in Channel Roll example is a complete dual-source implementation.
+The same value supports `single_source`, `dual_source`, and `carrier_donors`;
+only the external package knows which explicit inputs its trusted callable
+requires. The Toolkit deliberately does not dynamically import an entrypoint
+string or discover executable code from a cartridge.
+
+Use `build_installed_operator_research_hook()` after your package has called
+`TrustedOperatorRegistry.install()` with its already imported callable. Export
+both the normal process node and its topology-specific hook builder through the
+package's `NODE_CLASS_MAPPINGS`:
+
+| Topology | Normal process node | Hook-builder node |
+|---|---|---|
+| `single_source` | source + explicit controls | controls only; the evaluation input is source zero |
+| `dual_source` | carrier + donor + controls | donor + controls |
+| `carrier_donors` | carrier + every ordered donor + controls | the exact same fixed donor order + controls |
+
+The hook builder passes those non-primary inputs as the ordered
+`captured_sources` tuple. It never accepts a module name, file path, entrypoint
+string, or code from a cartridge. See the exact graph replacement steps beside
+`99_OPERATOR_DEVELOPER_TEMPLATE.json` in the
+[workflow guide](../workflows/README.md).
+
 See the normative [Operator API 0.1](../../../spec/operator-api/README.md) for
 descriptor fields, trusted-install behavior, wrappers, validation limits, and
 stable error semantics.
