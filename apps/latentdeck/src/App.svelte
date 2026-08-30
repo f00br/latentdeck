@@ -21,6 +21,10 @@
   } from "./library-model";
   import D2Faceplate from "./D2Faceplate.svelte";
   import Q4Faceplate from "./Q4Faceplate.svelte";
+  import {
+    describeDiagnosticSaveResult,
+    type DiagnosticSaveResult,
+  } from "./diagnostic-model";
   import { product } from "./product";
 
   type AppSurface = "library" | "d2" | "q4";
@@ -37,6 +41,9 @@
   let tagDrafts: Record<string, string> = {};
   let membershipTargets: Record<string, string> = {};
   let activeSurface: AppSurface = "library";
+  let diagnosticBusy = false;
+  let diagnosticFailed = false;
+  let diagnosticStatus = "Path-free support bundle";
 
   let activeCollection: CollectionView | undefined;
   let persistedCollections: CollectionView[] = [];
@@ -345,6 +352,24 @@
       });
     }, "Cartridge moved to Recent.");
   }
+
+  async function saveDiagnostics(): Promise<void> {
+    if (diagnosticBusy) return;
+    diagnosticBusy = true;
+    diagnosticFailed = false;
+    diagnosticStatus = "Choose a new .zip file in the native save dialog…";
+    try {
+      const result = await invoke<DiagnosticSaveResult>(
+        "deck_save_diagnostics",
+      );
+      diagnosticStatus = describeDiagnosticSaveResult(result);
+    } catch (error) {
+      diagnosticFailed = true;
+      diagnosticStatus = `Not saved: ${describeCommandError(error)}`;
+    } finally {
+      diagnosticBusy = false;
+    }
+  }
 </script>
 
 <svelte:head>
@@ -375,6 +400,18 @@
       <span>INDEX</span>
       <strong>{view.totalIndexed.toString().padStart(3, "0")}</strong>
       <small>cartridges</small>
+    </div>
+    <div class="diagnostic-actions">
+      <button
+        type="button"
+        onclick={() => void saveDiagnostics()}
+        disabled={diagnosticBusy}
+      >
+        {diagnosticBusy ? "Saving diagnostics…" : "Save diagnostics"}
+      </button>
+      <small class:diagnostic-error={diagnosticFailed} aria-live="polite"
+        >{diagnosticStatus}</small
+      >
     </div>
   </header>
 

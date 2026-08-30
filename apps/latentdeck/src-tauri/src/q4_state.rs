@@ -11,13 +11,14 @@ use tauri_plugin_dialog::DialogExt as _;
 use tokio::sync::{Mutex as AsyncMutex, watch};
 
 use crate::{
+    diagnostic_state::DeckDiagnosticLifecycle,
     library_state::{AppState as LibraryAppState, CommandError, DeckKind},
     q4_capture_host::Q4CaptureView,
     q4_runtime::{
         Q4BackendController, Q4BackendView, Q4CaptureHostServices, Q4ControlsAckView,
-        Q4ControlsInput, Q4LaunchConfig, Q4RolesAckView, Q4RolesInput, Q4Runtime, Q4RuntimeError,
-        Q4SeedAckView, Q4StatusView, Q4TransportAckView, Q4TransportInput,
-        validate_selected_decoder,
+        Q4ControlsInput, Q4LaunchConfig, Q4RolesAckView, Q4RolesInput, Q4Runtime,
+        Q4RuntimeDiagnostics, Q4RuntimeError, Q4SeedAckView, Q4StatusView, Q4TransportAckView,
+        Q4TransportInput, validate_selected_decoder,
     },
 };
 
@@ -86,7 +87,19 @@ impl Q4AppState {
         }
     }
 
+    pub(crate) async fn runtime_diagnostics(
+        &self,
+    ) -> Result<Option<Q4RuntimeDiagnostics>, Q4RuntimeError> {
+        match clone_diagnostic_slot(&self.lifecycle, &self.runtime).await {
+            Some(runtime) => runtime.diagnostics().await,
+            None => Ok(None),
+        }
+    }
+
     fn emit_error(app: &AppHandle, error: &Q4RuntimeError) {
+        if let Some(lifecycle) = app.try_state::<DeckDiagnosticLifecycle>() {
+            lifecycle.record_error(&error.code);
+        }
         let _ = app.emit("deck-q4-error", error.event());
     }
 
@@ -503,6 +516,16 @@ async fn clone_slot<T>(slot: &AsyncMutex<Option<Arc<T>>>) -> Option<Arc<T>> {
     slot.lock().await.as_ref().cloned()
 }
 
+async fn clone_diagnostic_slot<T>(
+    lifecycle: &AsyncMutex<()>,
+    slot: &AsyncMutex<Option<Arc<T>>>,
+) -> Option<Arc<T>> {
+    let lifecycle_guard = lifecycle.lock().await;
+    let runtime = clone_slot(slot).await;
+    drop(lifecycle_guard);
+    runtime
+}
+
 async fn take_slot<T>(slot: &AsyncMutex<Option<Arc<T>>>) -> Option<Arc<T>> {
     slot.lock().await.take()
 }
@@ -634,5 +657,21 @@ mod tests {
             .await
             .expect("take must release runtime mutex before shutdown awaits");
         assert!(guard.is_none());
+    }
+
+    #[tokio::test]
+    async fn diagnostic_clone_releases_lifecycle_gate_before_actor_await() {
+        let lifecycle = AsyncMutex::new(());
+        let original = Arc::new(9_u8);
+        let slot = AsyncMutex::new(Some(Arc::clone(&original)));
+
+        let cloned = clone_diagnostic_slot(&lifecycle, &slot)
+            .await
+            .expect("runtime clone");
+        assert!(Arc::ptr_eq(&cloned, &original));
+        let guard = tokio::time::timeout(std::time::Duration::from_millis(10), lifecycle.lock())
+            .await
+            .expect("diagnostic actor await must not retain lifecycle gate");
+        drop(guard);
     }
 }

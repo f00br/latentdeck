@@ -142,6 +142,29 @@ input::placeholder {
   border-bottom-color: #66756b;
 }
 
+.diagnostic-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 5px;
+  margin-left: auto;
+  padding: 10px 14px;
+  border-left: 1px solid var(--line-strong);
+}
+
+.diagnostic-actions small {
+  max-width: 300px;
+  color: var(--muted);
+  font-size: 0.55rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.diagnostic-actions small.diagnostic-error {
+  color: #ef9d91;
+}
+
 .surface-tabs {
   display: flex;
   gap: 4px;
@@ -205,6 +228,7 @@ input::placeholder {
 
 .identity {
   display: flex;
+  flex: 1;
   align-items: center;
   gap: 14px;
   padding: 12px 18px;

@@ -24,6 +24,9 @@ use latentdeck_core::{
         ValidatedCodecPack, ValidatedExternalAsset, default_codec_pack_roots, discover_codec_packs,
         validate_external_asset,
     },
+    realtime_diagnostics::{
+        D2DiagnosticSession, DiagnosticCodecIdentity, DiagnosticGpuIdentity, Sha256Token,
+    },
     signal_geometry::{SignalCompatibilityPolicy, SignalGeometry, check_signal_compatibility},
 };
 use latentdeck_library::ResolvedDeckSource;
@@ -50,6 +53,8 @@ const H3_ASSET_ID: &str = "taeh3";
 const D2_DECK_ID: &str = "main-d2";
 const D2_OPERATOR_ID: &str = "org.latentdeck.builtin.ld_d2";
 const D2_OPERATOR_VERSION: &str = "0.1.0";
+const H3_CODEC_FAMILY: &str = "minimax_h3";
+const H3_PROFILE_ID: &str = "h3_av_latent";
 const INITIAL_GENERATION: u64 = 1;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -466,6 +471,51 @@ pub(crate) struct D2LaunchConfig {
 }
 
 #[derive(Clone)]
+struct D2DiagnosticIdentity {
+    codec: DiagnosticCodecIdentity,
+    cartridge_sha256: [Sha256Token; 2],
+    target_fps: f64,
+}
+
+impl D2DiagnosticIdentity {
+    fn from_config(config: &D2LaunchConfig) -> Result<Self, D2RuntimeError> {
+        let frame_rate = config.source_a.profile.compatibility_key.frame_rate;
+        let numerator = u32::try_from(frame_rate.numerator)
+            .map_err(|_| D2RuntimeError::diagnostics_contract())?;
+        let denominator = u32::try_from(frame_rate.denominator)
+            .map_err(|_| D2RuntimeError::diagnostics_contract())?;
+        if denominator == 0 {
+            return Err(D2RuntimeError::diagnostics_contract());
+        }
+        Ok(Self {
+            codec: crate::runtime_diagnostics::diagnostic_codec_identity(
+                H3_CODEC_FAMILY,
+                H3_PROFILE_ID,
+                &config.backend.codec_pack.manifest.pack_id,
+                &config.backend.codec_pack.manifest.pack_version,
+                &config.backend.decoder_asset.asset_id,
+                &config.backend.decoder_asset.sha256,
+            )
+            .map_err(|_| D2RuntimeError::diagnostics_contract())?,
+            cartridge_sha256: [
+                Sha256Token::parse(&config.source_a.archive_sha256)
+                    .map_err(|_| D2RuntimeError::diagnostics_contract())?,
+                Sha256Token::parse(&config.source_b.archive_sha256)
+                    .map_err(|_| D2RuntimeError::diagnostics_contract())?,
+            ],
+            target_fps: f64::from(numerator) / f64::from(denominator),
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct D2RuntimeDiagnostics {
+    pub(crate) gpu: DiagnosticGpuIdentity,
+    pub(crate) codec: DiagnosticCodecIdentity,
+    pub(crate) session: D2DiagnosticSession,
+}
+
+#[derive(Clone)]
 pub(crate) struct D2CaptureHostServices {
     app_local_data: PathBuf,
     library_importer: LibraryImporter,
@@ -548,6 +598,15 @@ impl D2RuntimeError {
         Self::owned(
             "deck.controls_invalid",
             "LD-D2 controls are outside the supported finite bounds.",
+            true,
+            false,
+        )
+    }
+
+    fn diagnostics_contract() -> Self {
+        Self::owned(
+            "diagnostics.contract_invalid",
+            "LD-D2 could not create a safe diagnostic snapshot from the current session.",
             true,
             false,
         )
@@ -913,9 +972,11 @@ mod platform {
         D2CaptureState, D2CaptureStatus, D2CaptureStatusRequest, D2CaptureStop, D2ControlsSet,
         D2Load, D2ProcessSlot, D2ProcessSlotAck, D2Reset, D2Restart, D2SeedSet, D2SourceBinding,
         D2TransportSet, EmptyPayload, ErrorCode, ExternalAssetBinding, MAX_CONTROL_FRAME_BYTES,
-        ProfileRef, RingBind, SessionConfigure, ShutdownReason, WORKER_PROTOCOL_VERSION, WireUuid,
+        MetricsSnapshot, ProfileRef, RingBind, SessionConfigure, ShutdownReason,
+        WORKER_PROTOCOL_VERSION, WireUuid,
     };
     use latentdeck_core::{
+        diagnostics::{LogLevel, record_global},
         worker_client::{WorkerClient, WorkerClientError},
         worker_supervisor::{ValidatedWorkerLaunch, spawn_worker},
     };
@@ -928,7 +989,7 @@ mod platform {
         ResizeOutcome,
     };
     use serde::Deserialize as _;
-    use tauri::{Emitter as _, async_runtime::JoinHandle as TauriJoinHandle};
+    use tauri::{Emitter as _, Manager as _, async_runtime::JoinHandle as TauriJoinHandle};
     use tokio::{
         sync::{mpsc, oneshot, watch},
         task::JoinHandle,
@@ -940,18 +1001,22 @@ mod platform {
         CaptureHostError, CaptureSpoolBinding, D2CaptureView, resample_request_from_receipt,
         validate_output_path,
     };
+    use crate::runtime_diagnostics::{
+        PresentationDiagnosticState, diagnostic_gpu_identity, diagnostic_token, realtime_metrics,
+    };
 
     use super::{
         AppHandle, Arc, CausalResetPlan, D2_DECK_ID, D2_OPERATOR_ID, D2_OPERATOR_VERSION,
         D2_OUTPUT_WINDOW_LABEL, D2_OUTPUT_WINDOW_TITLE, D2Controls, D2ControlsAckView,
-        D2LaunchBackend, D2LaunchConfig, D2ResetReason, D2RuntimeError, D2SeedAckView, D2Status,
-        D2StatusView, D2Transport, D2TransportAckView, DeckSessionLease, Duration,
-        INITIAL_GENERATION, MAX_D2_SAFE_INTEGER, Mutex, Path, PathBuf, TrustedD2Source,
-        ValidatedCodecPack,
+        D2DiagnosticIdentity, D2LaunchBackend, D2LaunchConfig, D2ResetReason, D2RuntimeDiagnostics,
+        D2RuntimeError, D2SeedAckView, D2Status, D2StatusView, D2Transport, D2TransportAckView,
+        DeckSessionLease, Duration, INITIAL_GENERATION, MAX_D2_SAFE_INTEGER, Mutex, Path, PathBuf,
+        TrustedD2Source, ValidatedCodecPack,
     };
 
     const CHANNEL_CAPACITY: usize = 8;
     const ACTOR_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+    const DIAGNOSTIC_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
     const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
     const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
     const SCHEDULER_POLL: Duration = Duration::from_millis(2);
@@ -972,6 +1037,8 @@ mod platform {
         sender: mpsc::Sender<RuntimeCommand>,
         closed: Arc<AtomicBool>,
         cleanup_complete: watch::Receiver<bool>,
+        started_at: Instant,
+        diagnostic_identity: D2DiagnosticIdentity,
         _task: TauriJoinHandle<()>,
     }
 
@@ -983,6 +1050,7 @@ mod platform {
             config: D2LaunchConfig,
             deck_session: DeckSessionLease,
         ) -> Result<Self, D2RuntimeError> {
+            let diagnostic_identity = D2DiagnosticIdentity::from_config(&config)?;
             let launch = ValidatedWorkerLaunch::from_codec_pack_d2(&config.backend.codec_pack)
                 .map_err(|_| D2RuntimeError::d2_entrypoint_missing())?;
             let pending = spawn_worker(launch)
@@ -1044,6 +1112,8 @@ mod platform {
 
             let closed = Arc::new(AtomicBool::new(false));
             let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
+            let started_at = Instant::now();
+            let presentation_diagnostics = PresentationDiagnosticState::new(&output.spout_status());
             let actor = RuntimeActor {
                 app,
                 client,
@@ -1058,6 +1128,7 @@ mod platform {
                 pending_frame: None,
                 presented_sequence: 0,
                 frame_clock,
+                presentation_diagnostics,
                 app_local_data: config.app_local_data,
                 library_importer: config.library_importer,
                 capture: None,
@@ -1073,6 +1144,8 @@ mod platform {
                 sender,
                 closed,
                 cleanup_complete,
+                started_at,
+                diagnostic_identity,
                 _task: task,
             })
         }
@@ -1252,6 +1325,54 @@ mod platform {
             )
             .await?;
             receive_owned(receiver).await?
+        }
+
+        pub(crate) async fn diagnostics(
+            &self,
+        ) -> Result<Option<D2RuntimeDiagnostics>, D2RuntimeError> {
+            if self.closed.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+            let (reply, receiver) = oneshot::channel();
+            if let Err(error) = send_bounded(
+                &self.sender,
+                RuntimeCommand::Diagnostics { reply },
+                DIAGNOSTIC_REPLY_TIMEOUT,
+            )
+            .await
+            {
+                return if self.closed.load(Ordering::Acquire) {
+                    Ok(None)
+                } else {
+                    Err(error)
+                };
+            }
+            let runtime = match receive_owned_with_timeout(receiver, DIAGNOSTIC_REPLY_TIMEOUT).await
+            {
+                Ok(value) => value?,
+                Err(_error) if self.closed.load(Ordering::Acquire) => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            let duration_ms = u64::try_from(self.started_at.elapsed().as_millis())
+                .map_err(|_| D2RuntimeError::diagnostics_contract())?;
+            let metrics = realtime_metrics(
+                duration_ms,
+                self.diagnostic_identity.target_fps,
+                &runtime.worker,
+                runtime.presentation,
+            )
+            .map_err(|_| D2RuntimeError::diagnostics_contract())?;
+            Ok(Some(D2RuntimeDiagnostics {
+                gpu: diagnostic_gpu_identity(&runtime.device)
+                    .map_err(|_| D2RuntimeError::diagnostics_contract())?,
+                codec: self.diagnostic_identity.codec.clone(),
+                session: super::D2DiagnosticSession::new(
+                    diagnostic_token(D2_OPERATOR_ID)
+                        .map_err(|_| D2RuntimeError::diagnostics_contract())?,
+                    self.diagnostic_identity.cartridge_sha256.clone(),
+                    metrics,
+                ),
+            }))
         }
 
         pub(crate) async fn shutdown(&self) -> Result<(), D2RuntimeError> {
@@ -1655,11 +1776,18 @@ mod platform {
         pending_frame: Option<latentdeck_gpu::ring::RgbaFrame>,
         presented_sequence: u64,
         frame_clock: FrameClock,
+        presentation_diagnostics: PresentationDiagnosticState,
         app_local_data: PathBuf,
         library_importer: super::LibraryImporter,
         capture: Option<ActiveCapture>,
         capture_finalizer: Option<CaptureFinalizer>,
         capture_coordinator: CaptureCoordinator,
+    }
+
+    struct RuntimeDiagnosticSnapshot {
+        worker: MetricsSnapshot,
+        device: latentdeck_native_output::NativeDeviceIdentity,
+        presentation: crate::runtime_diagnostics::PresentationDiagnosticSnapshot,
     }
 
     struct ActiveCapture {
@@ -1888,7 +2016,9 @@ mod platform {
                     self.finish_command(result, reply).await
                 }
                 RuntimeCommand::SpoutStatus { reply } => {
-                    let result = Ok(self.output.spout_status());
+                    let status = self.output.spout_status();
+                    self.presentation_diagnostics.observe_spout(&status);
+                    let result = Ok(status);
                     self.finish_command(result, reply).await
                 }
                 RuntimeCommand::ConfigureSpout {
@@ -1898,12 +2028,23 @@ mod platform {
                 } => {
                     if let Some(name) = name {
                         let _ = self.output.set_spout_name(name);
+                        self.presentation_diagnostics
+                            .observe_spout(&self.output.spout_status());
                     }
                     if let Some(enabled) = enabled {
                         let _ = self.output.set_spout_enabled(enabled);
+                        self.presentation_diagnostics
+                            .observe_spout(&self.output.spout_status());
                     }
-                    let result = Ok(self.output.spout_status());
+                    let status = self.output.spout_status();
+                    self.presentation_diagnostics.observe_spout(&status);
+                    let result = Ok(status);
                     self.finish_command(result, reply).await
+                }
+                RuntimeCommand::Diagnostics { reply } => {
+                    let result = self.diagnostics().await;
+                    let _ = reply.send(result);
+                    false
                 }
                 RuntimeCommand::Shutdown { reply } => {
                     let result = self.stop(ShutdownReason::ApplicationExit).await;
@@ -1992,7 +2133,11 @@ mod platform {
                 return Err(D2RuntimeError::worker_protocol());
             }
             self.status.transport = ack.transport;
-            if !was_active && transport_active(ack.transport) {
+            let is_active = transport_active(ack.transport);
+            if was_active != is_active {
+                self.presentation_diagnostics.cut_interval();
+            }
+            if !was_active && is_active {
                 self.frame_clock.restart();
             }
             self.publish_status()?;
@@ -2592,6 +2737,7 @@ mod platform {
 
         async fn apply_reset(&mut self, plan: CausalResetPlan) -> Result<(), D2RuntimeError> {
             self.pending_frame = None;
+            self.presentation_diagnostics.cut_interval();
             self.ensure_worker_session_budget()?;
             let ack = self
                 .client
@@ -2664,15 +2810,47 @@ mod platform {
                     frame.row_stride(),
                     frame.padded_rgba(),
                 )
-                .map_err(|error| D2RuntimeError::output(error.code()))?;
+                .map_err(|error| D2RuntimeError::output(error.code()));
+            let status = self.output.spout_status();
+            self.presentation_diagnostics.observe_spout(&status);
+            let outcome = outcome?;
             if matches!(
                 outcome,
                 PresentOutcome::Presented | PresentOutcome::PresentedAndReconfigured
             ) {
+                self.presentation_diagnostics
+                    .record_presented(Instant::now().into())
+                    .map_err(|_| D2RuntimeError::diagnostics_contract())?;
                 self.presented_sequence = expected;
                 self.pending_frame = None;
             }
             Ok(())
+        }
+
+        async fn diagnostics(&mut self) -> Result<RuntimeDiagnosticSnapshot, D2RuntimeError> {
+            self.ensure_worker_session_budget()?;
+            let Ack::MetricsGet(worker) = self
+                .client
+                .call(
+                    Command::MetricsGet(EmptyPayload {}),
+                    DIAGNOSTIC_REPLY_TIMEOUT,
+                )
+                .await
+                .map_err(map_worker_error)?
+            else {
+                return Err(D2RuntimeError::worker_protocol());
+            };
+            let device = self.output.device_identity();
+            let status = self.output.spout_status();
+            let presentation = self
+                .presentation_diagnostics
+                .snapshot(&status)
+                .map_err(|_| D2RuntimeError::diagnostics_contract())?;
+            Ok(RuntimeDiagnosticSnapshot {
+                worker,
+                device,
+                presentation,
+            })
         }
 
         fn publish_status(&self) -> Result<D2StatusView, D2RuntimeError> {
@@ -2724,6 +2902,16 @@ mod platform {
         }
 
         async fn fail(&mut self, error: D2RuntimeError) {
+            if self.closed.load(Ordering::Acquire) {
+                return;
+            }
+            record_global(LogLevel::Error, "deck.d2.runtime_failed", Some(&error.code));
+            if let Some(lifecycle) = self
+                .app
+                .try_state::<crate::diagnostic_state::DeckDiagnosticLifecycle>()
+            {
+                lifecycle.record_error(&error.code);
+            }
             if self.closed.swap(true, Ordering::AcqRel) {
                 return;
             }
@@ -2804,6 +2992,9 @@ mod platform {
             enabled: Option<bool>,
             reply: oneshot::Sender<Result<NativeSpoutStatus, D2RuntimeError>>,
         },
+        Diagnostics {
+            reply: oneshot::Sender<Result<RuntimeDiagnosticSnapshot, D2RuntimeError>>,
+        },
         Shutdown {
             reply: oneshot::Sender<Result<(), D2RuntimeError>>,
         },
@@ -2824,6 +3015,7 @@ mod platform {
                 Self::SpoutStatus { reply } | Self::ConfigureSpout { reply, .. } => {
                     reply.is_closed()
                 }
+                Self::Diagnostics { reply } => reply.is_closed(),
                 // Shutdown owns cleanup even if its original waiter is
                 // cancelled; Drop also uses this path without a live waiter.
                 Self::Shutdown { .. } => false,
@@ -2884,6 +3076,16 @@ mod platform {
     async fn receive_owned<T>(receiver: oneshot::Receiver<T>) -> Result<T, D2RuntimeError> {
         receiver
             .await
+            .map_err(|_| D2RuntimeError::runtime_unavailable())
+    }
+
+    async fn receive_owned_with_timeout<T>(
+        receiver: oneshot::Receiver<T>,
+        deadline: Duration,
+    ) -> Result<T, D2RuntimeError> {
+        timeout(deadline, receiver)
+            .await
+            .map_err(|_| D2RuntimeError::runtime_timeout())?
             .map_err(|_| D2RuntimeError::runtime_unavailable())
     }
 
@@ -3289,6 +3491,8 @@ mod platform {
                 sender,
                 closed,
                 cleanup_complete,
+                started_at: Instant::now(),
+                diagnostic_identity: test_diagnostic_identity(),
                 _task: tauri::async_runtime::spawn(async {}),
             };
             let mut shutdown = Box::pin(runtime.shutdown());
@@ -3318,6 +3522,8 @@ mod platform {
                 sender,
                 closed: Arc::clone(&closed),
                 cleanup_complete,
+                started_at: Instant::now(),
+                diagnostic_identity: test_diagnostic_identity(),
                 _task: tauri::async_runtime::spawn(async {}),
             };
             let mut shutdown = tokio::spawn(async move { runtime.shutdown().await });
@@ -3353,6 +3559,8 @@ mod platform {
                 sender,
                 closed: Arc::clone(&closed),
                 cleanup_complete,
+                started_at: Instant::now(),
+                diagnostic_identity: test_diagnostic_identity(),
                 _task: tauri::async_runtime::spawn(async {}),
             };
             drop(runtime);
@@ -3554,6 +3762,27 @@ mod platform {
                 source_b: source,
             }
         }
+
+        fn test_diagnostic_identity() -> D2DiagnosticIdentity {
+            D2DiagnosticIdentity {
+                codec: crate::runtime_diagnostics::diagnostic_codec_identity(
+                    CODEC_FAMILY,
+                    PROFILE_ID,
+                    "org.latentdeck.h3",
+                    "0.1.0",
+                    "taeh3",
+                    &"aa".repeat(32),
+                )
+                .expect("codec"),
+                cartridge_sha256: [
+                    latentdeck_core::realtime_diagnostics::Sha256Token::parse(&"bb".repeat(32))
+                        .expect("hash"),
+                    latentdeck_core::realtime_diagnostics::Sha256Token::parse(&"cc".repeat(32))
+                        .expect("hash"),
+                ],
+                target_fps: 24.0,
+            }
+        }
     }
 }
 
@@ -3638,6 +3867,10 @@ impl D2Runtime {
         _name: Option<String>,
         _enabled: Option<bool>,
     ) -> Result<NativeSpoutStatus, D2RuntimeError> {
+        Err(D2RuntimeError::unsupported())
+    }
+
+    pub(crate) async fn diagnostics(&self) -> Result<Option<D2RuntimeDiagnostics>, D2RuntimeError> {
         Err(D2RuntimeError::unsupported())
     }
 }

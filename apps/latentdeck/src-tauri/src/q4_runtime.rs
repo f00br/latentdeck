@@ -24,6 +24,9 @@ use latentdeck_core::{
         ValidatedCodecPack, ValidatedExternalAsset, default_codec_pack_roots, discover_codec_packs,
         validate_external_asset,
     },
+    realtime_diagnostics::{
+        DiagnosticCodecIdentity, DiagnosticGpuIdentity, Q4DiagnosticSession, Sha256Token,
+    },
     signal_geometry::{SignalCompatibilityPolicy, SignalGeometry, check_signal_compatibility},
 };
 use latentdeck_library::ResolvedDeckSource;
@@ -47,6 +50,8 @@ const H3_ASSET_ID: &str = "taeh3";
 const Q4_DECK_ID: &str = "main-q4";
 const Q4_OPERATOR_ID: &str = "org.latentdeck.builtin.ld_q4";
 const Q4_OPERATOR_VERSION: &str = "0.1.0";
+const H3_CODEC_FAMILY: &str = "minimax_h3";
+const H3_PROFILE_ID: &str = "h3_av_latent";
 const INITIAL_GENERATION: u64 = 1;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -576,6 +581,55 @@ pub(crate) struct Q4LaunchConfig {
 }
 
 #[derive(Clone)]
+struct Q4DiagnosticIdentity {
+    codec: DiagnosticCodecIdentity,
+    cartridge_sha256: [Sha256Token; 4],
+    target_fps: f64,
+}
+
+impl Q4DiagnosticIdentity {
+    fn from_config(config: &Q4LaunchConfig) -> Result<Self, Q4RuntimeError> {
+        let frame_rate = config.source_a.profile.compatibility_key.frame_rate;
+        let numerator = u32::try_from(frame_rate.numerator)
+            .map_err(|_| Q4RuntimeError::diagnostics_contract())?;
+        let denominator = u32::try_from(frame_rate.denominator)
+            .map_err(|_| Q4RuntimeError::diagnostics_contract())?;
+        if denominator == 0 {
+            return Err(Q4RuntimeError::diagnostics_contract());
+        }
+        Ok(Self {
+            codec: crate::runtime_diagnostics::diagnostic_codec_identity(
+                H3_CODEC_FAMILY,
+                H3_PROFILE_ID,
+                &config.backend.codec_pack.manifest.pack_id,
+                &config.backend.codec_pack.manifest.pack_version,
+                &config.backend.decoder_asset.asset_id,
+                &config.backend.decoder_asset.sha256,
+            )
+            .map_err(|_| Q4RuntimeError::diagnostics_contract())?,
+            cartridge_sha256: [
+                Sha256Token::parse(&config.source_a.archive_sha256)
+                    .map_err(|_| Q4RuntimeError::diagnostics_contract())?,
+                Sha256Token::parse(&config.source_b.archive_sha256)
+                    .map_err(|_| Q4RuntimeError::diagnostics_contract())?,
+                Sha256Token::parse(&config.source_c.archive_sha256)
+                    .map_err(|_| Q4RuntimeError::diagnostics_contract())?,
+                Sha256Token::parse(&config.source_d.archive_sha256)
+                    .map_err(|_| Q4RuntimeError::diagnostics_contract())?,
+            ],
+            target_fps: f64::from(numerator) / f64::from(denominator),
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct Q4RuntimeDiagnostics {
+    pub(crate) gpu: DiagnosticGpuIdentity,
+    pub(crate) codec: DiagnosticCodecIdentity,
+    pub(crate) session: Q4DiagnosticSession,
+}
+
+#[derive(Clone)]
 pub(crate) struct Q4CaptureHostServices {
     app_local_data: PathBuf,
     library_importer: LibraryImporter,
@@ -675,6 +729,15 @@ impl Q4RuntimeError {
         Self::owned(
             "deck.controls_invalid",
             "LD-Q4 controls are outside the supported finite bounds.",
+            true,
+            false,
+        )
+    }
+
+    fn diagnostics_contract() -> Self {
+        Self::owned(
+            "diagnostics.contract_invalid",
+            "LD-Q4 could not create a safe diagnostic snapshot from the current session.",
             true,
             false,
         )
@@ -1047,13 +1110,14 @@ mod platform {
 
     use latentdeck_control::{
         Ack, BoundedVec, CodecInspection, CodecLoad, Command, EmptyPayload, ErrorCode,
-        ExternalAssetBinding, MAX_CONTROL_FRAME_BYTES, ProfileRef, Q4CaptureMode, Q4CaptureParent,
-        Q4CaptureStart, Q4CaptureState, Q4CaptureStatus, Q4CaptureStatusRequest, Q4CaptureStop,
-        Q4ControlsSet, Q4Load, Q4ProcessSlot, Q4ProcessSlotAck, Q4Reset, Q4Restart, Q4RolesSet,
-        Q4SeedSet, Q4SourceBinding, Q4TransportSet, RingBind, SessionConfigure, ShutdownReason,
-        WORKER_PROTOCOL_VERSION, WireUuid,
+        ExternalAssetBinding, MAX_CONTROL_FRAME_BYTES, MetricsSnapshot, ProfileRef, Q4CaptureMode,
+        Q4CaptureParent, Q4CaptureStart, Q4CaptureState, Q4CaptureStatus, Q4CaptureStatusRequest,
+        Q4CaptureStop, Q4ControlsSet, Q4Load, Q4ProcessSlot, Q4ProcessSlotAck, Q4Reset, Q4Restart,
+        Q4RolesSet, Q4SeedSet, Q4SourceBinding, Q4TransportSet, RingBind, SessionConfigure,
+        ShutdownReason, WORKER_PROTOCOL_VERSION, WireUuid,
     };
     use latentdeck_core::{
+        diagnostics::{LogLevel, record_global},
         worker_client::{WorkerClient, WorkerClientError},
         worker_supervisor::{ValidatedWorkerLaunch, spawn_worker},
     };
@@ -1066,7 +1130,7 @@ mod platform {
         ResizeOutcome,
     };
     use serde::Deserialize as _;
-    use tauri::{Emitter as _, async_runtime::JoinHandle as TauriJoinHandle};
+    use tauri::{Emitter as _, Manager as _, async_runtime::JoinHandle as TauriJoinHandle};
     use tokio::{
         sync::{mpsc, oneshot, watch},
         task::JoinHandle,
@@ -1078,18 +1142,23 @@ mod platform {
         Q4CaptureHostError, Q4CaptureSpoolBinding, Q4CaptureView, Q4FinalizedCapture,
         Q4StructuralCarrierEvidence, finalize_q4_capture, validate_q4_output_path,
     };
+    use crate::runtime_diagnostics::{
+        PresentationDiagnosticState, diagnostic_gpu_identity, diagnostic_token, realtime_metrics,
+    };
 
     use super::{
         AppHandle, Arc, CausalResetPlan, DeckSessionLease, Duration, INITIAL_GENERATION,
         LibraryImporter, MAX_Q4_SAFE_INTEGER, Mutex, Path, PathBuf, Q4_DECK_ID, Q4_OPERATOR_ID,
         Q4_OPERATOR_VERSION, Q4_OUTPUT_WINDOW_LABEL, Q4_OUTPUT_WINDOW_TITLE, Q4Controls,
-        Q4ControlsAckView, Q4LaunchBackend, Q4LaunchConfig, Q4ResetReason, Q4Roles, Q4RolesAckView,
-        Q4RuntimeError, Q4SeedAckView, Q4Slot, Q4Status, Q4StatusView, Q4Transport,
-        Q4TransportAckView, TrustedQ4Source, ValidatedCodecPack,
+        Q4ControlsAckView, Q4DiagnosticIdentity, Q4LaunchBackend, Q4LaunchConfig, Q4ResetReason,
+        Q4Roles, Q4RolesAckView, Q4RuntimeDiagnostics, Q4RuntimeError, Q4SeedAckView, Q4Slot,
+        Q4Status, Q4StatusView, Q4Transport, Q4TransportAckView, TrustedQ4Source,
+        ValidatedCodecPack,
     };
 
     const CHANNEL_CAPACITY: usize = 8;
     const ACTOR_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+    const DIAGNOSTIC_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
     const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
     const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
     const SCHEDULER_POLL: Duration = Duration::from_millis(2);
@@ -1105,10 +1174,13 @@ mod platform {
         sender: mpsc::Sender<RuntimeCommand>,
         closed: Arc<AtomicBool>,
         cleanup_complete: watch::Receiver<bool>,
+        started_at: Instant,
+        diagnostic_identity: Q4DiagnosticIdentity,
         _task: TauriJoinHandle<()>,
     }
 
     impl Q4Runtime {
+        #[allow(clippy::too_many_lines)] // Closed startup ownership and cleanup sequence.
         pub(crate) async fn start(
             app: AppHandle,
             shared_status: Arc<Mutex<Q4StatusView>>,
@@ -1116,6 +1188,7 @@ mod platform {
             config: Q4LaunchConfig,
             deck_session: DeckSessionLease,
         ) -> Result<Self, Q4RuntimeError> {
+            let diagnostic_identity = Q4DiagnosticIdentity::from_config(&config)?;
             let launch = ValidatedWorkerLaunch::from_codec_pack_q4(&config.backend.codec_pack)
                 .map_err(|_| Q4RuntimeError::q4_entrypoint_missing())?;
             let pending = spawn_worker(launch)
@@ -1177,6 +1250,8 @@ mod platform {
 
             let closed = Arc::new(AtomicBool::new(false));
             let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
+            let started_at = Instant::now();
+            let presentation_diagnostics = PresentationDiagnosticState::new(&output.spout_status());
             let actor = RuntimeActor {
                 app,
                 client,
@@ -1191,6 +1266,7 @@ mod platform {
                 pending_frame: None,
                 presented_sequence: 0,
                 frame_clock,
+                presentation_diagnostics,
                 sources: [
                     config.source_a,
                     config.source_b,
@@ -1212,6 +1288,8 @@ mod platform {
                 sender,
                 closed,
                 cleanup_complete,
+                started_at,
+                diagnostic_identity,
                 _task: task,
             })
         }
@@ -1406,6 +1484,56 @@ mod platform {
             )
             .await?;
             receive_owned(receiver).await?
+        }
+
+        pub(crate) async fn diagnostics(
+            &self,
+        ) -> Result<Option<Q4RuntimeDiagnostics>, Q4RuntimeError> {
+            if self.closed.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+            let (reply, receiver) = oneshot::channel();
+            if let Err(error) = send_bounded(
+                &self.sender,
+                RuntimeCommand::Diagnostics { reply },
+                DIAGNOSTIC_REPLY_TIMEOUT,
+            )
+            .await
+            {
+                return if self.closed.load(Ordering::Acquire) {
+                    Ok(None)
+                } else {
+                    Err(error)
+                };
+            }
+            let runtime = match receive_owned_with_timeout(receiver, DIAGNOSTIC_REPLY_TIMEOUT).await
+            {
+                Ok(value) => value?,
+                Err(_error) if self.closed.load(Ordering::Acquire) => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            let duration_ms = u64::try_from(self.started_at.elapsed().as_millis())
+                .map_err(|_| Q4RuntimeError::diagnostics_contract())?;
+            let metrics = realtime_metrics(
+                duration_ms,
+                self.diagnostic_identity.target_fps,
+                &runtime.worker,
+                runtime.presentation,
+            )
+            .map_err(|_| Q4RuntimeError::diagnostics_contract())?;
+            Ok(Some(Q4RuntimeDiagnostics {
+                gpu: diagnostic_gpu_identity(&runtime.device)
+                    .map_err(|_| Q4RuntimeError::diagnostics_contract())?,
+                codec: self.diagnostic_identity.codec.clone(),
+                session: super::Q4DiagnosticSession::new(
+                    diagnostic_token(Q4_OPERATOR_ID)
+                        .map_err(|_| Q4RuntimeError::diagnostics_contract())?,
+                    runtime.carrier_slot,
+                    self.diagnostic_identity.cartridge_sha256.clone(),
+                    metrics,
+                )
+                .map_err(|_| Q4RuntimeError::diagnostics_contract())?,
+            }))
         }
 
         pub(crate) async fn shutdown(&self) -> Result<(), Q4RuntimeError> {
@@ -1785,6 +1913,15 @@ mod platform {
         }
     }
 
+    const fn q4_slot_index(slot: Q4Slot) -> u8 {
+        match slot {
+            Q4Slot::A => 0,
+            Q4Slot::B => 1,
+            Q4Slot::C => 2,
+            Q4Slot::D => 3,
+        }
+    }
+
     async fn bind_ring(
         client: &mut WorkerClient,
         owner: WindowsRgbRingOwner,
@@ -1832,12 +1969,20 @@ mod platform {
         pending_frame: Option<latentdeck_gpu::ring::RgbaFrame>,
         presented_sequence: u64,
         frame_clock: FrameClock,
+        presentation_diagnostics: PresentationDiagnosticState,
         sources: [TrustedQ4Source; 4],
         app_local_data: PathBuf,
         library_importer: LibraryImporter,
         capture: Option<ActiveCapture>,
         capture_finalizer: Option<CaptureFinalizer>,
         capture_coordinator: Q4CaptureCoordinator,
+    }
+
+    struct RuntimeDiagnosticSnapshot {
+        worker: MetricsSnapshot,
+        device: latentdeck_native_output::NativeDeviceIdentity,
+        presentation: crate::runtime_diagnostics::PresentationDiagnosticSnapshot,
+        carrier_slot: u8,
     }
 
     struct ActiveCapture {
@@ -2064,7 +2209,9 @@ mod platform {
                     self.finish_command(result, reply).await
                 }
                 RuntimeCommand::SpoutStatus { reply } => {
-                    let result = Ok(self.output.spout_status());
+                    let status = self.output.spout_status();
+                    self.presentation_diagnostics.observe_spout(&status);
+                    let result = Ok(status);
                     self.finish_command(result, reply).await
                 }
                 RuntimeCommand::ConfigureSpout {
@@ -2076,12 +2223,23 @@ mod platform {
                     // represented in the sanitized status and never stop Q4.
                     if let Some(name) = name {
                         let _ = self.output.set_spout_name(name);
+                        self.presentation_diagnostics
+                            .observe_spout(&self.output.spout_status());
                     }
                     if let Some(enabled) = enabled {
                         let _ = self.output.set_spout_enabled(enabled);
+                        self.presentation_diagnostics
+                            .observe_spout(&self.output.spout_status());
                     }
-                    let result = Ok(self.output.spout_status());
+                    let status = self.output.spout_status();
+                    self.presentation_diagnostics.observe_spout(&status);
+                    let result = Ok(status);
                     self.finish_command(result, reply).await
+                }
+                RuntimeCommand::Diagnostics { reply } => {
+                    let result = self.diagnostics().await;
+                    let _ = reply.send(result);
+                    false
                 }
                 RuntimeCommand::Shutdown { reply } => {
                     let result = self.stop(ShutdownReason::ApplicationExit).await;
@@ -2202,7 +2360,11 @@ mod platform {
                 return Err(Q4RuntimeError::worker_protocol());
             }
             self.status.transport = ack.transport;
-            if !was_active && transport_active(ack.transport) {
+            let is_active = transport_active(ack.transport);
+            if was_active != is_active {
+                self.presentation_diagnostics.cut_interval();
+            }
+            if !was_active && is_active {
                 self.frame_clock.restart();
             }
             self.publish_status()?;
@@ -2828,6 +2990,7 @@ mod platform {
         async fn apply_reset(&mut self, plan: CausalResetPlan) -> Result<(), Q4RuntimeError> {
             // No stale decoded frame may survive the causal reset handshake.
             self.pending_frame = None;
+            self.presentation_diagnostics.cut_interval();
             self.ensure_worker_session_budget()?;
             let ack = self
                 .client
@@ -2902,15 +3065,48 @@ mod platform {
                     frame.row_stride(),
                     frame.padded_rgba(),
                 )
-                .map_err(|error| Q4RuntimeError::output(error.code()))?;
+                .map_err(|error| Q4RuntimeError::output(error.code()));
+            let status = self.output.spout_status();
+            self.presentation_diagnostics.observe_spout(&status);
+            let outcome = outcome?;
             if matches!(
                 outcome,
                 PresentOutcome::Presented | PresentOutcome::PresentedAndReconfigured
             ) {
+                self.presentation_diagnostics
+                    .record_presented(Instant::now().into())
+                    .map_err(|_| Q4RuntimeError::diagnostics_contract())?;
                 self.presented_sequence = expected;
                 self.pending_frame = None;
             }
             Ok(())
+        }
+
+        async fn diagnostics(&mut self) -> Result<RuntimeDiagnosticSnapshot, Q4RuntimeError> {
+            self.ensure_worker_session_budget()?;
+            let Ack::MetricsGet(worker) = self
+                .client
+                .call(
+                    Command::MetricsGet(EmptyPayload {}),
+                    DIAGNOSTIC_REPLY_TIMEOUT,
+                )
+                .await
+                .map_err(map_worker_error)?
+            else {
+                return Err(Q4RuntimeError::worker_protocol());
+            };
+            let device = self.output.device_identity();
+            let status = self.output.spout_status();
+            let presentation = self
+                .presentation_diagnostics
+                .snapshot(&status)
+                .map_err(|_| Q4RuntimeError::diagnostics_contract())?;
+            Ok(RuntimeDiagnosticSnapshot {
+                worker,
+                device,
+                presentation,
+                carrier_slot: q4_slot_index(self.status.roles.carrier),
+            })
         }
 
         fn publish_status(&self) -> Result<Q4StatusView, Q4RuntimeError> {
@@ -2962,6 +3158,16 @@ mod platform {
         }
 
         async fn fail(&mut self, error: Q4RuntimeError) {
+            if self.closed.load(Ordering::Acquire) {
+                return;
+            }
+            record_global(LogLevel::Error, "deck.q4.runtime_failed", Some(&error.code));
+            if let Some(lifecycle) = self
+                .app
+                .try_state::<crate::diagnostic_state::DeckDiagnosticLifecycle>()
+            {
+                lifecycle.record_error(&error.code);
+            }
             if self.closed.swap(true, Ordering::AcqRel) {
                 return;
             }
@@ -3044,6 +3250,9 @@ mod platform {
             enabled: Option<bool>,
             reply: oneshot::Sender<Result<NativeSpoutStatus, Q4RuntimeError>>,
         },
+        Diagnostics {
+            reply: oneshot::Sender<Result<RuntimeDiagnosticSnapshot, Q4RuntimeError>>,
+        },
         Shutdown {
             reply: oneshot::Sender<Result<(), Q4RuntimeError>>,
         },
@@ -3065,6 +3274,7 @@ mod platform {
                 Self::SpoutStatus { reply } | Self::ConfigureSpout { reply, .. } => {
                     reply.is_closed()
                 }
+                Self::Diagnostics { reply } => reply.is_closed(),
                 // Shutdown owns cleanup even if its original waiter vanished.
                 Self::Shutdown { .. } => false,
             }
@@ -3124,6 +3334,16 @@ mod platform {
     async fn receive_owned<T>(receiver: oneshot::Receiver<T>) -> Result<T, Q4RuntimeError> {
         receiver
             .await
+            .map_err(|_| Q4RuntimeError::runtime_unavailable())
+    }
+
+    async fn receive_owned_with_timeout<T>(
+        receiver: oneshot::Receiver<T>,
+        deadline: Duration,
+    ) -> Result<T, Q4RuntimeError> {
+        timeout(deadline, receiver)
+            .await
+            .map_err(|_| Q4RuntimeError::runtime_timeout())?
             .map_err(|_| Q4RuntimeError::runtime_unavailable())
     }
 
@@ -3697,6 +3917,8 @@ mod platform {
                 sender,
                 closed: Arc::clone(&closed),
                 cleanup_complete,
+                started_at: Instant::now(),
+                diagnostic_identity: test_diagnostic_identity(),
                 _task: tauri::async_runtime::spawn(async {}),
             };
             let mut shutdown = tokio::spawn(async move { runtime.shutdown().await });
@@ -3732,6 +3954,8 @@ mod platform {
                 sender,
                 closed: Arc::clone(&closed),
                 cleanup_complete,
+                started_at: Instant::now(),
+                diagnostic_identity: test_diagnostic_identity(),
                 _task: tauri::async_runtime::spawn(async {}),
             };
             drop(runtime);
@@ -3811,6 +4035,26 @@ mod platform {
                 source_b: source.clone(),
                 source_c: source.clone(),
                 source_d: source,
+            }
+        }
+
+        fn test_diagnostic_identity() -> Q4DiagnosticIdentity {
+            let hash = |byte: &str| {
+                latentdeck_core::realtime_diagnostics::Sha256Token::parse(&byte.repeat(32))
+                    .expect("hash")
+            };
+            Q4DiagnosticIdentity {
+                codec: crate::runtime_diagnostics::diagnostic_codec_identity(
+                    CODEC_FAMILY,
+                    PROFILE_ID,
+                    "org.latentdeck.h3",
+                    "0.1.0",
+                    "taeh3",
+                    &"aa".repeat(32),
+                )
+                .expect("codec"),
+                cartridge_sha256: [hash("bb"), hash("cc"), hash("dd"), hash("ee")],
+                target_fps: 24.0,
             }
         }
 
@@ -3933,6 +4177,10 @@ impl Q4Runtime {
         _name: Option<String>,
         _enabled: Option<bool>,
     ) -> Result<NativeSpoutStatus, Q4RuntimeError> {
+        Err(Q4RuntimeError::unsupported())
+    }
+
+    pub(crate) async fn diagnostics(&self) -> Result<Option<Q4RuntimeDiagnostics>, Q4RuntimeError> {
         Err(Q4RuntimeError::unsupported())
     }
 }
