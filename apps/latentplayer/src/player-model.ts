@@ -39,6 +39,27 @@ export interface PlayerView {
   error: PlayerError | null;
 }
 
+export interface SpoutStatus {
+  sdkBuilt: boolean;
+  ready: boolean;
+  enabled: boolean;
+  published: boolean;
+  requestedName: string;
+  activeName: string;
+  width: number;
+  height: number;
+  format: "rgba8_unorm";
+  submittedFrames: number;
+  lastSequence: number | null;
+  spoutFrame: number | null;
+  lastErrorCode: string | null;
+}
+
+export interface SpoutControls {
+  rename: boolean;
+  toggle: boolean;
+}
+
 export interface PlayerControls {
   open: boolean;
   configureCodec: boolean;
@@ -85,6 +106,14 @@ export function controlsFor(view: PlayerView, busy: boolean): PlayerControls {
     restart: hasPlayableCartridge && view.phase !== "loading",
     fullscreen: !busy && view.outputAvailable,
   };
+}
+
+export function spoutControlsFor(
+  status: SpoutStatus | null,
+  busy: boolean,
+): SpoutControls {
+  const ready = !busy && status?.sdkBuilt === true && status.ready;
+  return { rename: ready, toggle: ready };
 }
 
 export function acceptTrustedSnapshot(

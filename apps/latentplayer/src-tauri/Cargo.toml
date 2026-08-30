@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 description = "LatentPlayer desktop cartridge player"
 
+[features]
+default = []
+spout-sdk = ["latentdeck-native-output/spout-sdk"]
+
 [build-dependencies]
 tauri-build.workspace = true
 

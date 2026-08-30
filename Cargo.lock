@@ -2160,6 +2160,8 @@ name = "latentdeck-native-output"
 version = "0.1.0"
 dependencies = [
  "latentdeck-gpu",
+ "latentdeck-output-spout",
+ "serde",
  "tauri",
  "thiserror 2.0.20",
  "wgpu",

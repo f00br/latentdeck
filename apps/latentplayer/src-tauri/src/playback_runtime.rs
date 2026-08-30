@@ -18,6 +18,7 @@ use latentdeck_core::{
 use tauri::AppHandle;
 
 use crate::native_output::ResizeOutcome;
+use latentdeck_native_output::NativeSpoutStatus;
 
 /// Owned, trusted inputs copied from [`PlayerCoordinator::launch_inputs`].
 ///
@@ -232,7 +233,7 @@ mod windows {
     };
 
     use super::{
-        AppHandle, Arc, CartridgeSummary, Duration, Mutex, PlaybackLaunchConfig,
+        AppHandle, Arc, CartridgeSummary, Duration, Mutex, NativeSpoutStatus, PlaybackLaunchConfig,
         PlaybackRuntimeError, PlayerCoordinator, PlayerView, ResizeOutcome, ValidatedCodecPack,
     };
     use crate::native_output::{
@@ -468,6 +469,43 @@ mod windows {
             .await?
             {
                 PresenterReply::Resize(value) => Ok(value),
+                _ => Err(PlaybackRuntimeError::channel_closed()),
+            }
+        }
+
+        /// Return the current native Spout sender state through the presenter
+        /// actor without exposing GPU or SDK handles.
+        pub async fn spout_status(&self) -> Result<NativeSpoutStatus, PlaybackRuntimeError> {
+            self.ensure_open()?;
+            match request_presenter(
+                &self.presenter_tx,
+                PresenterRequest::SpoutStatus,
+                ACTOR_REPLY_TIMEOUT,
+            )
+            .await?
+            {
+                PresenterReply::Spout(status) => Ok(status),
+                _ => Err(PlaybackRuntimeError::channel_closed()),
+            }
+        }
+
+        /// Apply an optional sender-name and enable-state update. Invalid or
+        /// unavailable Spout controls are reflected in the returned status and
+        /// never stop native-window playback.
+        pub async fn configure_spout(
+            &self,
+            name: Option<String>,
+            enabled: Option<bool>,
+        ) -> Result<NativeSpoutStatus, PlaybackRuntimeError> {
+            self.ensure_open()?;
+            match request_presenter(
+                &self.presenter_tx,
+                PresenterRequest::ConfigureSpout { name, enabled },
+                ACTOR_REPLY_TIMEOUT,
+            )
+            .await?
+            {
+                PresenterReply::Spout(status) => Ok(status),
                 _ => Err(PlaybackRuntimeError::channel_closed()),
             }
         }
@@ -1121,6 +1159,18 @@ mod windows {
                     .resize(width, height)
                     .map(PresenterReply::Resize)
                     .map_err(|error| PlaybackRuntimeError::output(error.code())),
+                PresenterRequest::SpoutStatus => {
+                    Ok(PresenterReply::Spout(self.output.spout_status()))
+                }
+                PresenterRequest::ConfigureSpout { name, enabled } => {
+                    if let Some(name) = name {
+                        let _ = self.output.set_spout_name(name);
+                    }
+                    if let Some(enabled) = enabled {
+                        let _ = self.output.set_spout_enabled(enabled);
+                    }
+                    Ok(PresenterReply::Spout(self.output.spout_status()))
+                }
                 PresenterRequest::Stop => {
                     self.quiesced = true;
                     self.playing.store(false, Ordering::Release);
@@ -1249,13 +1299,20 @@ mod windows {
         }
     }
 
-    #[derive(Clone, Copy)]
     enum PresenterRequest {
         Resume,
         Quiesce,
         AdoptGeneration(u64),
         ToggleFullscreen,
-        Resize { width: u32, height: u32 },
+        Resize {
+            width: u32,
+            height: u32,
+        },
+        SpoutStatus,
+        ConfigureSpout {
+            name: Option<String>,
+            enabled: Option<bool>,
+        },
         Stop,
     }
 
@@ -1263,6 +1320,7 @@ mod windows {
         Unit,
         Fullscreen(bool),
         Resize(ResizeOutcome),
+        Spout(NativeSpoutStatus),
     }
 
     struct PresenterCommand {
@@ -1658,6 +1716,18 @@ impl PlaybackRuntime {
         _width: u32,
         _height: u32,
     ) -> Result<ResizeOutcome, PlaybackRuntimeError> {
+        Err(PlaybackRuntimeError::unsupported())
+    }
+
+    pub async fn spout_status(&self) -> Result<NativeSpoutStatus, PlaybackRuntimeError> {
+        Err(PlaybackRuntimeError::unsupported())
+    }
+
+    pub async fn configure_spout(
+        &self,
+        _name: Option<String>,
+        _enabled: Option<bool>,
+    ) -> Result<NativeSpoutStatus, PlaybackRuntimeError> {
         Err(PlaybackRuntimeError::unsupported())
     }
 

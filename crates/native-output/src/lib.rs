@@ -13,8 +13,13 @@ use latentdeck_gpu::{
     renderer::{Dx12Device, RgbaFrameRenderer, RgbaUpload, create_dx12_instance},
     ring::RingLayout,
 };
+use serde::Serialize;
 use tauri::{AppHandle, Window, window::WindowBuilder};
 use thiserror::Error;
+
+mod spout;
+
+use spout::SpoutSurface;
 
 /// Explicit window identity and decoded-program dimensions.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -25,6 +30,7 @@ pub struct NativeOutputConfig {
     pub frame_height: u32,
     window_label: String,
     window_title: String,
+    spout_sender_name: String,
 }
 
 impl NativeOutputConfig {
@@ -36,11 +42,14 @@ impl NativeOutputConfig {
         window_label: impl Into<String>,
         window_title: impl Into<String>,
     ) -> Self {
+        let window_label = window_label.into();
+        let window_title = window_title.into();
         Self {
             frame_width,
             frame_height,
-            window_label: window_label.into(),
-            window_title: window_title.into(),
+            window_label,
+            spout_sender_name: window_title.clone(),
+            window_title,
         }
     }
 
@@ -55,6 +64,52 @@ impl NativeOutputConfig {
     pub fn window_title(&self) -> &str {
         &self.window_title
     }
+
+    /// Initial Spout sender name. It defaults to the native window title.
+    #[must_use]
+    pub fn spout_sender_name(&self) -> &str {
+        &self.spout_sender_name
+    }
+
+    /// Override the initial Spout sender name before native allocation.
+    #[must_use]
+    pub fn with_spout_sender_name(mut self, name: impl Into<String>) -> Self {
+        self.spout_sender_name = name.into();
+        self
+    }
+}
+
+/// Sanitized Spout sender state exposed to app commands and UI.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_excessive_bools)] // Wire view mirrors independent native facts.
+pub struct NativeSpoutStatus {
+    /// Whether this binary was compiled against the separately prepared SDK.
+    pub sdk_built: bool,
+    /// Whether the SDK opened on this exact native DX12 device/queue.
+    pub ready: bool,
+    /// Whether frame publication was requested.
+    pub enabled: bool,
+    /// Whether Spout has registered the sender after a successful frame.
+    pub published: bool,
+    /// Requested sender name.
+    pub requested_name: String,
+    /// Collision-resolved active sender name.
+    pub active_name: String,
+    /// Exact shared texture width.
+    pub width: u32,
+    /// Exact shared texture height.
+    pub height: u32,
+    /// Stable exact texture format token.
+    pub format: &'static str,
+    /// Number of successful GPU texture submissions.
+    pub submitted_frames: u64,
+    /// Last successful monotonically increasing output sequence.
+    pub last_sequence: Option<u64>,
+    /// Spout's own sender frame counter after publication.
+    pub spout_frame: Option<i64>,
+    /// Stable sanitized failure code; no path, handle, or driver text.
+    pub last_error_code: Option<&'static str>,
 }
 
 /// Result of applying a physical-window resize event.
@@ -137,6 +192,12 @@ pub enum NativeOutputError {
     /// wgpu reported an uncaptured validation failure.
     #[error("native DX12 output encountered a GPU validation failure")]
     GpuValidation,
+    /// The binary does not contain a usable prepared Spout2 SDK bridge.
+    #[error("Spout2 output is unavailable in this build or on this device")]
+    SpoutUnavailable,
+    /// A Spout sender name or enable/disable request was rejected.
+    #[error("Spout2 output control failed")]
+    SpoutControl,
 }
 
 impl NativeOutputError {
@@ -158,6 +219,8 @@ impl NativeOutputError {
             Self::GpuOutOfMemory => "output.gpu_out_of_memory",
             Self::GpuInternal => "output.gpu_internal",
             Self::GpuValidation => "output.gpu_validation",
+            Self::SpoutUnavailable => "output.spout_unavailable",
+            Self::SpoutControl => "output.spout_control_failed",
         }
     }
 }
@@ -175,6 +238,7 @@ pub struct NativeOutput {
     surface_configuration: wgpu::SurfaceConfiguration,
     surface_extent: Option<(u32, u32)>,
     gpu_health: GpuHealth,
+    spout: SpoutSurface,
 }
 
 impl NativeOutput {
@@ -199,6 +263,7 @@ impl NativeOutput {
 
         let frame_layout = RingLayout::new(config.frame_width, config.frame_height)
             .map_err(|_| NativeOutputError::InvalidFrameDimensions)?;
+        let spout_sender_name = config.spout_sender_name.clone();
         let window = WindowBuilder::new(app, config.window_label)
             .title(config.window_title)
             .inner_size(
@@ -244,6 +309,12 @@ impl NativeOutput {
             frame_layout.height(),
         )
         .map_err(|_| NativeOutputError::RendererInitialization)?;
+        let spout = SpoutSurface::open(
+            &spout_sender_name,
+            frame_layout.width(),
+            frame_layout.height(),
+            dx12.device(),
+        );
 
         let output = Self {
             window,
@@ -254,6 +325,7 @@ impl NativeOutput {
             surface_configuration,
             surface_extent: Some((physical_size.width, physical_size.height)),
             gpu_health,
+            spout,
         };
         output.poll_gpu_health()?;
         pending_window.disarm();
@@ -271,6 +343,38 @@ impl NativeOutput {
     pub fn frame_dimensions(&self) -> (u32, u32) {
         let layout = self.renderer.frame_layout();
         (layout.width(), layout.height())
+    }
+
+    /// Return the latest sanitized Spout sender state without native I/O.
+    #[must_use]
+    pub fn spout_status(&self) -> NativeSpoutStatus {
+        self.spout.status()
+    }
+
+    /// Enable or disable GPU texture publication through Spout2.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable control/unavailable error while preserving native
+    /// window playback and the detailed sanitized status snapshot.
+    pub fn set_spout_enabled(
+        &mut self,
+        enabled: bool,
+    ) -> Result<NativeSpoutStatus, NativeOutputError> {
+        self.spout.set_enabled(enabled)
+    }
+
+    /// Change the requested Spout sender name.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid names or an unavailable SDK with stable output errors.
+    pub fn set_spout_name(
+        &mut self,
+        name: impl Into<String>,
+    ) -> Result<NativeSpoutStatus, NativeOutputError> {
+        let name = name.into();
+        self.spout.set_name(&name)
     }
 
     /// The enforced swapchain presentation mode.
@@ -379,10 +483,12 @@ impl NativeOutput {
         match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) => {
                 self.render_and_present(texture)?;
+                self.spout.submit(self.renderer.frame_texture());
                 Ok(PresentOutcome::Presented)
             }
             wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
                 self.render_and_present(texture)?;
+                self.spout.submit(self.renderer.frame_texture());
                 let (surface_width, surface_height) =
                     self.surface_extent.ok_or(NativeOutputError::WindowSize)?;
                 self.configure_surface(surface_width, surface_height)?;

@@ -24,6 +24,8 @@ use latentdeck_core::codec_pack::{
     validate_external_asset,
 };
 use latentdeck_library::ResolvedDeckSource;
+#[cfg(not(target_os = "windows"))]
+use latentdeck_native_output::NativeSpoutStatus;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
@@ -1014,7 +1016,8 @@ mod platform {
         windows_ring::{WindowsRgbRingConsumer, WindowsRgbRingOwner},
     };
     use latentdeck_native_output::{
-        NativeOutput, NativeOutputConfig, NativeOutputError, PresentOutcome, ResizeOutcome,
+        NativeOutput, NativeOutputConfig, NativeOutputError, NativeSpoutStatus, PresentOutcome,
+        ResizeOutcome,
     };
     use serde::Deserialize as _;
     use tauri::{Emitter as _, async_runtime::JoinHandle as TauriJoinHandle};
@@ -1106,13 +1109,13 @@ mod platform {
             ) {
                 Ok(value) => value,
                 Err(error) => {
-                    cleanup_pre_actor_start(&output, &mut client).await;
+                    cleanup_pre_actor_start(output, &mut client).await;
                     return Err(error);
                 }
             };
             let view = Q4StatusView::from_status(&status);
             if let Err(error) = replace_shared_status(&shared_status, view.clone()) {
-                cleanup_pre_actor_start(&output, &mut client).await;
+                cleanup_pre_actor_start(output, &mut client).await;
                 return Err(error);
             }
             let _ = app.emit("deck-q4-status", view);
@@ -1120,7 +1123,7 @@ mod platform {
             if let Err(error) =
                 replace_shared_capture_status(&shared_capture_status, capture_view.clone())
             {
-                cleanup_pre_actor_start(&output, &mut client).await;
+                cleanup_pre_actor_start(output, &mut client).await;
                 return Err(error);
             }
             let _ = app.emit("deck-q4-capture", capture_view);
@@ -1325,6 +1328,38 @@ mod platform {
             receive_owned(receiver).await?
         }
 
+        pub(crate) async fn spout_status(&self) -> Result<NativeSpoutStatus, Q4RuntimeError> {
+            self.ensure_open()?;
+            let (reply, receiver) = oneshot::channel();
+            send_bounded(
+                &self.sender,
+                RuntimeCommand::SpoutStatus { reply },
+                ACTOR_REPLY_TIMEOUT,
+            )
+            .await?;
+            receive_owned(receiver).await?
+        }
+
+        pub(crate) async fn configure_spout(
+            &self,
+            name: Option<String>,
+            enabled: Option<bool>,
+        ) -> Result<NativeSpoutStatus, Q4RuntimeError> {
+            self.ensure_open()?;
+            let (reply, receiver) = oneshot::channel();
+            send_bounded(
+                &self.sender,
+                RuntimeCommand::ConfigureSpout {
+                    name,
+                    enabled,
+                    reply,
+                },
+                ACTOR_REPLY_TIMEOUT,
+            )
+            .await?;
+            receive_owned(receiver).await?
+        }
+
         pub(crate) async fn shutdown(&self) -> Result<(), Q4RuntimeError> {
             let command_result = if self.closed.load(Ordering::Acquire) {
                 Ok(())
@@ -1425,8 +1460,9 @@ mod platform {
         })
     }
 
-    async fn cleanup_pre_actor_start(output: &NativeOutput, client: &mut WorkerClient) {
-        let _ = destroy_output(output);
+    async fn cleanup_pre_actor_start(output: NativeOutput, client: &mut WorkerClient) {
+        let _ = destroy_output(&output);
+        drop(output);
         let _ = stop_worker(client, ShutdownReason::Recovery).await;
     }
 
@@ -1976,6 +2012,26 @@ mod platform {
                         .output
                         .toggle_fullscreen()
                         .map_err(|error| Q4RuntimeError::output(error.code()));
+                    self.finish_command(result, reply).await
+                }
+                RuntimeCommand::SpoutStatus { reply } => {
+                    let result = Ok(self.output.spout_status());
+                    self.finish_command(result, reply).await
+                }
+                RuntimeCommand::ConfigureSpout {
+                    name,
+                    enabled,
+                    reply,
+                } => {
+                    // Spout is an optional native output. Control failures are
+                    // represented in the sanitized status and never stop Q4.
+                    if let Some(name) = name {
+                        let _ = self.output.set_spout_name(name);
+                    }
+                    if let Some(enabled) = enabled {
+                        let _ = self.output.set_spout_enabled(enabled);
+                    }
+                    let result = Ok(self.output.spout_status());
                     self.finish_command(result, reply).await
                 }
                 RuntimeCommand::Shutdown { reply } => {
@@ -2929,6 +2985,14 @@ mod platform {
         ToggleFullscreen {
             reply: oneshot::Sender<Result<bool, Q4RuntimeError>>,
         },
+        SpoutStatus {
+            reply: oneshot::Sender<Result<NativeSpoutStatus, Q4RuntimeError>>,
+        },
+        ConfigureSpout {
+            name: Option<String>,
+            enabled: Option<bool>,
+            reply: oneshot::Sender<Result<NativeSpoutStatus, Q4RuntimeError>>,
+        },
         Shutdown {
             reply: oneshot::Sender<Result<(), Q4RuntimeError>>,
         },
@@ -2947,6 +3011,9 @@ mod platform {
                 | Self::CaptureStatus { reply } => reply.is_closed(),
                 Self::Resize { reply, .. } => reply.is_closed(),
                 Self::ToggleFullscreen { reply } => reply.is_closed(),
+                Self::SpoutStatus { reply } | Self::ConfigureSpout { reply, .. } => {
+                    reply.is_closed()
+                }
                 // Shutdown owns cleanup even if its original waiter vanished.
                 Self::Shutdown { .. } => false,
             }
@@ -3504,6 +3571,29 @@ mod platform {
         }
 
         #[test]
+        fn spout_commands_observe_cancelled_callers() {
+            let (status_reply, status_receiver) = oneshot::channel();
+            drop(status_receiver);
+            assert!(
+                RuntimeCommand::SpoutStatus {
+                    reply: status_reply
+                }
+                .reply_is_closed()
+            );
+
+            let (configure_reply, configure_receiver) = oneshot::channel();
+            drop(configure_receiver);
+            assert!(
+                RuntimeCommand::ConfigureSpout {
+                    name: Some("LatentDeck LD-Q4 Output".to_owned()),
+                    enabled: Some(true),
+                    reply: configure_reply,
+                }
+                .reply_is_closed()
+            );
+        }
+
+        #[test]
         fn capture_start_failure_retains_new_worker_ownership_for_shutdown() {
             assert!(capture_start_failure_requires_shutdown(false, false, true));
             assert!(!capture_start_failure_requires_shutdown(false, true, true));
@@ -3779,6 +3869,18 @@ impl Q4Runtime {
     }
 
     pub(crate) async fn toggle_fullscreen(&self) -> Result<bool, Q4RuntimeError> {
+        Err(Q4RuntimeError::unsupported())
+    }
+
+    pub(crate) async fn spout_status(&self) -> Result<NativeSpoutStatus, Q4RuntimeError> {
+        Err(Q4RuntimeError::unsupported())
+    }
+
+    pub(crate) async fn configure_spout(
+        &self,
+        _name: Option<String>,
+        _enabled: Option<bool>,
+    ) -> Result<NativeSpoutStatus, Q4RuntimeError> {
         Err(Q4RuntimeError::unsupported())
     }
 }

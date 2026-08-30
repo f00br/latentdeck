@@ -26,12 +26,17 @@ describe("Q4 client boundary", () => {
     });
     await client.rolesSet(DEFAULT_Q4_ROLES);
     await client.captureSnapshot();
+    await client.spoutStatusGet();
+    await client.spoutConfigure({ name: "LatentDeck Q4", enabled: true });
 
     expect(calls.map((call) => call.command)).toEqual([
       Q4_COMMANDS.open,
       Q4_COMMANDS.rolesSet,
       Q4_COMMANDS.captureSnapshot,
+      Q4_COMMANDS.spoutStatusGet,
+      Q4_COMMANDS.spoutConfigure,
     ]);
+    expect(calls.at(-1)?.args).toEqual({ name: "LatentDeck Q4", enabled: true });
     expect(JSON.stringify(calls)).not.toContain("path");
   });
 

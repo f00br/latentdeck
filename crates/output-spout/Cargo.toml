@@ -5,6 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "Windows Spout2 texture-output boundary"
+build = "build.rs"
+
+[features]
+default = []
+# Builds the original C ABI bridge and statically links the separately prepared,
+# exact-pinned official SpoutDX12 sources. The default build never downloads.
+spout-sdk = []
 
 [dependencies]
 thiserror.workspace = true

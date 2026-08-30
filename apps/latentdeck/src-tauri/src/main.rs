@@ -16,7 +16,8 @@ use d2_state::{
     D2AppState, ExitRequest, deck_d2_backend_status_get, deck_d2_capture_live_start,
     deck_d2_capture_live_stop, deck_d2_capture_snapshot, deck_d2_capture_status_get,
     deck_d2_controls_set, deck_d2_fullscreen, deck_d2_open, deck_d2_restart, deck_d2_seed_set,
-    deck_d2_select_decoder, deck_d2_status_get, deck_d2_transport_set,
+    deck_d2_select_decoder, deck_d2_spout_configure, deck_d2_spout_status_get, deck_d2_status_get,
+    deck_d2_transport_set,
 };
 use library_state::{
     AppState, database_path, library_add_membership, library_create_collection,
@@ -30,7 +31,7 @@ use q4_state::{
     Q4AppState, deck_q4_backend_status_get, deck_q4_capture_live_start, deck_q4_capture_live_stop,
     deck_q4_capture_snapshot, deck_q4_capture_status_get, deck_q4_controls_set, deck_q4_fullscreen,
     deck_q4_open, deck_q4_restart, deck_q4_roles_set, deck_q4_seed_set, deck_q4_select_decoder,
-    deck_q4_status_get, deck_q4_transport_set,
+    deck_q4_spout_configure, deck_q4_spout_status_get, deck_q4_status_get, deck_q4_transport_set,
 };
 
 #[tauri::command]
@@ -127,6 +128,8 @@ fn main() {
             deck_d2_capture_status_get,
             deck_d2_status_get,
             deck_d2_fullscreen,
+            deck_d2_spout_status_get,
+            deck_d2_spout_configure,
             deck_q4_backend_status_get,
             deck_q4_select_decoder,
             deck_q4_open,
@@ -141,6 +144,8 @@ fn main() {
             deck_q4_capture_status_get,
             deck_q4_status_get,
             deck_q4_fullscreen,
+            deck_q4_spout_status_get,
+            deck_q4_spout_configure,
             library_snapshot,
             library_set_active_collection,
             library_import_files,

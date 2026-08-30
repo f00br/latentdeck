@@ -33,6 +33,11 @@
     type CollectionView,
     type LibraryView,
   } from "./library-model";
+  import {
+    describeSpout,
+    spoutControlsFor,
+    type SpoutStatus,
+  } from "./output-model";
 
   type HostState = "checking" | "ready" | "pending" | "error";
 
@@ -69,12 +74,20 @@
   let capture: D2CaptureView = { ...DEFAULT_D2_CAPTURE };
   let captureBusy = false;
   let lastImportedCaptureId = "";
+  let spout: SpoutStatus | null = null;
+  let spoutBusy = false;
+  let spoutName = "LatentDeck LD-D2 Output";
+  let spoutNameDirty = false;
+  let spoutPending = false;
+  let spoutError = "";
 
   let activeBank: CollectionView | undefined;
   let sourceA: CartridgeView | undefined;
   let sourceB: CartridgeView | undefined;
   let presentCount = 0;
   let captureActive = false;
+  let spoutControls = spoutControlsFor(null, false);
+  let spoutState = describeSpout(null);
   $: activeBank = bankView.collections.find(
     (collection) => collection.id === bankView.deckSession.activeCollectionId,
   );
@@ -88,6 +101,8 @@
     (cartridge) => cartridge.availability === "present",
   ).length;
   $: captureActive = isD2CaptureActive(capture.state);
+  $: spoutControls = spoutControlsFor(spout, hostBusy || spoutBusy);
+  $: spoutState = describeSpout(spout);
 
   onMount(() => {
     let disposed = false;
@@ -119,11 +134,17 @@
         await refreshBackendStatus();
         await refreshHostStatus();
         await refreshCaptureStatus();
+        await refreshSpoutStatus();
       }
     })();
 
+    const spoutTimer = globalThis.setInterval(() => {
+      if (!disposed) void refreshSpoutStatus();
+    }, 250);
+
     return () => {
       disposed = true;
+      globalThis.clearInterval(spoutTimer);
       for (const stop of stopListeners) stop();
     };
   });
@@ -187,6 +208,42 @@
         code: "capture.status_unavailable",
         detail: describeCommandError(error),
       });
+    }
+  }
+
+  async function refreshSpoutStatus(reportError = false): Promise<void> {
+    if (spoutPending) return;
+    spoutPending = true;
+    try {
+      const incoming = await d2Client.spoutStatusGet();
+      spout = incoming;
+      if (incoming !== null && !spoutNameDirty) {
+        spoutName = incoming.requestedName;
+      }
+    } catch (error) {
+      if (reportError) spoutError = describeCommandError(error);
+    } finally {
+      spoutPending = false;
+    }
+  }
+
+  async function configureSpout(
+    name: string | null,
+    enabled: boolean | null,
+  ): Promise<void> {
+    if (spoutBusy) return;
+    spoutBusy = true;
+    spoutError = "";
+    try {
+      spout = await d2Client.spoutConfigure({ name, enabled });
+      if (name !== null) {
+        spoutNameDirty = false;
+        spoutName = spout.requestedName;
+      }
+    } catch (error) {
+      spoutError = describeCommandError(error);
+    } finally {
+      spoutBusy = false;
     }
   }
 
@@ -1024,14 +1081,12 @@
       <button
         type="button"
         onclick={() => void toggleLiveCapture()}
-        disabled={
-          !status.loaded ||
+        disabled={!status.loaded ||
           captureBusy ||
           hostBusy ||
           (captureActive && capture.mode !== "live_capture") ||
           capture.state === "stop_armed" ||
-          capture.state === "finalizing"
-        }
+          capture.state === "finalizing"}
         title="Record a bounded changing post-operator latent stream"
         >{capture.mode === "live_capture" && capture.state === "capturing"
           ? "Stop Live Capture"
@@ -1039,11 +1094,59 @@
             ? "Live stopping…"
             : "Start Live Capture"}</button
       >
-      <small class:error={capture.state === "error" || capture.state === "aborted"}
+      <small
+        class:error={capture.state === "error" || capture.state === "aborted"}
         >{captureStatusText()}</small
       >
     </div>
   </footer>
+
+  <section class="d2-spout-strip" aria-label="Spout2 output">
+    <div class="d2-spout-heading">
+      <span
+        class="d2-spout-lamp"
+        class:ready={spout?.ready}
+        class:sending={spout?.published}
+      ></span>
+      <div>
+        <span>SPOUT2 · GPU TEXTURE</span>
+        <strong>{spoutState}</strong>
+      </div>
+    </div>
+    <label>
+      Sender name
+      <input
+        maxlength="240"
+        value={spoutName}
+        disabled={!spoutControls.rename}
+        oninput={(event) => {
+          spoutName = event.currentTarget.value;
+          spoutNameDirty = true;
+        }}
+      />
+    </label>
+    <button
+      type="button"
+      disabled={!spoutControls.rename || !spoutNameDirty}
+      onclick={() => void configureSpout(spoutName, null)}>Apply name</button
+    >
+    <button
+      class:active={spout?.enabled}
+      aria-pressed={spout?.enabled ?? false}
+      type="button"
+      disabled={!spoutControls.toggle}
+      onclick={() => void configureSpout(null, !(spout?.enabled ?? false))}
+      >{spout?.enabled ? "Disable sender" : "Enable sender"}</button
+    >
+    <small>
+      {spout === null
+        ? "Load sources to create the native DX12 output."
+        : `${spout.activeName || spout.requestedName} · ${spout.width}×${spout.height} · ${spout.format} · ${spout.submittedFrames} frames`}
+    </small>
+    {#if spout?.lastErrorCode || spoutError !== ""}
+      <code>{spoutError || spout?.lastErrorCode}</code>
+    {/if}
+  </section>
 </section>
 
 <style>
@@ -1697,6 +1800,96 @@
     opacity: 0.72;
   }
 
+  .d2-spout-strip {
+    display: grid;
+    grid-template-columns: minmax(180px, 0.9fr) minmax(240px, 1.25fr) auto auto;
+    align-items: end;
+    gap: 7px;
+    border-top: 1px solid var(--d2-line-bright);
+    padding: 9px;
+    background: #0e1410;
+  }
+
+  .d2-spout-heading {
+    display: flex;
+    align-items: center;
+    align-self: center;
+    gap: 9px;
+  }
+
+  .d2-spout-heading > div,
+  .d2-spout-strip label {
+    display: grid;
+    gap: 4px;
+  }
+
+  .d2-spout-heading span,
+  .d2-spout-strip label,
+  .d2-spout-strip small,
+  .d2-spout-strip code {
+    color: #7b877e;
+    font-size: 0.54rem;
+    letter-spacing: 0.08em;
+  }
+
+  .d2-spout-heading strong {
+    color: #dbe3dc;
+    font-size: 0.68rem;
+    letter-spacing: 0.04em;
+  }
+
+  .d2-spout-lamp {
+    width: 9px;
+    height: 9px;
+    border: 1px solid #566159;
+    border-radius: 50%;
+    background: #303733;
+  }
+
+  .d2-spout-lamp.ready {
+    background: var(--d2-amber);
+    box-shadow: 0 0 8px rgb(210 181 100 / 42%);
+  }
+
+  .d2-spout-lamp.sending {
+    background: var(--d2-green);
+    box-shadow: 0 0 9px rgb(155 220 136 / 58%);
+  }
+
+  .d2-spout-strip input {
+    min-width: 0;
+    min-height: 31px;
+    border: 1px solid #3e4a42;
+    padding: 6px 8px;
+    background: #111713;
+    color: #dbe3dc;
+    font:
+      0.66rem/1 ui-monospace,
+      SFMono-Regular,
+      Consolas,
+      monospace;
+  }
+
+  .d2-spout-strip button {
+    min-height: 31px;
+    white-space: nowrap;
+  }
+
+  .d2-spout-strip button.active {
+    border-color: #7ca372;
+    background: linear-gradient(#405e40, #283d2a);
+  }
+
+  .d2-spout-strip small,
+  .d2-spout-strip code {
+    grid-column: 1 / -1;
+    overflow-wrap: anywhere;
+  }
+
+  .d2-spout-strip code {
+    color: var(--d2-red);
+  }
+
   @media (max-width: 1120px) {
     .d2-codec-strip {
       grid-template-columns: 1fr 1fr;
@@ -1725,6 +1918,10 @@
 
     .capture-module {
       grid-column: 1 / -1;
+    }
+
+    .d2-spout-strip {
+      grid-template-columns: 1fr 1fr;
     }
   }
 </style>

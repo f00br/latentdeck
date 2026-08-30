@@ -24,6 +24,8 @@ use latentdeck_core::codec_pack::{
     validate_external_asset,
 };
 use latentdeck_library::ResolvedDeckSource;
+#[cfg(not(target_os = "windows"))]
+use latentdeck_native_output::NativeSpoutStatus;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
@@ -914,7 +916,8 @@ mod platform {
         windows_ring::{WindowsRgbRingConsumer, WindowsRgbRingOwner},
     };
     use latentdeck_native_output::{
-        NativeOutput, NativeOutputConfig, NativeOutputError, PresentOutcome, ResizeOutcome,
+        NativeOutput, NativeOutputConfig, NativeOutputError, NativeSpoutStatus, PresentOutcome,
+        ResizeOutcome,
     };
     use serde::Deserialize as _;
     use tauri::{Emitter as _, async_runtime::JoinHandle as TauriJoinHandle};
@@ -1010,13 +1013,13 @@ mod platform {
             ) {
                 Ok(value) => value,
                 Err(error) => {
-                    cleanup_pre_actor_start(&output, &mut client).await;
+                    cleanup_pre_actor_start(output, &mut client).await;
                     return Err(error);
                 }
             };
             let view = D2StatusView::from_status(&status);
             if let Err(error) = replace_shared_status(&shared_status, view.clone()) {
-                cleanup_pre_actor_start(&output, &mut client).await;
+                cleanup_pre_actor_start(output, &mut client).await;
                 return Err(error);
             }
             let _ = app.emit("deck-d2-status", view);
@@ -1024,7 +1027,7 @@ mod platform {
             if let Err(error) =
                 replace_shared_capture_status(&shared_capture_status, capture_view.clone())
             {
-                cleanup_pre_actor_start(&output, &mut client).await;
+                cleanup_pre_actor_start(output, &mut client).await;
                 return Err(error);
             }
             let _ = app.emit("deck-d2-capture", capture_view);
@@ -1208,6 +1211,38 @@ mod platform {
             receive_owned(receiver).await?
         }
 
+        pub(crate) async fn spout_status(&self) -> Result<NativeSpoutStatus, D2RuntimeError> {
+            self.ensure_open()?;
+            let (reply, receiver) = oneshot::channel();
+            send_bounded(
+                &self.sender,
+                RuntimeCommand::SpoutStatus { reply },
+                ACTOR_REPLY_TIMEOUT,
+            )
+            .await?;
+            receive_owned(receiver).await?
+        }
+
+        pub(crate) async fn configure_spout(
+            &self,
+            name: Option<String>,
+            enabled: Option<bool>,
+        ) -> Result<NativeSpoutStatus, D2RuntimeError> {
+            self.ensure_open()?;
+            let (reply, receiver) = oneshot::channel();
+            send_bounded(
+                &self.sender,
+                RuntimeCommand::ConfigureSpout {
+                    name,
+                    enabled,
+                    reply,
+                },
+                ACTOR_REPLY_TIMEOUT,
+            )
+            .await?;
+            receive_owned(receiver).await?
+        }
+
         pub(crate) async fn shutdown(&self) -> Result<(), D2RuntimeError> {
             let command_result = if self.closed.load(Ordering::Acquire) {
                 Ok(())
@@ -1312,8 +1347,9 @@ mod platform {
         })
     }
 
-    async fn cleanup_pre_actor_start(output: &NativeOutput, client: &mut WorkerClient) {
-        let _ = destroy_output(output);
+    async fn cleanup_pre_actor_start(output: NativeOutput, client: &mut WorkerClient) {
+        let _ = destroy_output(&output);
+        drop(output);
         let _ = stop_worker(client, ShutdownReason::Recovery).await;
     }
 
@@ -1837,6 +1873,24 @@ mod platform {
                         .output
                         .toggle_fullscreen()
                         .map_err(|error| D2RuntimeError::output(error.code()));
+                    self.finish_command(result, reply).await
+                }
+                RuntimeCommand::SpoutStatus { reply } => {
+                    let result = Ok(self.output.spout_status());
+                    self.finish_command(result, reply).await
+                }
+                RuntimeCommand::ConfigureSpout {
+                    name,
+                    enabled,
+                    reply,
+                } => {
+                    if let Some(name) = name {
+                        let _ = self.output.set_spout_name(name);
+                    }
+                    if let Some(enabled) = enabled {
+                        let _ = self.output.set_spout_enabled(enabled);
+                    }
+                    let result = Ok(self.output.spout_status());
                     self.finish_command(result, reply).await
                 }
                 RuntimeCommand::Shutdown { reply } => {
@@ -2728,6 +2782,14 @@ mod platform {
         ToggleFullscreen {
             reply: oneshot::Sender<Result<bool, D2RuntimeError>>,
         },
+        SpoutStatus {
+            reply: oneshot::Sender<Result<NativeSpoutStatus, D2RuntimeError>>,
+        },
+        ConfigureSpout {
+            name: Option<String>,
+            enabled: Option<bool>,
+            reply: oneshot::Sender<Result<NativeSpoutStatus, D2RuntimeError>>,
+        },
         Shutdown {
             reply: oneshot::Sender<Result<(), D2RuntimeError>>,
         },
@@ -2745,6 +2807,9 @@ mod platform {
                 | Self::CaptureStatus { reply } => reply.is_closed(),
                 Self::Resize { reply, .. } => reply.is_closed(),
                 Self::ToggleFullscreen { reply } => reply.is_closed(),
+                Self::SpoutStatus { reply } | Self::ConfigureSpout { reply, .. } => {
+                    reply.is_closed()
+                }
                 // Shutdown owns cleanup even if its original waiter is
                 // cancelled; Drop also uses this path without a live waiter.
                 Self::Shutdown { .. } => false,
@@ -3546,6 +3611,18 @@ impl D2Runtime {
     }
 
     pub(crate) async fn toggle_fullscreen(&self) -> Result<bool, D2RuntimeError> {
+        Err(D2RuntimeError::unsupported())
+    }
+
+    pub(crate) async fn spout_status(&self) -> Result<NativeSpoutStatus, D2RuntimeError> {
+        Err(D2RuntimeError::unsupported())
+    }
+
+    pub(crate) async fn configure_spout(
+        &self,
+        _name: Option<String>,
+        _enabled: Option<bool>,
+    ) -> Result<NativeSpoutStatus, D2RuntimeError> {
         Err(D2RuntimeError::unsupported())
     }
 }

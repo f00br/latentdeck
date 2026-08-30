@@ -10,6 +10,7 @@ use latentdeck_core::{
     codec_pack::default_codec_pack_roots,
     player::{PlayerCoordinator, PlayerCoordinatorError, PlayerView},
 };
+use latentdeck_native_output::NativeSpoutStatus;
 use playback_runtime::{PlaybackLaunchConfig, PlaybackRuntime, PlaybackRuntimeError};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, RunEvent, State, WindowEvent};
@@ -266,6 +267,34 @@ async fn player_fullscreen(state: State<'_, AppState>) -> Result<PlayerView, Com
     trusted_snapshot(&state.player)
 }
 
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri command extractor owns `State`.
+async fn player_spout_status(
+    state: State<'_, AppState>,
+) -> Result<Option<NativeSpoutStatus>, CommandError> {
+    let runtime = state.runtime.lock().await;
+    let Some(runtime) = runtime.as_ref() else {
+        return Ok(None);
+    };
+    runtime.spout_status().await.map(Some).map_err(Into::into)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri command extractor owns `State`.
+async fn player_spout_configure(
+    state: State<'_, AppState>,
+    name: Option<String>,
+    enabled: Option<bool>,
+) -> Result<NativeSpoutStatus, CommandError> {
+    let runtime = state.runtime.lock().await;
+    runtime
+        .as_ref()
+        .ok_or_else(CommandError::runtime_inactive)?
+        .configure_spout(name, enabled)
+        .await
+        .map_err(Into::into)
+}
+
 fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -310,6 +339,8 @@ fn main() {
             player_pause,
             player_restart,
             player_fullscreen,
+            player_spout_status,
+            player_spout_configure,
         ])
         .build(tauri::generate_context!())
         .expect("LatentPlayer application runtime failed");

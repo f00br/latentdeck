@@ -14,6 +14,7 @@ import type {
   Q4Transport,
   Q4TransportAck,
 } from "./q4-model";
+import type { SpoutConfigure, SpoutStatus } from "./output-model";
 
 export type StopQ4Listener = () => void;
 
@@ -39,6 +40,8 @@ export interface Q4Client {
   captureLiveStop(): Promise<Q4CaptureView>;
   captureStatusGet(): Promise<Q4CaptureView>;
   statusGet(): Promise<Q4Status>;
+  spoutStatusGet(): Promise<SpoutStatus | null>;
+  spoutConfigure(configure: SpoutConfigure): Promise<SpoutStatus>;
   onStatus(handler: (status: Q4Status) => void): Promise<StopQ4Listener>;
   onError(handler: (error: Q4ErrorEvent) => void): Promise<StopQ4Listener>;
   onCapture(handler: (capture: Q4CaptureView) => void): Promise<StopQ4Listener>;
@@ -59,6 +62,8 @@ export const Q4_COMMANDS = Object.freeze({
   captureLiveStop: "deck_q4_capture_live_stop",
   captureStatusGet: "deck_q4_capture_status_get",
   statusGet: "deck_q4_status_get",
+  spoutStatusGet: "deck_q4_spout_status_get",
+  spoutConfigure: "deck_q4_spout_configure",
 });
 
 export const Q4_EVENTS = Object.freeze({
@@ -95,6 +100,10 @@ export function createQ4Client(host: Q4HostAdapter = tauriHost): Q4Client {
     captureStatusGet: () =>
       host.invoke<Q4CaptureView>(Q4_COMMANDS.captureStatusGet, {}),
     statusGet: () => host.invoke<Q4Status>(Q4_COMMANDS.statusGet, {}),
+    spoutStatusGet: () =>
+      host.invoke<SpoutStatus | null>(Q4_COMMANDS.spoutStatusGet, {}),
+    spoutConfigure: ({ name, enabled }) =>
+      host.invoke<SpoutStatus>(Q4_COMMANDS.spoutConfigure, { name, enabled }),
     onStatus: (handler) => host.listen<Q4Status>(Q4_EVENTS.status, handler),
     onError: (handler) => host.listen<Q4ErrorEvent>(Q4_EVENTS.error, handler),
     onCapture: (handler) => host.listen<Q4CaptureView>(Q4_EVENTS.capture, handler),

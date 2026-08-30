@@ -12,6 +12,7 @@ import type {
   D2TransportAck,
   D2CaptureView,
 } from "./d2-model";
+import type { SpoutConfigure, SpoutStatus } from "./output-model";
 
 export type StopD2Listener = () => void;
 
@@ -36,6 +37,8 @@ export interface D2Client {
   captureLiveStop(): Promise<D2CaptureView>;
   captureStatusGet(): Promise<D2CaptureView>;
   statusGet(): Promise<D2Status>;
+  spoutStatusGet(): Promise<SpoutStatus | null>;
+  spoutConfigure(configure: SpoutConfigure): Promise<SpoutStatus>;
   onStatus(handler: (status: D2Status) => void): Promise<StopD2Listener>;
   onError(handler: (error: D2ErrorEvent) => void): Promise<StopD2Listener>;
   onCapture(handler: (capture: D2CaptureView) => void): Promise<StopD2Listener>;
@@ -57,6 +60,8 @@ export const D2_COMMANDS = Object.freeze({
   captureLiveStop: "deck_d2_capture_live_stop",
   captureStatusGet: "deck_d2_capture_status_get",
   statusGet: "deck_d2_status_get",
+  spoutStatusGet: "deck_d2_spout_status_get",
+  spoutConfigure: "deck_d2_spout_configure",
 });
 
 export const D2_EVENTS = Object.freeze({
@@ -95,6 +100,10 @@ export function createD2Client(host: D2HostAdapter = tauriHost): D2Client {
     captureStatusGet: () =>
       host.invoke<D2CaptureView>(D2_COMMANDS.captureStatusGet, {}),
     statusGet: () => host.invoke<D2Status>(D2_COMMANDS.statusGet, {}),
+    spoutStatusGet: () =>
+      host.invoke<SpoutStatus | null>(D2_COMMANDS.spoutStatusGet, {}),
+    spoutConfigure: ({ name, enabled }) =>
+      host.invoke<SpoutStatus>(D2_COMMANDS.spoutConfigure, { name, enabled }),
     onStatus: (handler) => host.listen<D2Status>(D2_EVENTS.status, handler),
     onError: (handler) => host.listen<D2ErrorEvent>(D2_EVENTS.error, handler),
     onCapture: (handler) =>

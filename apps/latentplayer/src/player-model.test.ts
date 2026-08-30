@@ -6,8 +6,26 @@ import {
   formatFrameRate,
   formatFramePosition,
   progressPercent,
+  spoutControlsFor,
+  type SpoutStatus,
   type PlayerView,
 } from "./player-model";
+
+const SPOUT_READY: SpoutStatus = {
+  sdkBuilt: true,
+  ready: true,
+  enabled: false,
+  published: false,
+  requestedName: "LatentPlayer Output",
+  activeName: "LatentPlayer Output",
+  width: 800,
+  height: 448,
+  format: "rgba8_unorm",
+  submittedFrames: 0,
+  lastSequence: null,
+  spoutFrame: null,
+  lastErrorCode: null,
+};
 
 const READY: PlayerView = {
   revision: 4,
@@ -99,5 +117,23 @@ describe("LatentPlayer presentation state", () => {
         },
       }),
     ).toBe("23.976 fps");
+  });
+
+  it("enables Spout controls only after the real SDK opens on native output", () => {
+    expect(spoutControlsFor(null, false)).toEqual({
+      rename: false,
+      toggle: false,
+    });
+    expect(
+      spoutControlsFor({ ...SPOUT_READY, sdkBuilt: false }, false),
+    ).toEqual({ rename: false, toggle: false });
+    expect(spoutControlsFor(SPOUT_READY, false)).toEqual({
+      rename: true,
+      toggle: true,
+    });
+    expect(spoutControlsFor(SPOUT_READY, true)).toEqual({
+      rename: false,
+      toggle: false,
+    });
   });
 });

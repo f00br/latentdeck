@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use latentdeck_library::{CartridgeKey, DeckSourceIdentity};
+use latentdeck_native_output::NativeSpoutStatus;
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter as _, Manager as _, State};
 use tauri_plugin_dialog::DialogExt as _;
@@ -435,6 +436,37 @@ pub(crate) async fn deck_q4_fullscreen(state: State<'_, Q4AppState>) -> Result<b
         .await
         .ok_or_else(runtime_inactive)?;
     runtime.toggle_fullscreen().await.map_err(command_error)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) async fn deck_q4_spout_status_get(
+    state: State<'_, Q4AppState>,
+) -> Result<Option<NativeSpoutStatus>, CommandError> {
+    let Some(runtime) = clone_slot(&state.runtime).await else {
+        return Ok(None);
+    };
+    runtime
+        .spout_status()
+        .await
+        .map(Some)
+        .map_err(command_error)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) async fn deck_q4_spout_configure(
+    state: State<'_, Q4AppState>,
+    name: Option<String>,
+    enabled: Option<bool>,
+) -> Result<NativeSpoutStatus, CommandError> {
+    let runtime = clone_slot(&state.runtime)
+        .await
+        .ok_or_else(runtime_inactive)?;
+    runtime
+        .configure_spout(name, enabled)
+        .await
+        .map_err(command_error)
 }
 
 async fn resolve_source(

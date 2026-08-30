@@ -29,6 +29,8 @@ describe("typed LD-D2 host client", () => {
       captureLiveStop: "deck_d2_capture_live_stop",
       captureStatusGet: "deck_d2_capture_status_get",
       statusGet: "deck_d2_status_get",
+      spoutStatusGet: "deck_d2_spout_status_get",
+      spoutConfigure: "deck_d2_spout_configure",
     });
     const calls: Array<{ command: string; args: Record<string, unknown> }> = [];
     const host: D2HostAdapter = {
@@ -62,6 +64,8 @@ describe("typed LD-D2 host client", () => {
     await client.captureLiveStop();
     await client.captureStatusGet();
     await client.statusGet();
+    await client.spoutStatusGet();
+    await client.spoutConfigure({ name: "Deck A", enabled: true });
 
     expect(calls).toEqual([
       { command: "deck_d2_backend_status_get", args: {} },
@@ -82,6 +86,11 @@ describe("typed LD-D2 host client", () => {
       { command: "deck_d2_capture_live_stop", args: {} },
       { command: "deck_d2_capture_status_get", args: {} },
       { command: "deck_d2_status_get", args: {} },
+      { command: "deck_d2_spout_status_get", args: {} },
+      {
+        command: "deck_d2_spout_configure",
+        args: { name: "Deck A", enabled: true },
+      },
     ]);
   });
 

@@ -41,6 +41,12 @@
     type CollectionView,
     type LibraryView,
   } from "./library-model";
+  import {
+    describeSpout,
+    spoutControlsFor,
+    type SpoutControls,
+    type SpoutStatus,
+  } from "./output-model";
 
   type HostState = "checking" | "ready" | "pending" | "error";
 
@@ -62,10 +68,16 @@
   let backendBusy = false;
   let hostBusy = false;
   let captureBusy = false;
+  let spoutBusy = false;
+  let spoutPending = false;
   let controlsDirty = false;
   let rolesDirty = false;
   let seedDirty = false;
   let capture: Q4CaptureView = { ...DEFAULT_Q4_CAPTURE };
+  let spout: SpoutStatus | null = null;
+  let spoutName = "LatentDeck LD-Q4 Output";
+  let spoutNameDirty = false;
+  let spoutMessage = "";
 
   let activeBank: CollectionView | undefined;
   let sourceA: CartridgeView | undefined;
@@ -77,6 +89,8 @@
   let liveCaptureAction: Q4LiveCaptureAction = "start";
   let rolesValid = true;
   let resolvedWeights: readonly [number, number, number] = [1 / 3, 1 / 3, 1 / 3];
+  let spoutControls: SpoutControls = { rename: false, toggle: false };
+  let spoutStateLabel = "Output inactive";
 
   $: activeBank = bankView.collections.find(
     (collection) => collection.id === bankView.deckSession.activeCollectionId,
@@ -92,10 +106,13 @@
   $: liveCaptureAction = q4LiveCaptureAction(capture);
   $: rolesValid = validateQ4Roles(rolesDraft);
   $: resolvedWeights = safeResolvedWeights(controlsDraft);
+  $: spoutControls = spoutControlsFor(spout, spoutBusy || hostBusy);
+  $: spoutStateLabel = describeSpout(spout);
 
   onMount(() => {
     let disposed = false;
     const stops: StopQ4Listener[] = [];
+    let spoutPoll: ReturnType<typeof setInterval> | undefined;
     void (async () => {
       try {
         stops.push(
@@ -114,10 +131,15 @@
         await refreshBackend();
         await refreshStatus();
         await refreshCapture();
+        await refreshSpout();
+        if (!disposed) {
+          spoutPoll = setInterval(() => void refreshSpout(), 250);
+        }
       }
     })();
     return () => {
       disposed = true;
+      if (spoutPoll !== undefined) clearInterval(spoutPoll);
       for (const stop of stops) stop();
     };
   });
@@ -218,6 +240,19 @@
     }
   }
 
+  async function refreshSpout(): Promise<void> {
+    if (spoutPending) return;
+    spoutPending = true;
+    try {
+      applySpoutStatus(await q4Client.spoutStatusGet());
+      spoutMessage = "";
+    } catch (error) {
+      spoutMessage = describeCommandError(error);
+    } finally {
+      spoutPending = false;
+    }
+  }
+
   async function openDeck(): Promise<void> {
     if (backend.state !== "ready") {
       hostState = "error";
@@ -244,6 +279,7 @@
         seed,
       );
       applyStatus(await q4Client.open(request));
+      await refreshSpout();
       controlsDirty = false;
       rolesDirty = false;
       seedDirty = false;
@@ -337,6 +373,42 @@
     }
   }
 
+  async function applySpoutName(): Promise<void> {
+    const name = spoutName.trim();
+    if (name.length === 0 || !spoutControls.rename) return;
+    await configureSpout(name, null);
+  }
+
+  async function toggleSpout(): Promise<void> {
+    if (spout === null || !spoutControls.toggle) return;
+    await configureSpout(null, !spout.enabled);
+  }
+
+  async function configureSpout(name: string | null, enabled: boolean | null): Promise<void> {
+    if (spoutBusy) return;
+    spoutBusy = true;
+    spoutMessage = "";
+    try {
+      const incoming = await q4Client.spoutConfigure({ name, enabled });
+      spout = incoming;
+      if (name !== null) {
+        if (incoming.requestedName === name) {
+          spoutName = incoming.requestedName;
+          spoutNameDirty = false;
+        } else {
+          spoutMessage = incoming.lastErrorCode ?? "Sender name was not accepted.";
+        }
+      } else if (!spoutNameDirty) {
+        spoutName = incoming.requestedName;
+      }
+      if (incoming.lastErrorCode !== null) spoutMessage = incoming.lastErrorCode;
+    } catch (error) {
+      spoutMessage = describeCommandError(error);
+    } finally {
+      spoutBusy = false;
+    }
+  }
+
   async function runHostAction(action: () => Promise<void>): Promise<void> {
     if (hostBusy) return;
     hostBusy = true;
@@ -373,6 +445,13 @@
 
   function applyCapture(incoming: Q4CaptureView): void {
     capture = { ...incoming };
+  }
+
+  function applySpoutStatus(incoming: SpoutStatus | null): void {
+    spout = incoming;
+    if (incoming !== null && !spoutNameDirty) {
+      spoutName = incoming.requestedName;
+    }
   }
 
   function applyError(incoming: Q4ErrorEvent): void {
@@ -432,6 +511,32 @@
     <div><span>Q4 ENTRYPOINT</span><strong>{backend.q4EntrypointAvailable ? "DECLARED" : "UNAVAILABLE"}</strong><small>{backend.state}</small></div>
     <div><span>DECODER</span><strong>{backend.decoder?.variantId ?? "SELECT EXPLICIT WEIGHT"}</strong><small>{backend.decoder?.licenseLabel ?? backend.detail ?? "—"}</small></div>
     <button type="button" onclick={() => void selectDecoder()} disabled={backendBusy}>Select decoder</button>
+  </section>
+
+  <section class="spout-strip" aria-label="Spout2 native output">
+    <div class="spout-state">
+      <span>SPOUT2 · DX12 TEXTURE</span>
+      <strong>{spoutStateLabel}</strong>
+      <small>{spout === null ? "Q4 OUTPUT INACTIVE" : `${spout.width}×${spout.height} · ${spout.format} · ${spout.submittedFrames} FRAMES`}</small>
+    </div>
+    <label>Sender name
+      <input
+        aria-label="Q4 Spout sender name"
+        value={spoutName}
+        oninput={(event) => {
+          spoutName = (event.currentTarget as HTMLInputElement).value;
+          spoutNameDirty = true;
+        }}
+        disabled={!spoutControls.rename}
+      />
+    </label>
+    <button type="button" onclick={() => void applySpoutName()} disabled={!spoutControls.rename || !spoutNameDirty || spoutName.trim().length === 0}>Apply name</button>
+    <button class:active={spout?.enabled === true} type="button" onclick={() => void toggleSpout()} disabled={!spoutControls.toggle}>{spout?.enabled ? "Disable sender" : "Enable sender"}</button>
+    <div class="spout-receiver">
+      <span>RECEIVER NAME</span>
+      <strong>{spout?.activeName || spout?.requestedName || "—"}</strong>
+      <small class:error={spoutMessage.length > 0 || (spout?.lastErrorCode ?? null) !== null}>{spoutMessage || spout?.lastErrorCode || (spout?.published ? `SEQUENCE ${spout.lastSequence ?? "—"}` : "NO FRAME PUBLISHED")}</small>
+    </div>
   </section>
 
   <section class="bank-strip">
@@ -517,10 +622,11 @@
   .host-meter>span{grid-row:1/3;width:9px;height:9px;border-radius:50%;background:var(--blue);box-shadow:0 0 8px var(--blue)} .host-meter.pending>span{background:var(--amber);box-shadow:0 0 8px var(--amber)} .host-meter.error>span{background:var(--red);box-shadow:0 0 8px var(--red)} .host-meter small{color:#777991}
   .status-line,.reset-line,.bank-error,.inline-error{min-height:30px;padding:5px 12px;border-bottom:1px solid #343548;background:#0e0f16;color:#a4a6bb;font-size:.65rem}.status-line{display:flex;align-items:center;gap:8px}.status-line button{margin-left:auto;min-height:22px;padding:2px 7px}.status-line.error,.bank-error,.inline-error{color:#ec9aa2}.reset-line{color:#d7c27d}
   .codec-bank{display:grid;grid-template-columns:1fr .7fr 1.5fr auto;gap:1px;border-bottom:1px solid var(--line);background:#3a3b52}.codec-bank>div{display:grid;align-content:center;gap:3px;min-height:66px;padding:8px 11px;background:#171824}.codec-bank span,.codec-bank small,.bank-strip span,.bank-strip small,.master-strip span{color:#7f8199;font:700 .54rem ui-monospace,monospace}.codec-bank strong{overflow:hidden;color:#cfd2e3;font:700 .65rem ui-monospace,monospace;text-overflow:ellipsis;white-space:nowrap}.codec-bank button{margin:9px}
+  .spout-strip{display:grid;grid-template-columns:minmax(190px,.8fr) minmax(230px,1fr) auto auto minmax(210px,1fr);align-items:end;gap:7px;padding:8px 12px;border-bottom:1px solid var(--line);background:#121722}.spout-strip span,.spout-strip small{color:#7f8799;font:700 .54rem ui-monospace,monospace}.spout-strip strong{overflow:hidden;color:#cbd8e8;font:700 .65rem ui-monospace,monospace;text-overflow:ellipsis;white-space:nowrap}.spout-strip label,.spout-state,.spout-receiver{display:grid;gap:4px}.spout-strip label{color:#969eaf;font-size:.58rem;font-weight:800;text-transform:uppercase}.spout-strip button.active{border-color:#7ea6df;background:#294564;box-shadow:inset 0 -2px #83b6ff}.spout-receiver small.error{color:#ec9aa2}
   .bank-strip{display:grid;grid-template-columns:minmax(250px,420px)180px 1fr;align-items:center;gap:12px;padding:10px 12px;border-bottom:1px solid var(--line);background:#1b1d2b}.bank-strip label{display:grid;gap:4px;color:#9496aa;font-size:.6rem;font-weight:800;text-transform:uppercase}.bank-strip>div{display:grid;border-left:1px solid var(--line);padding-left:12px}.bank-strip strong{color:var(--blue);font:700 .75rem ui-monospace,monospace}.bank-strip p{color:#85879d;font-size:.65rem}
   .slot-grid{display:grid;grid-template-columns:repeat(4,minmax(190px,1fr));gap:7px;padding:7px}.slot-module{display:flex;min-width:0;min-height:265px;flex-direction:column;gap:10px;padding:11px;border:1px solid var(--line);background:linear-gradient(135deg,rgb(255 255 255 / 2%),transparent 35%),var(--panel)}.slot-module.carrier{border-color:#789fff;box-shadow:inset 0 2px var(--blue)}.slot-module header{display:flex;align-items:center;gap:8px;padding-bottom:8px;border-bottom:1px solid #3b3c51}.slot-module header>span{display:grid;width:32px;height:32px;place-content:center;border:1px solid #6d7197;background:#272a42;color:var(--blue);font:800 1rem ui-monospace,monospace}.slot-module select{min-width:0;width:100%}.source-readout{display:grid;min-height:82px;place-content:center;gap:4px;border:1px solid #3b3e59;background:#0e1018;text-align:center}.source-readout strong{font:500 1rem ui-monospace,monospace}.source-readout small{color:#777a91}.transport{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:auto}.transport label{display:flex;align-items:center;justify-content:center;gap:4px;border:1px solid #45475d;background:#101119;font-size:.62rem}.transport small{grid-column:1/-1;color:#81839b;font:700 .57rem ui-monospace,monospace;text-align:right}
   .routing-panel,.operator-panel{margin:0 7px 7px;padding:11px;border:1px solid var(--line);background:var(--panel)}.routing-panel>header,.operator-panel>header{padding-bottom:9px;border-bottom:1px solid #3b3d53}.routing-panel code{color:#767991;font-size:.56rem}.role-grid{display:grid;grid-template-columns:repeat(4,1fr) auto;gap:7px;align-items:end;margin-top:9px}.role-grid label,.donor-grid label,.xs5-grid label{display:grid;gap:4px;color:#9698ae;font-size:.58rem;font-weight:800;text-transform:uppercase}
   .algorithm-switch{display:grid;grid-template-columns:1fr 1fr;gap:4px}.algorithm-switch button.active{border-color:var(--violet);background:#443260;box-shadow:inset 0 -2px var(--violet)}.control-grid{display:grid;grid-template-columns:repeat(3,1fr) .8fr .8fr;gap:8px;margin-top:10px}.control-grid>label{display:grid;gap:4px;color:#999bb0;font-size:.58rem;font-weight:800;text-transform:uppercase}.control-grid output{color:var(--violet);font-family:ui-monospace,monospace}.control-grid input[type=range]{width:100%;accent-color:var(--violet)}fieldset{display:grid;gap:3px;margin:0;border:1px solid #3f4158;padding:5px}legend{color:#7f8199;font-size:.54rem}fieldset label{font-size:.57rem}.donor-grid,.xs5-grid{display:grid;grid-template-columns:repeat(4,minmax(110px,1fr));gap:7px;margin-top:9px}.weight-readout{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-top:7px}.weight-readout span{padding:5px;border:1px solid #383a50;background:#11121b;color:#aeb0c3;font:700 .58rem ui-monospace,monospace;text-align:center}.operator-panel footer{display:flex;align-items:center;gap:8px;margin-top:9px;padding-top:8px;border-top:1px solid #383a50}.operator-panel footer span{color:#85879b;font:700 .55rem ui-monospace,monospace}.operator-panel footer button{margin-left:auto}
   .master-strip{display:grid;grid-template-columns:.8fr 1fr .7fr 1.5fr;gap:7px;padding:7px;border-top:1px solid #737491;background:#151621}.master-strip>div{display:grid;align-content:center;gap:5px;min-height:76px;padding:8px;border:1px solid #44465d;background:#0f1018}.master-strip>div:nth-child(2){grid-template-columns:1fr auto}.master-strip>div:nth-child(2)>span{grid-column:1/-1}.master-strip .load{border-color:#779eff;background:linear-gradient(#38558d,#28385d)}.capture{grid-template-columns:1fr 1fr}.capture>span,.capture>small{grid-column:1/-1}.capture small{color:#777a90;font-size:.57rem}
-  @media(max-width:1180px){.slot-grid{grid-template-columns:1fr 1fr}.role-grid{grid-template-columns:1fr 1fr}.control-grid{grid-template-columns:1fr 1fr}.master-strip{grid-template-columns:1fr 1fr}.codec-bank{grid-template-columns:1fr 1fr}}
+  @media(max-width:1180px){.slot-grid{grid-template-columns:1fr 1fr}.role-grid{grid-template-columns:1fr 1fr}.control-grid{grid-template-columns:1fr 1fr}.master-strip{grid-template-columns:1fr 1fr}.codec-bank{grid-template-columns:1fr 1fr}.spout-strip{grid-template-columns:1fr 1fr}.spout-state,.spout-receiver{align-self:center}}
 </style>

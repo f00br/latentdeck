@@ -9,7 +9,9 @@
     formatFrameRate,
     formatFramePosition,
     progressPercent,
+    spoutControlsFor,
     type PlayerView,
+    type SpoutStatus,
   } from "./player-model";
   import { product } from "./product";
 
@@ -17,9 +19,28 @@
   let busy = $state(false);
   let transientError = $state<string | null>(null);
   let snapshotPending = false;
+  let spout = $state<SpoutStatus | null>(null);
+  let spoutBusy = $state(false);
+  let spoutName = $state("LatentPlayer Output");
+  let spoutNameDirty = $state(false);
+  let spoutPending = false;
 
   const controls = $derived(controlsFor(player, busy));
   const progress = $derived(progressPercent(player));
+  const spoutControls = $derived(spoutControlsFor(spout, busy || spoutBusy));
+  const spoutState = $derived(
+    spout === null
+      ? "Output inactive"
+      : !spout.sdkBuilt
+        ? "SDK not built"
+        : !spout.ready
+          ? "SDK unavailable"
+          : spout.published
+            ? "Sending"
+            : spout.enabled
+              ? "Waiting for frame"
+              : "Ready / disabled",
+  );
 
   function errorMessage(error: unknown): string {
     if (
@@ -88,12 +109,61 @@
     }
   }
 
+  async function refreshSpout(reportError = false): Promise<void> {
+    if (spoutPending) {
+      return;
+    }
+    spoutPending = true;
+    try {
+      const status = await invoke<SpoutStatus | null>("player_spout_status");
+      spout = status;
+      if (status !== null && !spoutNameDirty) {
+        spoutName = status.requestedName;
+      }
+    } catch (error) {
+      if (reportError) {
+        transientError = errorMessage(error);
+      }
+    } finally {
+      spoutPending = false;
+    }
+  }
+
+  async function configureSpout(
+    name: string | null,
+    enabled: boolean | null,
+  ): Promise<void> {
+    spoutBusy = true;
+    transientError = null;
+    try {
+      spout = await invoke<SpoutStatus>("player_spout_configure", {
+        name,
+        enabled,
+      });
+      if (name !== null) {
+        spoutNameDirty = false;
+        spoutName = spout.requestedName;
+      }
+    } catch (error) {
+      transientError = errorMessage(error);
+    } finally {
+      spoutBusy = false;
+    }
+  }
+
   onMount(() => {
     void refreshSnapshot(true);
-    const timer = globalThis.setInterval(() => {
+    void refreshSpout();
+    const snapshotTimer = globalThis.setInterval(() => {
       void refreshSnapshot();
     }, 100);
-    return () => globalThis.clearInterval(timer);
+    const spoutTimer = globalThis.setInterval(() => {
+      void refreshSpout();
+    }, 250);
+    return () => {
+      globalThis.clearInterval(snapshotTimer);
+      globalThis.clearInterval(spoutTimer);
+    };
   });
 </script>
 
@@ -186,6 +256,51 @@
       >
     {/if}
   </footer>
+
+  <section class="spout-strip" aria-label="Spout2 output">
+    <div class="spout-heading">
+      <span
+        class:ready={spout?.ready}
+        class:sending={spout?.published}
+        class="status-dot"
+      ></span>
+      <div>
+        <span>Spout2 · GPU texture</span>
+        <strong>{spoutState}</strong>
+      </div>
+    </div>
+    <label>
+      Sender name
+      <input
+        maxlength="240"
+        value={spoutName}
+        disabled={!spoutControls.rename}
+        oninput={(event) => {
+          spoutName = event.currentTarget.value;
+          spoutNameDirty = true;
+        }}
+      />
+    </label>
+    <button
+      disabled={!spoutControls.rename || !spoutNameDirty}
+      onclick={() => configureSpout(spoutName, null)}>Apply name</button
+    >
+    <button
+      class:active={spout?.enabled}
+      aria-pressed={spout?.enabled ?? false}
+      disabled={!spoutControls.toggle}
+      onclick={() => configureSpout(null, !(spout?.enabled ?? false))}
+      >{spout?.enabled ? "Disable sender" : "Enable sender"}</button
+    >
+    <p>
+      {spout === null
+        ? "Start playback to create the native DX12 output."
+        : `${spout.activeName} · ${spout.width}×${spout.height} · ${spout.format} · ${spout.submittedFrames} frames`}
+    </p>
+    {#if spout?.lastErrorCode}
+      <code>{spout.lastErrorCode}</code>
+    {/if}
+  </section>
 
   {#if player.error || transientError}
     <aside class="error-panel" role="alert">

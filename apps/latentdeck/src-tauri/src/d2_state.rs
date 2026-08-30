@@ -6,6 +6,7 @@ use std::sync::{
 };
 
 use latentdeck_library::{CartridgeKey, DeckSourceIdentity};
+use latentdeck_native_output::NativeSpoutStatus;
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter as _, Manager as _, State};
 use tauri_plugin_dialog::DialogExt as _;
@@ -483,6 +484,37 @@ pub(crate) async fn deck_d2_fullscreen(state: State<'_, D2AppState>) -> Result<b
         .await
         .ok_or_else(runtime_inactive)?;
     runtime.toggle_fullscreen().await.map_err(command_error)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) async fn deck_d2_spout_status_get(
+    state: State<'_, D2AppState>,
+) -> Result<Option<NativeSpoutStatus>, CommandError> {
+    let Some(runtime) = clone_slot(&state.runtime).await else {
+        return Ok(None);
+    };
+    runtime
+        .spout_status()
+        .await
+        .map(Some)
+        .map_err(command_error)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) async fn deck_d2_spout_configure(
+    state: State<'_, D2AppState>,
+    name: Option<String>,
+    enabled: Option<bool>,
+) -> Result<NativeSpoutStatus, CommandError> {
+    let runtime = clone_slot(&state.runtime)
+        .await
+        .ok_or_else(runtime_inactive)?;
+    runtime
+        .configure_spout(name, enabled)
+        .await
+        .map_err(command_error)
 }
 
 async fn shutdown_runtime_slot(

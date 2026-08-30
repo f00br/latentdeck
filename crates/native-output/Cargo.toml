@@ -6,8 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 description = "Reusable raw Tauri window and native DX12 presentation"
 
+[features]
+default = []
+spout-sdk = ["latentdeck-output-spout/spout-sdk"]
+
 [dependencies]
 latentdeck-gpu = { path = "../gpu" }
+latentdeck-output-spout = { path = "../output-spout" }
+serde.workspace = true
 tauri = { workspace = true, features = ["unstable"] }
 thiserror.workspace = true
 wgpu.workspace = true
