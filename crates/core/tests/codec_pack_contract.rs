@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use latentdeck_core::codec_pack::{
     CodecPackErrorCode, discover_codec_packs, validate_external_asset,
 };
+use latentdeck_core::player::{CodecState, PlayerCoordinator};
 use latentdeck_core::worker_supervisor::{ValidatedWorkerLaunch, WorkerSupervisorError};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -103,6 +104,73 @@ fn discovers_a_fully_integrity_checked_h3_pack() {
     assert_eq!(packs.len(), 1);
     assert_eq!(packs[0].manifest.pack_id, "org.latentdeck.h3");
     assert!(packs[0].worker_executable.ends_with("bin/worker.exe"));
+}
+
+#[test]
+fn player_exposes_decoder_provenance_and_recovers_after_incompatible_selection() {
+    let root = TempDir::new().expect("root");
+    let pack_path = write_pack(root.path(), "org.latentdeck.h3", "0.1.0");
+    let expected = b"synthetic external decoder weight";
+    mutate_manifest(&pack_path, |manifest| {
+        manifest["external_assets"][0]["accepted_variants"][0]["sha256"] =
+            Value::String(sha256(expected));
+        manifest["external_assets"][0]["accepted_variants"][0]["byte_length"] =
+            Value::from(expected.len());
+    });
+    let mut player = PlayerCoordinator::discover(&[root.path().to_path_buf()], "0.1.0")
+        .expect("player codec discovery");
+
+    let initial = player.view().codec;
+    assert_eq!(initial.state, CodecState::Missing);
+    assert_eq!(initial.pack_id.as_deref(), Some("org.latentdeck.h3"));
+    assert_eq!(initial.decoder_variants.len(), 1);
+    assert_eq!(
+        initial.decoder_variants[0].source_url,
+        "https://github.com/madebyollin/taehv"
+    );
+    assert_eq!(initial.decoder_variants[0].license_label, "MIT");
+    assert_eq!(initial.decoder_variants[0].sha256.len(), 64);
+
+    let wrong_weight = root.path().join("wrong.safetensors");
+    fs::write(&wrong_weight, b"not the declared decoder").expect("wrong decoder fixture");
+    let error = player
+        .select_decoder_asset(&wrong_weight)
+        .expect_err("wrong decoder must remain visible as incompatible");
+
+    assert_eq!(error.code, "codec.asset_incompatible");
+    let incompatible = player.view();
+    assert_eq!(incompatible.codec.state, CodecState::Incompatible);
+    assert!(
+        incompatible
+            .codec
+            .decoder_variants
+            .iter()
+            .all(|item| !item.selected)
+    );
+    assert_eq!(
+        incompatible.error.as_ref().map(|error| error.recoverable),
+        Some(true)
+    );
+    assert!(
+        !serde_json::to_string(&incompatible)
+            .expect("serialize player state")
+            .contains(root.path().to_string_lossy().as_ref())
+    );
+
+    let accepted_weight = root.path().join("accepted.safetensors");
+    fs::write(&accepted_weight, expected).expect("accepted decoder fixture");
+    let recovered = player
+        .select_decoder_asset(&accepted_weight)
+        .expect("a valid retry must recover decoder selection");
+
+    assert_eq!(recovered.codec.state, CodecState::Ready);
+    assert!(recovered.codec.decoder_variants[0].selected);
+    assert!(recovered.error.is_none());
+    assert!(
+        !serde_json::to_string(&recovered)
+            .expect("serialize recovered player state")
+            .contains(root.path().to_string_lossy().as_ref())
+    );
 }
 
 #[test]

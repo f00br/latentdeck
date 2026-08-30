@@ -60,6 +60,27 @@ pub struct CodecSummary {
     pub state: CodecState,
     pub display_name: Option<String>,
     pub detail: Option<String>,
+    pub pack_id: Option<String>,
+    pub pack_version: Option<String>,
+    pub publisher_name: Option<String>,
+    pub publisher_url: Option<String>,
+    pub pack_license_label: Option<String>,
+    pub decoder_asset_id: Option<String>,
+    pub decoder_display_name: Option<String>,
+    pub decoder_variants: Vec<DecoderVariantSummary>,
+}
+
+/// Path-free source, license, and integrity identity for one accepted weight.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecoderVariantSummary {
+    pub variant_id: String,
+    pub sha256: String,
+    pub byte_length: u64,
+    pub source_url: String,
+    pub license_label: String,
+    pub license_url: String,
+    pub selected: bool,
 }
 
 /// Stable user-facing failure state. Detailed diagnostics remain in logs.
@@ -135,11 +156,15 @@ impl PlayerCoordinator {
             Ok(player) => player,
             Err(error) => {
                 let mut player = Self::without_codec();
-                player.codec_fault = Some(CodecSummary {
-                    state: CodecState::Error,
-                    display_name: None,
-                    detail: Some(error.message.clone()),
-                });
+                let state = if error.code.starts_with("codec.pack_incompatible_") {
+                    CodecState::Incompatible
+                } else {
+                    CodecState::Error
+                };
+                player.codec_fault = Some(codec_summary_without_pack(
+                    state,
+                    Some(error.message.clone()),
+                ));
                 player.error = Some(PlayerErrorView {
                     code: error.code,
                     message: error.message,
@@ -189,12 +214,34 @@ impl PlayerCoordinator {
                 "Install a compatible H3 Codec Pack before selecting its decoder weight.",
             )
         })?;
-        let asset = validate_external_asset(pack, H3_ASSET_ID, path)
-            .map_err(PlayerCoordinatorError::from)?;
-        self.decoder_asset = Some(asset);
-        self.error = None;
-        self.bump_revision()?;
-        Ok(self.view())
+        let validation = validate_external_asset(pack, H3_ASSET_ID, path);
+        match validation {
+            Ok(asset) => {
+                self.decoder_asset = Some(asset);
+                self.codec_fault = None;
+                self.error = None;
+                self.bump_revision()?;
+                Ok(self.view())
+            }
+            Err(error) => {
+                let failure = PlayerCoordinatorError::from(error);
+                let state = if failure.code == "codec.asset_incompatible" {
+                    CodecState::Incompatible
+                } else {
+                    CodecState::Error
+                };
+                self.codec_fault = self.selected_codec_pack().map(|selected| {
+                    codec_summary_for_pack(selected, state, Some(failure.message.clone()), None)
+                });
+                self.error = Some(PlayerErrorView {
+                    code: failure.code.clone(),
+                    message: failure.message.clone(),
+                    recoverable: true,
+                });
+                self.bump_revision()?;
+                Err(failure)
+            }
+        }
     }
 
     /// Fully validate and retain one `.lc` cartridge.
@@ -420,24 +467,20 @@ impl PlayerCoordinator {
             return fault.clone();
         }
         let Some(pack) = self.selected_codec_pack() else {
-            return CodecSummary {
-                state: CodecState::Missing,
-                display_name: None,
-                detail: Some("Install a compatible H3 Codec Pack.".to_owned()),
-            };
+            return codec_summary_without_pack(
+                CodecState::Missing,
+                Some("Install a compatible H3 Codec Pack.".to_owned()),
+            );
         };
         if self.decoder_asset.is_none() {
-            return CodecSummary {
-                state: CodecState::Missing,
-                display_name: Some(pack.manifest.display_name.clone()),
-                detail: Some("Select a compatible TAEH3 decoder weight.".to_owned()),
-            };
+            return codec_summary_for_pack(
+                pack,
+                CodecState::Missing,
+                Some("Select a compatible TAEH3 decoder weight.".to_owned()),
+                None,
+            );
         }
-        CodecSummary {
-            state: CodecState::Ready,
-            display_name: Some(pack.manifest.display_name.clone()),
-            detail: None,
-        }
+        codec_summary_for_pack(pack, CodecState::Ready, None, self.decoder_asset.as_ref())
     }
 
     fn bump_revision(&mut self) -> Result<(), PlayerCoordinatorError> {
@@ -445,6 +488,65 @@ impl PlayerCoordinator {
             PlayerCoordinatorError::new("player.revision_exhausted", "Player revision exhausted")
         })?;
         Ok(())
+    }
+}
+
+fn codec_summary_without_pack(state: CodecState, detail: Option<String>) -> CodecSummary {
+    CodecSummary {
+        state,
+        display_name: None,
+        detail,
+        pack_id: None,
+        pack_version: None,
+        publisher_name: None,
+        publisher_url: None,
+        pack_license_label: None,
+        decoder_asset_id: None,
+        decoder_display_name: None,
+        decoder_variants: Vec::new(),
+    }
+}
+
+fn codec_summary_for_pack(
+    pack: &ValidatedCodecPack,
+    state: CodecState,
+    detail: Option<String>,
+    selected: Option<&ValidatedExternalAsset>,
+) -> CodecSummary {
+    let decoder = pack
+        .manifest
+        .external_assets
+        .iter()
+        .find(|asset| asset.asset_id == H3_ASSET_ID);
+    CodecSummary {
+        state,
+        display_name: Some(pack.manifest.display_name.clone()),
+        detail,
+        pack_id: Some(pack.manifest.pack_id.clone()),
+        pack_version: Some(pack.manifest.pack_version.clone()),
+        publisher_name: Some(pack.manifest.publisher.name.clone()),
+        publisher_url: pack.manifest.publisher.url.clone(),
+        pack_license_label: Some(pack.manifest.license.spdx_or_label.clone()),
+        decoder_asset_id: decoder.map(|asset| asset.asset_id.clone()),
+        decoder_display_name: decoder.map(|asset| asset.display_name.clone()),
+        decoder_variants: decoder
+            .into_iter()
+            .flat_map(|asset| asset.accepted_variants.iter())
+            .map(|variant| DecoderVariantSummary {
+                variant_id: variant.variant_id.clone(),
+                sha256: variant.sha256.clone(),
+                byte_length: variant.byte_length,
+                source_url: variant.source_url.clone(),
+                license_label: variant.license_label.clone(),
+                license_url: variant.license_url.clone(),
+                selected: selected.is_some_and(|selected| {
+                    selected.asset_id == H3_ASSET_ID
+                        && selected.variant_id == variant.variant_id
+                        && selected.sha256 == variant.sha256
+                        && selected.byte_length == variant.byte_length
+                }),
+            })
+            .collect(),
     }
 }
 

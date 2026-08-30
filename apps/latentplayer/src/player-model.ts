@@ -20,6 +20,24 @@ export interface CodecSummary {
   state: CodecState;
   displayName: string | null;
   detail: string | null;
+  packId: string | null;
+  packVersion: string | null;
+  publisherName: string | null;
+  publisherUrl: string | null;
+  packLicenseLabel: string | null;
+  decoderAssetId: string | null;
+  decoderDisplayName: string | null;
+  decoderVariants: DecoderVariantSummary[];
+}
+
+export interface DecoderVariantSummary {
+  variantId: string;
+  sha256: string;
+  byteLength: number;
+  sourceUrl: string;
+  licenseLabel: string;
+  licenseUrl: string;
+  selected: boolean;
 }
 
 export interface PlayerError {
@@ -78,6 +96,14 @@ export const EMPTY_PLAYER_VIEW = Object.freeze({
     state: "missing",
     displayName: null,
     detail: "Install and select a compatible H3 Codec Pack.",
+    packId: null,
+    packVersion: null,
+    publisherName: null,
+    publisherUrl: null,
+    packLicenseLabel: null,
+    decoderAssetId: null,
+    decoderDisplayName: null,
+    decoderVariants: [],
   },
   positionFrame: 0,
   loopEnabled: false,
@@ -98,7 +124,7 @@ export function controlsFor(view: PlayerView, busy: boolean): PlayerControls {
     open: !busy,
     configureCodec:
       !busy &&
-      view.codec.state === "missing" &&
+      view.codec.state !== "loading" &&
       view.codec.displayName !== null,
     play: playable,
     pause: !busy && view.phase === "playing",
@@ -136,6 +162,15 @@ export function formatFrameRate(view: PlayerView): string {
   const framesPerSecond =
     cartridge.frameRateNumerator / cartridge.frameRateDenominator;
   return `${Number.isInteger(framesPerSecond) ? framesPerSecond : framesPerSecond.toFixed(3)} fps`;
+}
+
+export function describeRuntimeStatus(view: PlayerView): string {
+  if (view.codec.detail !== null) return view.codec.detail;
+  if (view.outputAvailable) return "Native output active";
+  if (view.codec.state === "ready" && view.cartridge !== null) {
+    return "Ready to start playback";
+  }
+  return "Open a cartridge to start playback";
 }
 
 export function progressPercent(view: PlayerView): number {

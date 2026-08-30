@@ -3,6 +3,7 @@ import {
   EMPTY_PLAYER_VIEW,
   acceptTrustedSnapshot,
   controlsFor,
+  describeRuntimeStatus,
   formatFrameRate,
   formatFramePosition,
   progressPercent,
@@ -41,7 +42,29 @@ const READY: PlayerView = {
     frameRateDenominator: 1,
     audioPresent: true,
   },
-  codec: { state: "ready", displayName: "H3", detail: null },
+  codec: {
+    state: "ready",
+    displayName: "H3",
+    detail: null,
+    packId: "org.latentdeck.h3",
+    packVersion: "0.1.0",
+    publisherName: "LatentDeck",
+    publisherUrl: "https://latentdeck.org",
+    packLicenseLabel: "Apache-2.0",
+    decoderAssetId: "taeh3",
+    decoderDisplayName: "TAEH3",
+    decoderVariants: [
+      {
+        variantId: "taeh3-official",
+        sha256: "b".repeat(64),
+        byteLength: 1_024,
+        sourceUrl: "https://example.invalid/taeh3",
+        licenseLabel: "Apache-2.0",
+        licenseUrl: "https://example.invalid/license",
+        selected: true,
+      },
+    ],
+  },
   positionFrame: 0,
   loopEnabled: false,
   outputAvailable: true,
@@ -59,6 +82,16 @@ describe("LatentPlayer presentation state", () => {
       restart: false,
       fullscreen: false,
     });
+  });
+
+  it("allows retrying decoder selection after an incompatible weight", () => {
+    const incompatible = {
+      ...READY,
+      codec: { ...READY.codec, state: "incompatible" as const },
+    };
+
+    expect(controlsFor(incompatible, false).configureCodec).toBe(true);
+    expect(controlsFor(incompatible, false).play).toBe(false);
   });
 
   it("distinguishes play and pause without offering arbitrary seek", () => {
@@ -117,6 +150,13 @@ describe("LatentPlayer presentation state", () => {
         },
       }),
     ).toBe("23.976 fps");
+  });
+
+  it("does not claim that the lazy runtime is connected before native output exists", () => {
+    expect(describeRuntimeStatus({ ...READY, outputAvailable: false })).toBe(
+      "Ready to start playback",
+    );
+    expect(describeRuntimeStatus(READY)).toBe("Native output active");
   });
 
   it("enables Spout controls only after the real SDK opens on native output", () => {

@@ -6,6 +6,7 @@
     EMPTY_PLAYER_VIEW,
     acceptTrustedSnapshot,
     controlsFor,
+    describeRuntimeStatus,
     formatFrameRate,
     formatFramePosition,
     progressPercent,
@@ -27,6 +28,9 @@
 
   const controls = $derived(controlsFor(player, busy));
   const progress = $derived(progressPercent(player));
+  const selectedDecoder = $derived(
+    player.codec.decoderVariants.find((variant) => variant.selected) ?? null,
+  );
   const spoutControls = $derived(spoutControlsFor(spout, busy || spoutBusy));
   const spoutState = $derived(
     spout === null
@@ -151,6 +155,13 @@
     }
   }
 
+  function formatBytes(bytes: number): string {
+    if (!Number.isFinite(bytes) || bytes < 0) return "invalid size";
+    if (bytes < 1024) return `${bytes} B`;
+    const mebibytes = bytes / (1024 * 1024);
+    return `${mebibytes.toFixed(mebibytes >= 100 ? 0 : 1)} MiB`;
+  }
+
   onMount(() => {
     void refreshSnapshot(true);
     void refreshSpout();
@@ -249,13 +260,62 @@
       <span>Codec</span>
       <strong>{player.codec.displayName ?? player.codec.state}</strong>
     </div>
-    <p>{player.codec.detail ?? "Runtime connected"}</p>
+    <p>{describeRuntimeStatus(player)}</p>
     {#if controls.configureCodec}
       <button class="codec-select" onclick={selectDecoder}
         >Select decoder</button
       >
     {/if}
   </footer>
+
+  {#if player.codec.packId !== null}
+    <section class="codec-manager" aria-label="Codec Manager">
+      <header>
+        <div>
+          <span>H3 CODEC PACK</span>
+          <strong>{player.codec.displayName}</strong>
+          <small
+            >{player.codec.packId} · {player.codec.packVersion} ·
+            {player.codec.packLicenseLabel}</small
+          >
+        </div>
+        <div class="codec-compatibility">
+          <span>COMPATIBILITY</span>
+          <strong class:ready={player.codec.state === "ready"}
+            >{player.codec.state}</strong
+          >
+          <small
+            >{selectedDecoder === null
+              ? "No accepted decoder selected"
+              : `Selected ${selectedDecoder.variantId}`}</small
+          >
+        </div>
+      </header>
+      <div class="decoder-variants">
+        {#each player.codec.decoderVariants as variant (variant.variantId)}
+          <article class:selected={variant.selected}>
+            <div>
+              <span
+                >{player.codec.decoderDisplayName ??
+                  player.codec.decoderAssetId}</span
+              >
+              <strong>{variant.variantId}</strong>
+              <small>{formatBytes(variant.byteLength)}</small>
+            </div>
+            <code title={variant.sha256}>SHA-256 {variant.sha256}</code>
+            <nav aria-label={`${variant.variantId} provenance`}>
+              <a href={variant.sourceUrl} target="_blank" rel="noreferrer"
+                >Source</a
+              >
+              <a href={variant.licenseUrl} target="_blank" rel="noreferrer"
+                >{variant.licenseLabel}</a
+              >
+            </nav>
+          </article>
+        {/each}
+      </div>
+    </section>
+  {/if}
 
   <section class="spout-strip" aria-label="Spout2 output">
     <div class="spout-heading">
