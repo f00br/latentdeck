@@ -14,11 +14,15 @@ use std::{
 use latentdeck_core::{
     codec_pack::{ValidatedCodecPack, ValidatedExternalAsset},
     player::{CartridgeSummary, PlayerCoordinator, PlayerLaunchInputs, PlayerView},
+    realtime_diagnostics::{
+        DiagnosticCodecIdentity, DiagnosticGpuIdentity, PlayerDiagnosticSession, SanitizedToken,
+        Sha256Token,
+    },
 };
 use tauri::AppHandle;
 
 use crate::native_output::ResizeOutcome;
-use latentdeck_native_output::NativeSpoutStatus;
+use latentdeck_native_output::{NativeDeviceIdentity, NativeSpoutStatus};
 
 /// Owned, trusted inputs copied from [`PlayerCoordinator::launch_inputs`].
 ///
@@ -56,6 +60,70 @@ impl PlaybackLaunchConfig {
             .map(|inputs| Self::from_launch_inputs(&inputs))
             .map_err(|_| PlaybackRuntimeError::state_not_ready())
     }
+}
+
+/// Complete path-free active-session section consumed by the native bundle host.
+pub(crate) struct PlaybackRuntimeDiagnostics {
+    pub(crate) gpu: DiagnosticGpuIdentity,
+    pub(crate) codec: DiagnosticCodecIdentity,
+    pub(crate) session: PlayerDiagnosticSession,
+}
+
+#[derive(Clone)]
+struct PlaybackDiagnosticIdentity {
+    codec: DiagnosticCodecIdentity,
+    cartridge_sha256: Sha256Token,
+    target_fps: f64,
+}
+
+impl PlaybackDiagnosticIdentity {
+    fn from_config(config: &PlaybackLaunchConfig) -> Result<Self, PlaybackRuntimeError> {
+        let codec = DiagnosticCodecIdentity::new(
+            diagnostic_token("minimax_h3")?,
+            diagnostic_token("h3_av_latent")?,
+            diagnostic_token(&config.codec_pack.manifest.pack_id)?,
+            diagnostic_token(&config.codec_pack.manifest.pack_version)?,
+            diagnostic_token(&config.decoder_asset.asset_id)?,
+            Some(
+                Sha256Token::parse(&config.decoder_asset.sha256)
+                    .map_err(|_| PlaybackRuntimeError::diagnostics_contract())?,
+            ),
+        );
+        let cartridge_sha256 = Sha256Token::parse(&config.cartridge.archive_sha256)
+            .map_err(|_| PlaybackRuntimeError::diagnostics_contract())?;
+        let numerator = u32::try_from(config.cartridge.frame_rate_numerator)
+            .map(f64::from)
+            .map_err(|_| PlaybackRuntimeError::diagnostics_contract())?;
+        let denominator = u32::try_from(config.cartridge.frame_rate_denominator)
+            .map(f64::from)
+            .map_err(|_| PlaybackRuntimeError::diagnostics_contract())?;
+        if numerator <= 0.0 || denominator <= 0.0 {
+            return Err(PlaybackRuntimeError::diagnostics_contract());
+        }
+        Ok(Self {
+            codec,
+            cartridge_sha256,
+            target_fps: numerator / denominator,
+        })
+    }
+}
+
+fn diagnostic_token(value: &str) -> Result<SanitizedToken, PlaybackRuntimeError> {
+    SanitizedToken::parse(value).map_err(|_| PlaybackRuntimeError::diagnostics_contract())
+}
+
+fn diagnostic_gpu_identity(
+    identity: &NativeDeviceIdentity,
+) -> Result<DiagnosticGpuIdentity, PlaybackRuntimeError> {
+    let adapter = SanitizedToken::from_hardware_label(&identity.adapter_name)
+        .map_err(|_| PlaybackRuntimeError::diagnostics_contract())?;
+    let driver_label = format!(
+        "{} {} {}",
+        identity.driver, identity.driver_info, identity.backend
+    );
+    let driver = SanitizedToken::from_hardware_label(&driver_label)
+        .map_err(|_| PlaybackRuntimeError::diagnostics_contract())?;
+    Ok(DiagnosticGpuIdentity::new(adapter, driver))
 }
 
 /// Path-free error returned by the desktop runtime facade.
@@ -188,6 +256,14 @@ impl PlaybackRuntimeError {
         )
     }
 
+    const fn diagnostics_contract() -> Self {
+        Self::new(
+            "diagnostics.contract_invalid",
+            "The active playback session could not be represented safely in a support bundle.",
+            true,
+        )
+    }
+
     const fn output(code: &'static str) -> Self {
         Self::new(
             code,
@@ -207,16 +283,25 @@ impl std::error::Error for PlaybackRuntimeError {}
 
 #[cfg(target_os = "windows")]
 mod windows {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::{
+        collections::VecDeque,
+        sync::atomic::{AtomicBool, Ordering},
+        time::SystemTime,
+    };
 
     use latentdeck_control::{
         Ack, BoundedVec, CodecInspection, CodecLoad, Command, CyclePattern, DecodeCycleAck,
-        EmptyPayload, ErrorCode, ExternalAssetBinding, MAX_CONTROL_FRAME_BYTES, ProfileRef,
-        ResetReason, RingBind, SessionConfigure, ShutdownReason, SlotLoad, SlotLoaded,
+        EmptyPayload, ErrorCode, ExternalAssetBinding, MAX_CONTROL_FRAME_BYTES, MetricsSnapshot,
+        ProfileRef, ResetReason, RingBind, SessionConfigure, ShutdownReason, SlotLoad, SlotLoaded,
         TimingDescriptor, WORKER_PROTOCOL_VERSION, WireUuid,
     };
     use latentdeck_core::{
+        diagnostics::{LogLevel, record_global},
         playback_schedule::PlaybackSchedule,
+        realtime_diagnostics::{
+            MAX_STABLE_ERRORS, PresentationDiagnosticCounters, RealtimeSessionMetrics,
+            StableErrorRecord, StableErrorSource, TimingDistribution, WorkerDiagnosticCounters,
+        },
         worker_client::{WorkerClient, WorkerClientError},
         worker_supervisor::{ValidatedWorkerLaunch, spawn_worker},
     };
@@ -233,8 +318,10 @@ mod windows {
     };
 
     use super::{
-        AppHandle, Arc, CartridgeSummary, Duration, Mutex, NativeSpoutStatus, PlaybackLaunchConfig,
-        PlaybackRuntimeError, PlayerCoordinator, PlayerView, ResizeOutcome, ValidatedCodecPack,
+        AppHandle, Arc, CartridgeSummary, Duration, Mutex, NativeDeviceIdentity, NativeSpoutStatus,
+        PlaybackDiagnosticIdentity, PlaybackLaunchConfig, PlaybackRuntimeDiagnostics,
+        PlaybackRuntimeError, PlayerCoordinator, PlayerDiagnosticSession, PlayerView,
+        ResizeOutcome, ValidatedCodecPack, diagnostic_gpu_identity, diagnostic_token,
     };
     use crate::native_output::{
         NativeOutput, NativeOutputError, PresentOutcome, native_output_config,
@@ -246,6 +333,8 @@ mod windows {
     const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
     const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
     const SCHEDULER_POLL: Duration = Duration::from_millis(2);
+    const DIAGNOSTIC_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+    const MAX_TIMING_SAMPLES: usize = 4_096;
     const INITIAL_GENERATION: u64 = 1;
     const SLOT_ID: &str = "player.a";
     const CODEC_FAMILY: &str = "minimax_h3";
@@ -262,6 +351,8 @@ mod windows {
         at_end: Arc<AtomicBool>,
         reset_in_flight: Arc<AtomicBool>,
         closed: Arc<AtomicBool>,
+        started_at: Instant,
+        diagnostic_identity: PlaybackDiagnosticIdentity,
         _worker_task: JoinHandle<()>,
         _presenter_task: JoinHandle<()>,
     }
@@ -279,6 +370,7 @@ mod windows {
             player: Arc<Mutex<PlayerCoordinator>>,
             config: PlaybackLaunchConfig,
         ) -> Result<Self, PlaybackRuntimeError> {
+            let diagnostic_identity = PlaybackDiagnosticIdentity::from_config(&config)?;
             let launch = ValidatedWorkerLaunch::from_codec_pack(&config.codec_pack);
             let pending = spawn_worker(launch).await.map_err(|_| {
                 let error = PlaybackRuntimeError::worker_start();
@@ -322,6 +414,7 @@ mod windows {
             let closed = Arc::new(AtomicBool::new(false));
             let (worker_tx, worker_rx) = mpsc::channel(CHANNEL_CAPACITY);
             let (presenter_tx, presenter_rx) = mpsc::channel(CHANNEL_CAPACITY);
+            let spout_diagnostics = SpoutDiagnosticHistory::from_status(&output.spout_status());
 
             let presenter = PresenterActor {
                 output,
@@ -342,6 +435,10 @@ mod windows {
                     config.cartridge.frame_rate_denominator,
                 )?,
                 quiesced: true,
+                diagnostic_frames_presented: 0,
+                last_presented_at: None,
+                frame_intervals: TimingSamples::new(MAX_TIMING_SAMPLES),
+                spout_diagnostics,
             };
             let worker = WorkerActor {
                 client,
@@ -368,6 +465,8 @@ mod windows {
                 at_end,
                 reset_in_flight,
                 closed,
+                started_at: Instant::now(),
+                diagnostic_identity,
                 _worker_task: worker_task,
                 _presenter_task: presenter_task,
             })
@@ -508,6 +607,57 @@ mod windows {
                 PresenterReply::Spout(status) => Ok(status),
                 _ => Err(PlaybackRuntimeError::channel_closed()),
             }
+        }
+
+        /// Capture one truthful, path-free active-session diagnostic snapshot.
+        ///
+        /// `None` means the actor session is already closed and callers must
+        /// emit the explicit lifecycle-only `NoActiveSession` form instead.
+        pub async fn diagnostics(
+            &self,
+        ) -> Result<Option<PlaybackRuntimeDiagnostics>, PlaybackRuntimeError> {
+            if self.closed.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+            let worker = request_worker_diagnostics(&self.worker_tx).await?;
+            let PresenterReply::Diagnostics(presenter) = request_presenter(
+                &self.presenter_tx,
+                PresenterRequest::Diagnostics,
+                DIAGNOSTIC_REPLY_TIMEOUT,
+            )
+            .await?
+            else {
+                return Err(PlaybackRuntimeError::channel_closed());
+            };
+            let duration_ms = u64::try_from(self.started_at.elapsed().as_millis())
+                .map_err(|_| PlaybackRuntimeError::diagnostics_contract())?;
+            let worker = WorkerDiagnosticCounters::from_metrics_snapshot(&worker)
+                .map_err(|_| PlaybackRuntimeError::diagnostics_contract())?;
+            let presentation = PresentationDiagnosticCounters::new(
+                presenter.frames_presented,
+                None,
+                Some(presenter.spout_frames_sent),
+            )
+            .map_err(|_| PlaybackRuntimeError::diagnostics_contract())?;
+            let metrics = RealtimeSessionMetrics::new(
+                duration_ms,
+                self.diagnostic_identity.target_fps,
+                presenter.measured_fps,
+                presenter.frame_intervals,
+                presenter.control_latency,
+                worker,
+                presentation,
+                presenter.stable_errors,
+            )
+            .map_err(|_| PlaybackRuntimeError::diagnostics_contract())?;
+            Ok(Some(PlaybackRuntimeDiagnostics {
+                gpu: diagnostic_gpu_identity(&presenter.device)?,
+                codec: self.diagnostic_identity.codec.clone(),
+                session: PlayerDiagnosticSession::new(
+                    self.diagnostic_identity.cartridge_sha256.clone(),
+                    metrics,
+                ),
+            }))
         }
 
         /// Quiesce presentation, request typed worker shutdown, and force-kill
@@ -920,6 +1070,23 @@ mod windows {
                     self.fail(error).await;
                     true
                 }
+                WorkerCommand::Diagnostics { reply } => {
+                    let result = match self
+                        .client
+                        .call(
+                            Command::MetricsGet(EmptyPayload {}),
+                            DIAGNOSTIC_REPLY_TIMEOUT,
+                        )
+                        .await
+                        .map_err(map_worker_error)
+                    {
+                        Ok(Ack::MetricsGet(metrics)) => Ok(metrics),
+                        Ok(_) => Err(PlaybackRuntimeError::worker_protocol()),
+                        Err(error) => Err(error),
+                    };
+                    let _ = reply.send(result);
+                    false
+                }
                 WorkerCommand::Shutdown { reply } => {
                     let result = self.stop(ShutdownReason::ApplicationExit).await;
                     let _ = reply.send(result);
@@ -1069,6 +1236,10 @@ mod windows {
         pending_frame: Option<latentdeck_gpu::ring::RgbaFrame>,
         clock: FrameClock,
         quiesced: bool,
+        diagnostic_frames_presented: u64,
+        last_presented_at: Option<Instant>,
+        frame_intervals: TimingSamples,
+        spout_diagnostics: SpoutDiagnosticHistory,
     }
 
     impl PresenterActor {
@@ -1118,14 +1289,17 @@ mod windows {
 
         async fn handle_command(&mut self, command: PresenterCommand) -> bool {
             let (request, reply) = command.into_parts();
+            let diagnostic_request = matches!(&request, PresenterRequest::Diagnostics);
             let result = match request {
                 PresenterRequest::Resume => {
                     self.quiesced = false;
+                    self.last_presented_at = None;
                     self.clock.restart();
                     Ok(PresenterReply::Unit)
                 }
                 PresenterRequest::Quiesce => {
                     self.quiesced = true;
+                    self.last_presented_at = None;
                     Ok(PresenterReply::Unit)
                 }
                 PresenterRequest::AdoptGeneration(generation) => {
@@ -1145,6 +1319,7 @@ mod windows {
                     if result.is_ok() {
                         self.generation = generation;
                         self.presented_frames = 0;
+                        self.last_presented_at = None;
                         self.clock.restart();
                     }
                     result.map(|()| PresenterReply::Unit)
@@ -1160,19 +1335,25 @@ mod windows {
                     .map(PresenterReply::Resize)
                     .map_err(|error| PlaybackRuntimeError::output(error.code())),
                 PresenterRequest::SpoutStatus => {
-                    Ok(PresenterReply::Spout(self.output.spout_status()))
+                    let status = self.output.spout_status();
+                    self.spout_diagnostics.observe(&status);
+                    Ok(PresenterReply::Spout(status))
                 }
                 PresenterRequest::ConfigureSpout { name, enabled } => {
                     if let Some(name) = name {
                         let _ = self.output.set_spout_name(name);
+                        self.spout_diagnostics.observe(&self.output.spout_status());
                     }
                     if let Some(enabled) = enabled {
                         let _ = self.output.set_spout_enabled(enabled);
+                        self.spout_diagnostics.observe(&self.output.spout_status());
                     }
                     Ok(PresenterReply::Spout(self.output.spout_status()))
                 }
+                PresenterRequest::Diagnostics => self.diagnostic_snapshot(),
                 PresenterRequest::Stop => {
                     self.quiesced = true;
+                    self.last_presented_at = None;
                     self.playing.store(false, Ordering::Release);
                     let result = self
                         .output
@@ -1196,10 +1377,34 @@ mod windows {
                 }
                 Err(error) => {
                     let _ = reply.send(Err(error));
-                    self.fail(error).await;
-                    true
+                    if diagnostic_request {
+                        false
+                    } else {
+                        self.fail(error).await;
+                        true
+                    }
                 }
             }
+        }
+
+        fn diagnostic_snapshot(&mut self) -> Result<PresenterReply, PlaybackRuntimeError> {
+            let frame_intervals = self.frame_intervals.distribution()?;
+            let measured_fps = self.frame_intervals.measured_fps()?;
+            // LatentPlayer does not claim a transport-ack measurement as
+            // control-to-effect latency. Deck soak tests own that metric.
+            let control_latency = TimingDistribution::new(0, 0.0, 0.0, 0.0, 0.0)
+                .map_err(|_| PlaybackRuntimeError::diagnostics_contract())?;
+            let status = self.output.spout_status();
+            self.spout_diagnostics.observe(&status);
+            Ok(PresenterReply::Diagnostics(PresenterDiagnosticSnapshot {
+                device: self.output.device_identity(),
+                frames_presented: self.diagnostic_frames_presented,
+                spout_frames_sent: status.submitted_frames,
+                measured_fps,
+                frame_intervals,
+                control_latency,
+                stable_errors: self.spout_diagnostics.snapshot()?,
+            }))
         }
 
         async fn present_tick(&mut self) -> Result<(), PlaybackRuntimeError> {
@@ -1233,12 +1438,22 @@ mod windows {
                     frame.padded_rgba(),
                 )
                 .map_err(|error| PlaybackRuntimeError::output(error.code()))?;
+            self.spout_diagnostics.observe(&self.output.spout_status());
             if !matches!(
                 outcome,
                 PresentOutcome::Presented | PresentOutcome::PresentedAndReconfigured
             ) {
                 return Ok(());
             }
+            let presented_at = Instant::now();
+            if let Some(previous) = self.last_presented_at.replace(presented_at) {
+                self.frame_intervals
+                    .push(presented_at.saturating_duration_since(previous));
+            }
+            self.diagnostic_frames_presented = self
+                .diagnostic_frames_presented
+                .checked_add(1)
+                .ok_or_else(PlaybackRuntimeError::diagnostics_contract)?;
             self.pending_frame = None;
             self.presented_frames = expected_sequence;
             let position = expected_sequence
@@ -1254,6 +1469,7 @@ mod windows {
         async fn reached_end(&mut self) -> Result<(), PlaybackRuntimeError> {
             self.at_end.store(true, Ordering::Release);
             self.quiesced = true;
+            self.last_presented_at = None;
             let was_playing = self.playing.swap(false, Ordering::AcqRel);
             if was_playing {
                 with_player(&self.player, |player| player.set_playing(false))?;
@@ -1313,7 +1529,18 @@ mod windows {
             name: Option<String>,
             enabled: Option<bool>,
         },
+        Diagnostics,
         Stop,
+    }
+
+    struct PresenterDiagnosticSnapshot {
+        device: NativeDeviceIdentity,
+        frames_presented: u64,
+        spout_frames_sent: u64,
+        measured_fps: f64,
+        frame_intervals: TimingDistribution,
+        control_latency: TimingDistribution,
+        stable_errors: Vec<StableErrorRecord>,
     }
 
     enum PresenterReply {
@@ -1321,6 +1548,7 @@ mod windows {
         Fullscreen(bool),
         Resize(ResizeOutcome),
         Spout(NativeSpoutStatus),
+        Diagnostics(PresenterDiagnosticSnapshot),
     }
 
     struct PresenterCommand {
@@ -1346,6 +1574,9 @@ mod windows {
             reply: Option<oneshot::Sender<Result<PlayerView, PlaybackRuntimeError>>>,
         },
         PresenterFault(PlaybackRuntimeError),
+        Diagnostics {
+            reply: oneshot::Sender<Result<MetricsSnapshot, PlaybackRuntimeError>>,
+        },
         Shutdown {
             reply: oneshot::Sender<Result<(), PlaybackRuntimeError>>,
         },
@@ -1367,6 +1598,19 @@ mod windows {
         )
         .await?;
         receive_bounded(reply_rx, deadline).await?
+    }
+
+    async fn request_worker_diagnostics(
+        sender: &mpsc::Sender<WorkerCommand>,
+    ) -> Result<MetricsSnapshot, PlaybackRuntimeError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        send_bounded(
+            sender,
+            WorkerCommand::Diagnostics { reply: reply_tx },
+            DIAGNOSTIC_REPLY_TIMEOUT,
+        )
+        .await?;
+        receive_bounded(reply_rx, DIAGNOSTIC_REPLY_TIMEOUT).await?
     }
 
     async fn send_bounded<T>(
@@ -1569,8 +1813,144 @@ mod windows {
     }
 
     fn record_runtime_error(player: &Arc<Mutex<PlayerCoordinator>>, error: PlaybackRuntimeError) {
+        record_global(LogLevel::Error, "player.runtime_failed", Some(error.code));
         if let Ok(mut player) = player.lock() {
             let _ = player.set_runtime_error(error.code, error.message, error.recoverable);
+        }
+    }
+
+    /// Presenter-owned history of stable Spout error transitions.
+    ///
+    /// The native boundary exposes only static path-free codes. Repeated polls
+    /// of one unchanged failure do not create duplicate records; recovery to a
+    /// clear status allows the same code to be recorded if it later recurs.
+    struct SpoutDiagnosticHistory {
+        last_error_code: Option<&'static str>,
+        records: VecDeque<StableErrorRecord>,
+        capture_failed: bool,
+    }
+
+    impl SpoutDiagnosticHistory {
+        fn from_status(status: &NativeSpoutStatus) -> Self {
+            let mut history = Self {
+                last_error_code: None,
+                records: VecDeque::with_capacity(MAX_STABLE_ERRORS),
+                capture_failed: false,
+            };
+            history.observe(status);
+            history
+        }
+
+        fn observe(&mut self, status: &NativeSpoutStatus) {
+            if status.last_error_code == self.last_error_code {
+                return;
+            }
+            self.last_error_code = status.last_error_code;
+            let Some(code) = status.last_error_code else {
+                return;
+            };
+            let record = diagnostic_unix_ms().and_then(|timestamp| {
+                StableErrorRecord::new(
+                    timestamp,
+                    StableErrorSource::Presentation,
+                    diagnostic_token(code)?,
+                )
+                .map_err(|_| PlaybackRuntimeError::diagnostics_contract())
+            });
+            match record {
+                Ok(record) => {
+                    if self.records.len() == MAX_STABLE_ERRORS {
+                        let _ = self.records.pop_front();
+                    }
+                    self.records.push_back(record);
+                }
+                Err(_) => self.capture_failed = true,
+            }
+        }
+
+        fn snapshot(&self) -> Result<Vec<StableErrorRecord>, PlaybackRuntimeError> {
+            if self.capture_failed {
+                return Err(PlaybackRuntimeError::diagnostics_contract());
+            }
+            Ok(self.records.iter().cloned().collect())
+        }
+    }
+
+    fn diagnostic_unix_ms() -> Result<u64, PlaybackRuntimeError> {
+        let milliseconds = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|_| PlaybackRuntimeError::diagnostics_contract())?
+            .as_millis();
+        u64::try_from(milliseconds).map_err(|_| PlaybackRuntimeError::diagnostics_contract())
+    }
+
+    struct TimingSamples {
+        samples_ms: VecDeque<f64>,
+        capacity: usize,
+    }
+
+    impl TimingSamples {
+        fn new(capacity: usize) -> Self {
+            debug_assert!(capacity > 0);
+            Self {
+                samples_ms: VecDeque::with_capacity(capacity),
+                capacity,
+            }
+        }
+
+        fn push(&mut self, duration: Duration) {
+            if self.samples_ms.len() == self.capacity {
+                let _ = self.samples_ms.pop_front();
+            }
+            self.samples_ms.push_back(duration.as_secs_f64() * 1_000.0);
+        }
+
+        fn distribution(&self) -> Result<TimingDistribution, PlaybackRuntimeError> {
+            if self.samples_ms.is_empty() {
+                return TimingDistribution::new(0, 0.0, 0.0, 0.0, 0.0)
+                    .map_err(|_| PlaybackRuntimeError::diagnostics_contract());
+            }
+            let mut sorted = self.samples_ms.iter().copied().collect::<Vec<_>>();
+            sorted.sort_by(f64::total_cmp);
+            let sample_count = u64::try_from(sorted.len())
+                .map_err(|_| PlaybackRuntimeError::diagnostics_contract())?;
+            let divisor = u32::try_from(sorted.len())
+                .map(f64::from)
+                .map_err(|_| PlaybackRuntimeError::diagnostics_contract())?;
+            let sum = sorted.iter().try_fold(0.0, |total, value| {
+                let next = total + value;
+                next.is_finite().then_some(next)
+            });
+            let mean = sum.ok_or_else(PlaybackRuntimeError::diagnostics_contract)? / divisor;
+            let p95_rank = sorted.len().saturating_mul(95).div_ceil(100);
+            let p95_index = p95_rank.saturating_sub(1);
+            TimingDistribution::new(
+                sample_count,
+                sorted[0],
+                mean,
+                sorted[p95_index],
+                sorted[sorted.len() - 1],
+            )
+            .map_err(|_| PlaybackRuntimeError::diagnostics_contract())
+        }
+
+        fn measured_fps(&self) -> Result<f64, PlaybackRuntimeError> {
+            if self.samples_ms.is_empty() {
+                return Ok(0.0);
+            }
+            let sum = self.samples_ms.iter().try_fold(0.0, |total, value| {
+                let next = total + value;
+                next.is_finite().then_some(next)
+            });
+            let count = u32::try_from(self.samples_ms.len())
+                .map(f64::from)
+                .map_err(|_| PlaybackRuntimeError::diagnostics_contract())?;
+            let mean = sum.ok_or_else(PlaybackRuntimeError::diagnostics_contract)? / count;
+            if mean <= f64::EPSILON {
+                Ok(0.0)
+            } else {
+                Ok(1_000.0 / mean)
+            }
         }
     }
 
@@ -1660,6 +2040,77 @@ mod windows {
             assert!(expected_cycle_frames(&timing, 2).is_err());
         }
 
+        #[test]
+        fn timing_samples_keep_only_the_latest_bounded_observations() {
+            let mut samples = TimingSamples::new(3);
+            for milliseconds in [10, 20, 30, 40] {
+                samples.push(Duration::from_millis(milliseconds));
+            }
+
+            let value = serde_json::to_value(samples.distribution().expect("distribution"))
+                .expect("serialize");
+            assert_eq!(value["sample_count"], 3);
+            assert_eq!(value["min_ms"], 20.0);
+            assert_eq!(value["mean_ms"], 30.0);
+            assert_eq!(value["p95_ms"], 40.0);
+            assert_eq!(value["max_ms"], 40.0);
+            assert!((samples.measured_fps().expect("fps") - (1_000.0 / 30.0)).abs() < 0.001);
+        }
+
+        #[test]
+        fn spout_diagnostics_record_only_bounded_stable_error_transitions() {
+            let clear = spout_status(None);
+            let unavailable = spout_status(Some("output.spout_unavailable"));
+            let invalid_name = spout_status(Some("output.spout_name_invalid"));
+            let mut history = SpoutDiagnosticHistory::from_status(&clear);
+
+            history.observe(&unavailable);
+            history.observe(&unavailable);
+            let first = history.snapshot().expect("first transition");
+            assert_eq!(first.len(), 1);
+            let first = serde_json::to_value(&first).expect("serialize first transition");
+            assert_eq!(first[0]["source"], "presentation");
+            assert_eq!(first[0]["code"], "output.spout_unavailable");
+
+            history.observe(&clear);
+            history.observe(&unavailable);
+            assert_eq!(history.snapshot().expect("recurring transition").len(), 2);
+
+            for index in 0..=MAX_STABLE_ERRORS {
+                history.observe(if index % 2 == 0 {
+                    &invalid_name
+                } else {
+                    &unavailable
+                });
+            }
+            let bounded = history.snapshot().expect("bounded transitions");
+            assert_eq!(bounded.len(), MAX_STABLE_ERRORS);
+            let bounded = serde_json::to_value(bounded).expect("serialize bounded transitions");
+            assert_eq!(
+                bounded[MAX_STABLE_ERRORS - 1]["code"],
+                "output.spout_name_invalid"
+            );
+            assert!(!bounded.to_string().contains("path"));
+        }
+
+        fn spout_status(last_error_code: Option<&'static str>) -> NativeSpoutStatus {
+            NativeSpoutStatus {
+                sdk_built: true,
+                ready: true,
+                enabled: false,
+                published: false,
+                requested_name: "LatentPlayer Output".to_owned(),
+                active_name: "LatentPlayer Output".to_owned(),
+                width: 448,
+                height: 800,
+                format: "rgba8_unorm",
+                submitted_frames: 0,
+                last_sequence: None,
+                spout_frame: None,
+                last_error_code,
+            }
+        }
+
         fn pattern(first_cycle_index: u64, cycle_count: u64, decoded_count: u32) -> CyclePattern {
             CyclePattern {
                 first_cycle_index,
@@ -1731,6 +2182,12 @@ impl PlaybackRuntime {
         Err(PlaybackRuntimeError::unsupported())
     }
 
+    pub async fn diagnostics(
+        &self,
+    ) -> Result<Option<PlaybackRuntimeDiagnostics>, PlaybackRuntimeError> {
+        Ok(None)
+    }
+
     pub async fn shutdown(&self) -> Result<(), PlaybackRuntimeError> {
         Err(PlaybackRuntimeError::unsupported())
     }
@@ -1746,5 +2203,26 @@ mod common_tests {
         assert_eq!(error.code, "worker.protocol_failed");
         assert!(error.message.len() < 256);
         assert!(!error.message.contains(':'));
+    }
+
+    #[test]
+    fn gpu_identity_contains_only_sanitized_native_tokens() {
+        let identity = NativeDeviceIdentity {
+            adapter_name: "NVIDIA GeForce RTX 4070".to_owned(),
+            backend: "dx12",
+            driver: "NVIDIA".to_owned(),
+            driver_info: "32.0.15.1234".to_owned(),
+            vendor_id: 0x10de,
+            device_id: 0x2786,
+            device_type: "discrete_gpu",
+        };
+        let diagnostic = diagnostic_gpu_identity(&identity).expect("diagnostic identity");
+        let json = serde_json::to_string(&diagnostic).expect("serialize");
+
+        assert!(json.contains("NVIDIA-GeForce-RTX-4070"));
+        assert!(json.contains("NVIDIA-32.0.15.1234-dx12"));
+        assert!(!json.contains("vendor"));
+        assert!(!json.contains("device_id"));
+        assert!(!json.contains('\\'));
     }
 }

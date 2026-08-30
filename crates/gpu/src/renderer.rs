@@ -9,6 +9,84 @@ use crate::ring::{RgbaFrame, RingError, RingLayout};
 /// Texture format used between the decoded-frame upload and presentation pass.
 pub const FRAME_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
+/// Integer-pixel aspect-fit rectangle inside a non-zero presentation target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AspectFitViewport {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+impl AspectFitViewport {
+    /// Left edge in physical target pixels.
+    #[must_use]
+    pub const fn x(self) -> u32 {
+        self.x
+    }
+
+    /// Top edge in physical target pixels.
+    #[must_use]
+    pub const fn y(self) -> u32 {
+        self.y
+    }
+
+    /// Fitted width in physical target pixels.
+    #[must_use]
+    pub const fn width(self) -> u32 {
+        self.width
+    }
+
+    /// Fitted height in physical target pixels.
+    #[must_use]
+    pub const fn height(self) -> u32 {
+        self.height
+    }
+}
+
+/// Calculate a centered integer viewport without cropping or changing aspect.
+///
+/// The unused target area is intentionally left for a black clear, yielding
+/// letterboxing or pillarboxing while the intrinsic frame texture stays exact.
+///
+/// # Errors
+///
+/// Returns an error for zero source/target dimensions or an impossible integer
+/// conversion.
+pub fn aspect_fit_viewport(
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+) -> Result<AspectFitViewport, RendererError> {
+    if source_width == 0 || source_height == 0 || target_width == 0 || target_height == 0 {
+        return Err(RendererError::ZeroSurfaceSize);
+    }
+    let source_across_target = u64::from(source_width) * u64::from(target_height);
+    let target_across_source = u64::from(target_width) * u64::from(source_height);
+    let (width, height) = if source_across_target > target_across_source {
+        let height =
+            (u64::from(target_width) * u64::from(source_height) / u64::from(source_width)).max(1);
+        (
+            target_width,
+            u32::try_from(height).map_err(|_| RendererError::PresentationViewportOverflow)?,
+        )
+    } else {
+        let width =
+            (u64::from(target_height) * u64::from(source_width) / u64::from(source_height)).max(1);
+        (
+            u32::try_from(width).map_err(|_| RendererError::PresentationViewportOverflow)?,
+            target_height,
+        )
+    };
+    Ok(AspectFitViewport {
+        x: (target_width - width) / 2,
+        y: (target_height - height) / 2,
+        width,
+        height,
+    })
+}
+
 /// Returns the exact native instance policy used by `LatentDeck` presentation.
 ///
 /// The caller may safely create a `wgpu::Surface` from any owned raw-window-
@@ -299,7 +377,44 @@ impl RgbaFrameRenderer {
     }
 
     /// Records a black clear and one fullscreen triangle into `target`.
+    ///
+    /// This exact-target primitive remains useful for same-size/offscreen
+    /// targets. Resizable windows should call [`Self::encode_aspect_fit`].
     pub fn encode(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        self.encode_with_viewport(encoder, target, None);
+    }
+
+    /// Records a black clear, then centers the intrinsic frame without crop or
+    /// aspect distortion inside the current non-zero presentation extent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the presentation extent is zero or cannot be
+    /// represented safely.
+    pub fn encode_aspect_fit(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        target_width: u32,
+        target_height: u32,
+    ) -> Result<(), RendererError> {
+        let viewport = aspect_fit_viewport(
+            self.frame_layout.width(),
+            self.frame_layout.height(),
+            target_width,
+            target_height,
+        )?;
+        self.encode_with_viewport(encoder, target, Some(viewport));
+        Ok(())
+    }
+
+    #[allow(clippy::cast_precision_loss)] // wgpu viewport coordinates are f32.
+    fn encode_with_viewport(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        viewport: Option<AspectFitViewport>,
+    ) {
         let color_attachment = Some(wgpu::RenderPassColorAttachment {
             view: target,
             depth_slice: None,
@@ -319,6 +434,16 @@ impl RgbaFrameRenderer {
         });
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.frame_bind_group, &[]);
+        if let Some(viewport) = viewport {
+            render_pass.set_viewport(
+                viewport.x as f32,
+                viewport.y as f32,
+                viewport.width as f32,
+                viewport.height as f32,
+                0.0,
+                1.0,
+            );
+        }
         render_pass.draw(0..3, 0..1);
     }
 
@@ -464,10 +589,57 @@ pub enum RendererError {
     /// Surface configuration cannot use zero physical dimensions.
     #[error("surface dimensions must be non-zero")]
     ZeroSurfaceSize,
+    /// Aspect-fit presentation geometry exceeded its integer representation.
+    #[error("presentation viewport dimensions overflow")]
+    PresentationViewportOverflow,
     /// The chosen surface and adapter expose no compatible configuration.
     #[error("surface is not compatible with the selected DX12 adapter")]
     SurfaceUnsupported,
     /// Program texture dimensions violate the bounded ring layout.
     #[error("invalid renderer frame layout: {0}")]
     InvalidFrameLayout(#[source] RingError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portrait_frame_is_pillarboxed_inside_a_wide_surface() {
+        assert_eq!(
+            aspect_fit_viewport(448, 800, 1_600, 900).expect("viewport"),
+            AspectFitViewport {
+                x: 548,
+                y: 0,
+                width: 504,
+                height: 900,
+            }
+        );
+    }
+
+    #[test]
+    fn landscape_frame_is_letterboxed_inside_a_tall_surface() {
+        assert_eq!(
+            aspect_fit_viewport(800, 448, 900, 1_600).expect("viewport"),
+            AspectFitViewport {
+                x: 0,
+                y: 548,
+                width: 900,
+                height: 504,
+            }
+        );
+    }
+
+    #[test]
+    fn equal_aspect_fills_the_entire_surface() {
+        assert_eq!(
+            aspect_fit_viewport(800, 448, 1_600, 896).expect("viewport"),
+            AspectFitViewport {
+                x: 0,
+                y: 0,
+                width: 1_600,
+                height: 896,
+            }
+        );
+    }
 }

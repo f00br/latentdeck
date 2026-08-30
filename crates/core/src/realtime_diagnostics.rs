@@ -622,10 +622,16 @@ impl PlayerDiagnosticSession {
     }
 }
 
-/// Explicit startup/missing-codec state when realtime never began.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+/// Explicit lifecycle-only state when no realtime actor is active at capture.
+///
+/// This form never invents performance counters. When a prior actor failed,
+/// `last_error_code` preserves the stable failure identity without exception
+/// text or a machine path.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct InactiveApplicationDiagnosticSession {
     no_active_session: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error_code: Option<SanitizedToken>,
 }
 
 impl InactiveApplicationDiagnosticSession {
@@ -634,6 +640,16 @@ impl InactiveApplicationDiagnosticSession {
     pub const fn new() -> Self {
         Self {
             no_active_session: true,
+            last_error_code: None,
+        }
+    }
+
+    /// Attach the stable final runtime error to a lifecycle-only snapshot.
+    #[must_use]
+    pub const fn with_last_error(last_error_code: SanitizedToken) -> Self {
+        Self {
+            no_active_session: true,
+            last_error_code: Some(last_error_code),
         }
     }
 }
@@ -647,7 +663,8 @@ impl Default for InactiveApplicationDiagnosticSession {
 /// One of the supported 0.1 application session kinds.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RealtimeDiagnosticSession {
-    /// Startup or missing-codec evidence with no realtime activity.
+    /// No active actor at capture; an optional stable final error distinguishes
+    /// startup/missing-codec state from an ended failed session.
     NoActiveSession(InactiveApplicationDiagnosticSession),
     /// LD-D2 synthesis session.
     DeckD2(D2DiagnosticSession),

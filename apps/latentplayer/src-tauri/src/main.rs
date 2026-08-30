@@ -2,7 +2,9 @@ use std::sync::{
     Arc, Mutex, MutexGuard,
     atomic::{AtomicBool, Ordering},
 };
+use std::{path::PathBuf, time::SystemTime};
 
+mod diagnostic_state;
 mod native_output;
 mod playback_runtime;
 
@@ -10,13 +12,18 @@ use latentdeck_core::{
     codec_pack::default_codec_pack_roots,
     diagnostics::{LogLevel, initialize_global_json_log, record_global},
     player::{PlayerCoordinator, PlayerCoordinatorError, PlayerView},
+    realtime_diagnostics::RealtimeDiagnosticError,
 };
 use latentdeck_native_output::NativeSpoutStatus;
 use playback_runtime::{PlaybackLaunchConfig, PlaybackRuntime, PlaybackRuntimeError};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, RunEvent, State, WindowEvent};
+use tauri_plugin_dialog::DialogExt as _;
 use tokio::sync::Mutex as AsyncMutex;
 
+use crate::diagnostic_state::{
+    DiagnosticSaveResult, active_snapshot, inactive_snapshot, write_player_bundle,
+};
 use crate::native_output::NATIVE_OUTPUT_WINDOW_LABEL;
 
 struct AppState {
@@ -44,15 +51,25 @@ impl AppState {
 struct CommandError {
     code: String,
     message: String,
+    recoverable: bool,
 }
 
 impl CommandError {
     fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::with_recoverability(code, message, true)
+    }
+
+    fn with_recoverability(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        recoverable: bool,
+    ) -> Self {
         let code = code.into();
         record_global(LogLevel::Error, "player.command_failed", Some(&code));
         Self {
             code,
             message: message.into(),
+            recoverable,
         }
     }
 
@@ -72,7 +89,34 @@ impl From<PlayerCoordinatorError> for CommandError {
 
 impl From<PlaybackRuntimeError> for CommandError {
     fn from(error: PlaybackRuntimeError) -> Self {
-        Self::new(error.code, error.message)
+        Self::with_recoverability(error.code, error.message, error.recoverable)
+    }
+}
+
+impl From<RealtimeDiagnosticError> for CommandError {
+    fn from(error: RealtimeDiagnosticError) -> Self {
+        match error {
+            RealtimeDiagnosticError::OutputExists => Self::new(
+                "diagnostics.output_exists",
+                "The selected diagnostic archive already exists and was not overwritten. Choose a new file name.",
+            ),
+            RealtimeDiagnosticError::InvalidDestination => Self::new(
+                "diagnostics.destination_invalid",
+                "Choose a writable local folder and a .zip file name for the diagnostic archive.",
+            ),
+            RealtimeDiagnosticError::LimitExceeded(_) => Self::new(
+                "diagnostics.limit_exceeded",
+                "The bounded diagnostic evidence exceeded its safety limit; older logs can be removed before retrying.",
+            ),
+            RealtimeDiagnosticError::Io { .. } => Self::new(
+                "diagnostics.write_failed",
+                "The diagnostic archive could not be written. Check folder permissions and try another file name.",
+            ),
+            _ => Self::new(
+                "diagnostics.contract_invalid",
+                "LatentPlayer could not create a safe diagnostic snapshot from the current state.",
+            ),
+        }
     }
 }
 
@@ -298,6 +342,112 @@ async fn player_spout_configure(
         .map_err(Into::into)
 }
 
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri command extractors own their values.
+async fn player_save_diagnostics(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DiagnosticSaveResult, CommandError> {
+    let suggested_name = format!(
+        "latentplayer-diagnostics-{}.zip",
+        current_unix_ms()? / 1_000
+    );
+    let selected = app
+        .dialog()
+        .file()
+        .add_filter("LatentPlayer Diagnostic Bundle", &["zip"])
+        .set_file_name(suggested_name)
+        .blocking_save_file();
+    let Some(selected) = selected else {
+        return Ok(DiagnosticSaveResult::Cancelled);
+    };
+    let destination = validate_diagnostic_destination(selected.into_path().map_err(|_| {
+        CommandError::new(
+            "diagnostics.destination_invalid",
+            "The native save dialog did not return a usable diagnostic archive path.",
+        )
+    })?)?;
+
+    let active = {
+        let runtime = state.runtime.lock().await;
+        match runtime.as_ref() {
+            Some(runtime) => runtime.diagnostics().await?,
+            None => None,
+        }
+    };
+    let captured_at_unix_ms = current_unix_ms()?;
+    let snapshot = match active {
+        Some(diagnostics) => active_snapshot(captured_at_unix_ms, diagnostics)?,
+        None => inactive_snapshot(captured_at_unix_ms, &trusted_snapshot(&state.player)?)?,
+    };
+    let player_log_root = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|_| {
+            CommandError::new(
+                "diagnostics.log_root_unavailable",
+                "LatentPlayer could not resolve its installed diagnostic log folder.",
+            )
+        })?
+        .join("logs");
+    let worker_log_root = std::env::temp_dir()
+        .join("LatentDeck")
+        .join("worker-diagnostics");
+
+    let receipt = tauri::async_runtime::spawn_blocking(move || {
+        write_player_bundle(&destination, &snapshot, &player_log_root, &worker_log_root)
+    })
+    .await
+    .map_err(|_| {
+        CommandError::new(
+            "diagnostics.task_failed",
+            "The diagnostic archive task stopped unexpectedly; retry with a new file name.",
+        )
+    })??;
+    record_global(LogLevel::Info, "diagnostics.bundle_saved", None);
+    Ok(receipt.into())
+}
+
+fn current_unix_ms() -> Result<u64, CommandError> {
+    let milliseconds = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|_| {
+            CommandError::new(
+                "diagnostics.clock_invalid",
+                "The system clock cannot represent a diagnostic timestamp.",
+            )
+        })?
+        .as_millis();
+    u64::try_from(milliseconds).map_err(|_| {
+        CommandError::new(
+            "diagnostics.clock_invalid",
+            "The system clock cannot represent a diagnostic timestamp.",
+        )
+    })
+}
+
+fn validate_diagnostic_destination(mut path: PathBuf) -> Result<PathBuf, CommandError> {
+    if !path.is_absolute() {
+        return Err(CommandError::new(
+            "diagnostics.destination_invalid",
+            "Choose an absolute local destination for the diagnostic archive.",
+        ));
+    }
+    match path.extension().and_then(|extension| extension.to_str()) {
+        None => {
+            let _ = path.set_extension("zip");
+        }
+        Some(extension) if extension.eq_ignore_ascii_case("zip") => {}
+        Some(_) => {
+            return Err(CommandError::new(
+                "diagnostics.destination_invalid",
+                "The diagnostic archive file name must use the .zip extension.",
+            ));
+        }
+    }
+    Ok(path)
+}
+
 fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -351,6 +501,7 @@ fn main() {
             player_fullscreen,
             player_spout_status,
             player_spout_configure,
+            player_save_diagnostics,
         ])
         .build(tauri::generate_context!())
         .expect("LatentPlayer application runtime failed");
@@ -374,4 +525,42 @@ fn main() {
             });
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_destination_is_absolute_and_gets_a_zip_extension() {
+        let destination = std::env::temp_dir().join("latentplayer-support");
+        let validated = validate_diagnostic_destination(destination).expect("destination");
+
+        assert!(validated.is_absolute());
+        assert_eq!(
+            validated.extension().and_then(|value| value.to_str()),
+            Some("zip")
+        );
+    }
+
+    #[test]
+    fn diagnostic_destination_rejects_a_different_extension() {
+        let destination = std::env::temp_dir().join("latentplayer-support.txt");
+        let error = validate_diagnostic_destination(destination).expect_err("must reject");
+
+        assert_eq!(error.code, "diagnostics.destination_invalid");
+        assert!(error.recoverable);
+    }
+
+    #[test]
+    fn output_collision_error_is_recoverable_and_path_free() {
+        let error = CommandError::from(RealtimeDiagnosticError::OutputExists);
+        let value = serde_json::to_value(error).expect("serialize");
+
+        assert_eq!(value["code"], "diagnostics.output_exists");
+        assert_eq!(value["recoverable"], true);
+        let json = value.to_string();
+        assert!(!json.contains("C:\\"));
+        assert!(!json.contains("W:\\"));
+    }
 }

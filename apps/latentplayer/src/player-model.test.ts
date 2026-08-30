@@ -3,12 +3,15 @@ import {
   EMPTY_PLAYER_VIEW,
   acceptTrustedSnapshot,
   controlsFor,
+  describeDiagnosticSaveResult,
   describeRuntimeStatus,
+  diagnosticSaveEnabled,
   formatFrameRate,
   formatFramePosition,
   progressPercent,
   spoutControlsFor,
   type SpoutStatus,
+  type DiagnosticSaveResult,
   type PlayerView,
 } from "./player-model";
 
@@ -175,5 +178,28 @@ describe("LatentPlayer presentation state", () => {
       rename: false,
       toggle: false,
     });
+  });
+
+  it("keeps lifecycle-only diagnostics available without a cartridge or codec", () => {
+    expect(diagnosticSaveEnabled(false)).toBe(true);
+    expect(diagnosticSaveEnabled(true)).toBe(false);
+    expect(controlsFor(EMPTY_PLAYER_VIEW, false).play).toBe(false);
+  });
+
+  it("describes saved and cancelled native diagnostic results without a path", () => {
+    const saved: DiagnosticSaveResult = {
+      status: "saved",
+      archiveBytes: 4_096,
+      eventCount: 2,
+      schemaVersion: 1,
+    };
+
+    expect(describeDiagnosticSaveResult(saved)).toBe(
+      "Diagnostic bundle saved · 4.0 KiB · 2 events · schema 1",
+    );
+    expect(Object.keys(saved)).not.toContain("path");
+    expect(describeDiagnosticSaveResult({ status: "cancelled" })).toContain(
+      "cancelled",
+    );
   });
 });

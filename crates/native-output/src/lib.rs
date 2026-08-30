@@ -112,6 +112,30 @@ pub struct NativeSpoutStatus {
     pub last_error_code: Option<&'static str>,
 }
 
+/// Bounded path-free GPU identity suitable for a local support bundle.
+///
+/// The raw backend strings are normalized to a small printable allowlist so a
+/// driver cannot inject a machine path or arbitrary diagnostic text into a
+/// shareable report.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeDeviceIdentity {
+    /// Human-readable adapter name, normalized and capped at 96 bytes.
+    pub adapter_name: String,
+    /// Exact renderer backend selected by the v0.1 contract.
+    pub backend: &'static str,
+    /// Driver family, normalized and capped at 96 bytes.
+    pub driver: String,
+    /// Driver version/detail, normalized and capped at 96 bytes.
+    pub driver_info: String,
+    /// PCI vendor identity reported by wgpu.
+    pub vendor_id: u32,
+    /// PCI device identity reported by wgpu.
+    pub device_id: u32,
+    /// Stable coarse adapter class.
+    pub device_type: &'static str,
+}
+
 /// Result of applying a physical-window resize event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResizeOutcome {
@@ -345,6 +369,27 @@ impl NativeOutput {
         (layout.width(), layout.height())
     }
 
+    /// Return a bounded, path-free identity for support diagnostics.
+    #[must_use]
+    pub fn device_identity(&self) -> NativeDeviceIdentity {
+        let info = self.dx12.adapter().get_info();
+        NativeDeviceIdentity {
+            adapter_name: sanitize_device_identity(&info.name),
+            backend: "dx12",
+            driver: sanitize_device_identity(&info.driver),
+            driver_info: sanitize_device_identity(&info.driver_info),
+            vendor_id: info.vendor,
+            device_id: info.device,
+            device_type: match info.device_type {
+                wgpu::DeviceType::DiscreteGpu => "discrete_gpu",
+                wgpu::DeviceType::IntegratedGpu => "integrated_gpu",
+                wgpu::DeviceType::VirtualGpu => "virtual_gpu",
+                wgpu::DeviceType::Cpu => "cpu",
+                wgpu::DeviceType::Other => "other",
+            },
+        }
+    }
+
     /// Return the latest sanitized Spout sender state without native I/O.
     #[must_use]
     pub fn spout_status(&self) -> NativeSpoutStatus {
@@ -527,7 +572,11 @@ impl NativeOutput {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("LatentDeck native output present"),
                 });
-        self.renderer.encode(&mut encoder, &view);
+        let (surface_width, surface_height) =
+            self.surface_extent.ok_or(NativeOutputError::WindowSize)?;
+        self.renderer
+            .encode_aspect_fit(&mut encoder, &view, surface_width, surface_height)
+            .map_err(|_| NativeOutputError::RendererInitialization)?;
         self.dx12.queue().submit([encoder.finish()]);
         self.dx12.queue().present(surface_texture);
         self.poll_gpu_health()
@@ -627,6 +676,52 @@ fn validated_upload(
         .map_err(|_| NativeOutputError::FrameRejected)
 }
 
+fn sanitize_device_identity(value: &str) -> String {
+    const MAX_BYTES: usize = 96;
+    let trimmed = value.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.is_empty()
+        || !trimmed.is_ascii()
+        || trimmed.len() > MAX_BYTES * 4
+        || trimmed.contains(['/', '\\', ':', '$', '%', '@', '\n', '\r'])
+        || trimmed.contains("..")
+        || lower.contains("password=")
+        || lower.contains("secret=")
+        || lower.contains("token=")
+        || lower.contains("api_key=")
+        || lower.contains("apikey=")
+        || lower.contains("bearer ")
+    {
+        return "unknown".to_owned();
+    }
+
+    let mut output = String::with_capacity(trimmed.len().min(MAX_BYTES));
+    let mut previous_replacement = false;
+    for byte in trimmed.bytes() {
+        if output.len() >= MAX_BYTES {
+            break;
+        }
+        let accepted = byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b' ' | b'.' | b'_' | b'-' | b'+' | b'(' | b')' | b'[' | b']'
+            );
+        if accepted {
+            output.push(char::from(byte));
+            previous_replacement = false;
+        } else if !previous_replacement {
+            output.push('_');
+            previous_replacement = true;
+        }
+    }
+    let trimmed = output.trim_matches([' ', '_']);
+    if trimmed.is_empty() {
+        "unknown".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ResizeDecision {
     Suspend,
@@ -722,6 +817,20 @@ mod tests {
             latentdeck_gpu::renderer::dx12_instance_descriptor().backends,
             wgpu::Backends::DX12
         );
+    }
+
+    #[test]
+    fn device_identity_text_is_bounded_and_cannot_contain_a_path() {
+        let value = sanitize_device_identity("NVIDIA GeForce RTX 4070 (AD104)");
+        assert!(value.len() <= 96);
+        assert_eq!(value, "NVIDIA GeForce RTX 4070 (AD104)");
+        assert_eq!(
+            sanitize_device_identity("NVIDIA C:\\Users\\owner\\driver.dll"),
+            "unknown"
+        );
+        assert_eq!(sanitize_device_identity("token=private"), "unknown");
+        assert_eq!(sanitize_device_identity("driver\nprivate"), "unknown");
+        assert_eq!(sanitize_device_identity("///"), "unknown");
     }
 
     #[test]

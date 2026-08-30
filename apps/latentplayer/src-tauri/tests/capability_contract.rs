@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 #[test]
-fn main_window_can_open_cartridges_and_decoder_weights_without_broad_file_access() {
+fn main_window_cannot_receive_a_native_diagnostic_destination_path() {
     let capability: Value = serde_json::from_str(include_str!("../capabilities/main.json"))
         .expect("LatentPlayer capability JSON");
 

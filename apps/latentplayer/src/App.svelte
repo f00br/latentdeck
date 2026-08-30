@@ -6,12 +6,15 @@
     EMPTY_PLAYER_VIEW,
     acceptTrustedSnapshot,
     controlsFor,
+    describeDiagnosticSaveResult,
     describeRuntimeStatus,
+    diagnosticSaveEnabled,
     formatFrameRate,
     formatFramePosition,
     progressPercent,
     spoutControlsFor,
     type PlayerView,
+    type DiagnosticSaveResult,
     type SpoutStatus,
   } from "./player-model";
   import { product } from "./product";
@@ -25,6 +28,11 @@
   let spoutName = $state("LatentPlayer Output");
   let spoutNameDirty = $state(false);
   let spoutPending = false;
+  let diagnosticBusy = $state(false);
+  let diagnosticTone = $state<"idle" | "success" | "error">("idle");
+  let diagnosticStatus = $state(
+    "Save a path-free support bundle from the current Player lifecycle state.",
+  );
 
   const controls = $derived(controlsFor(player, busy));
   const progress = $derived(progressPercent(player));
@@ -32,6 +40,7 @@
     player.codec.decoderVariants.find((variant) => variant.selected) ?? null,
   );
   const spoutControls = $derived(spoutControlsFor(spout, busy || spoutBusy));
+  const canSaveDiagnostics = $derived(diagnosticSaveEnabled(diagnosticBusy));
   const spoutState = $derived(
     spout === null
       ? "Output inactive"
@@ -56,6 +65,15 @@
       return error.message;
     }
     return error instanceof Error ? error.message : String(error);
+  }
+
+  function errorIsRecoverable(error: unknown): boolean {
+    return (
+      typeof error === "object" &&
+      error !== null &&
+      "recoverable" in error &&
+      error.recoverable === true
+    );
   }
 
   async function command(
@@ -152,6 +170,27 @@
       transientError = errorMessage(error);
     } finally {
       spoutBusy = false;
+    }
+  }
+
+  async function saveDiagnostics(): Promise<void> {
+    diagnosticBusy = true;
+    diagnosticTone = "idle";
+    diagnosticStatus = "Choose a new .zip file in the native save dialog…";
+    try {
+      const result = await invoke<DiagnosticSaveResult>(
+        "player_save_diagnostics",
+      );
+      diagnosticStatus = describeDiagnosticSaveResult(result);
+      diagnosticTone = result.status === "saved" ? "success" : "idle";
+    } catch (error) {
+      const retry = errorIsRecoverable(error)
+        ? " You can choose another file name and retry."
+        : "";
+      diagnosticStatus = `Diagnostic bundle was not saved: ${errorMessage(error)}${retry}`;
+      diagnosticTone = "error";
+    } finally {
+      diagnosticBusy = false;
     }
   }
 
@@ -360,6 +399,23 @@
     {#if spout?.lastErrorCode}
       <code>{spout.lastErrorCode}</code>
     {/if}
+  </section>
+
+  <section class="diagnostic-strip" aria-label="Support diagnostics">
+    <div>
+      <span>Support diagnostics</span>
+      <strong>Bounded · path-free · native save</strong>
+    </div>
+    <p
+      class:success={diagnosticTone === "success"}
+      class:error={diagnosticTone === "error"}
+      aria-live="polite"
+    >
+      {diagnosticStatus}
+    </p>
+    <button disabled={!canSaveDiagnostics} onclick={saveDiagnostics}
+      >{diagnosticBusy ? "Saving…" : "Save diagnostics"}</button
+    >
   </section>
 
   {#if player.error || transientError}
