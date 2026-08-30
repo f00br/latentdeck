@@ -368,6 +368,23 @@ fn blocks_corrupt_files_and_duplicate_id_version_across_roots() {
 }
 
 #[test]
+fn blocks_files_outside_the_integrity_catalog() {
+    let root = TempDir::new().expect("root");
+    let pack = write_pack(root.path(), "org.latentdeck.h3", "0.1.0");
+    let cache = pack.join("bin/__pycache__");
+    fs::create_dir_all(&cache).expect("cache directory");
+    fs::write(
+        cache.join("worker.cpython-313.pyc"),
+        b"uncatalogued bytecode",
+    )
+    .expect("uncatalogued file");
+
+    let error = discover_codec_packs(&[root.path().to_path_buf()], "0.1.0")
+        .expect_err("uncatalogued pack file");
+    assert_eq!(error.code, CodecPackErrorCode::IntegrityFailed.as_str());
+}
+
+#[test]
 fn missing_roots_mean_codec_not_installed_without_disk_scanning() {
     let root = TempDir::new().expect("root");
     let missing = root.path().join("does-not-exist");

@@ -90,6 +90,11 @@ notice files must be present in the catalog. Duplicate catalog paths, size or
 hash mismatches, oversized JSON, and more than the bounded pack/file counts are
 errors.
 
+Discovery also walks the bounded physical pack tree and requires its complete
+file set to equal the catalog plus the two control files, `codec-pack.json` and
+the declared integrity catalog itself. Uncatalogued bytecode caches or any
+other added files invalidate the pack before worker launch.
+
 The integrity catalog contains between 1 and 32,768 files and its JSON remains
 within 1 MiB. The builder, installer, application discovery, and private
 evidence harness enforce the same independent count and byte bounds; a runtime

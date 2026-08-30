@@ -25,6 +25,8 @@ const MAX_VERSIONS_PER_PACK: usize = 16;
 // installer contract. The self-contained Windows PyTorch runtime legitimately
 // contains more than 4,096 individually catalogued files.
 const MAX_CATALOG_FILES: usize = 32_768;
+const MAX_PACK_DIRECTORIES: usize = 131_072;
+const PACK_CONTROL_FILES: usize = 2;
 const MAX_ARGUMENTS: usize = 64;
 const MAX_EXTERNAL_ASSETS: usize = 16;
 const MAX_VARIANTS_PER_ASSET: usize = 32;
@@ -454,7 +456,7 @@ fn validate_codec_pack(
             "integrity catalog is not a strict JSON object",
         )
     })?;
-    validate_catalog(&root, &catalog)?;
+    validate_catalog(&root, &catalog_path, &catalog)?;
 
     let worker_executable = resolve_pack_path(&root, &manifest.worker.executable, true)?;
     let worker_working_directory =
@@ -632,7 +634,11 @@ fn validate_launch_and_assets(manifest: &CodecPackManifest) -> Result<(), CodecP
     Ok(())
 }
 
-fn validate_catalog(root: &Path, catalog: &IntegrityCatalog) -> Result<(), CodecPackError> {
+fn validate_catalog(
+    root: &Path,
+    catalog_path: &Path,
+    catalog: &IntegrityCatalog,
+) -> Result<(), CodecPackError> {
     if catalog.manifest_version != INTEGRITY_CATALOG_VERSION
         || !valid_catalog_file_count(catalog.files.len())
     {
@@ -642,11 +648,13 @@ fn validate_catalog(root: &Path, catalog: &IntegrityCatalog) -> Result<(), Codec
         ));
     }
     let mut paths = HashSet::new();
+    paths.insert("codec-pack.json".to_owned());
+    paths.insert(portable_pack_path(root, catalog_path)?.to_ascii_lowercase());
     for entry in &catalog.files {
-        if !paths.insert(&entry.path) {
+        if !paths.insert(entry.path.to_ascii_lowercase()) {
             return Err(CodecPackError::new(
                 CodecPackErrorCode::IntegrityCatalogInvalid,
-                "integrity catalog contains a duplicate path",
+                "integrity catalog contains a duplicate or control-file path",
             ));
         }
         validate_sha256(&entry.sha256)?;
@@ -659,7 +667,96 @@ fn validate_catalog(root: &Path, catalog: &IntegrityCatalog) -> Result<(), Codec
             ));
         }
     }
+    validate_physical_pack_inventory(root, &paths)?;
     Ok(())
+}
+
+fn validate_physical_pack_inventory(
+    root: &Path,
+    expected: &HashSet<String>,
+) -> Result<(), CodecPackError> {
+    let maximum_files = MAX_CATALOG_FILES + PACK_CONTROL_FILES;
+    let mut actual = HashSet::new();
+    let mut pending = vec![root.to_path_buf()];
+    let mut directory_count = 0_usize;
+
+    while let Some(directory) = pending.pop() {
+        let entries = fs::read_dir(&directory).map_err(|_| {
+            CodecPackError::new(
+                CodecPackErrorCode::IntegrityFailed,
+                "codec pack directory cannot be read",
+            )
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|_| {
+                CodecPackError::new(
+                    CodecPackErrorCode::IntegrityFailed,
+                    "codec pack contains an unreadable filesystem entry",
+                )
+            })?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|_| {
+                CodecPackError::new(
+                    CodecPackErrorCode::IntegrityFailed,
+                    "codec pack entry metadata cannot be read",
+                )
+            })?;
+            reject_reparse_metadata(&metadata)?;
+            if metadata.is_dir() {
+                directory_count = directory_count.checked_add(1).ok_or_else(|| {
+                    CodecPackError::new(
+                        CodecPackErrorCode::IntegrityFailed,
+                        "codec pack directory count overflowed",
+                    )
+                })?;
+                if directory_count > MAX_PACK_DIRECTORIES {
+                    return Err(CodecPackError::new(
+                        CodecPackErrorCode::IntegrityFailed,
+                        "codec pack directory count exceeds its bounded limit",
+                    ));
+                }
+                pending.push(path);
+                continue;
+            }
+            if !metadata.is_file() {
+                return Err(CodecPackError::new(
+                    CodecPackErrorCode::IntegrityFailed,
+                    "codec pack contains a non-file filesystem entry",
+                ));
+            }
+            let portable = portable_pack_path(root, &path)?.to_ascii_lowercase();
+            if !actual.insert(portable) || actual.len() > maximum_files {
+                return Err(CodecPackError::new(
+                    CodecPackErrorCode::IntegrityFailed,
+                    "codec pack physical file inventory is duplicated or oversized",
+                ));
+            }
+        }
+    }
+
+    if actual != *expected {
+        return Err(CodecPackError::new(
+            CodecPackErrorCode::IntegrityFailed,
+            "codec pack physical file inventory differs from its integrity catalog",
+        ));
+    }
+    Ok(())
+}
+
+fn portable_pack_path(root: &Path, path: &Path) -> Result<String, CodecPackError> {
+    let relative = path.strip_prefix(root).map_err(|_| {
+        CodecPackError::new(
+            CodecPackErrorCode::PathUnsafe,
+            "codec pack path escaped its installation root",
+        )
+    })?;
+    let portable = relative.to_str().ok_or_else(|| {
+        CodecPackError::new(
+            CodecPackErrorCode::PathUnsafe,
+            "codec pack path is not portable UTF-8",
+        )
+    })?;
+    Ok(portable.replace('\\', "/"))
 }
 
 fn valid_catalog_file_count(count: usize) -> bool {
