@@ -3,6 +3,7 @@ import {
   D2_COMMANDS,
   D2_EVENTS,
   createD2Client,
+  selectD2DecoderAndStatus,
   type D2HostAdapter,
 } from "./d2-client";
 import {
@@ -18,12 +19,15 @@ describe("typed LD-D2 host client", () => {
   it("uses the planned host commands with exact bounded payloads", async () => {
     expect(D2_COMMANDS).toEqual({
       backendStatusGet: "deck_d2_backend_status_get",
+      backendRediscover: "deck_d2_backend_rediscover",
       selectDecoder: "deck_d2_select_decoder",
       open: "deck_d2_open",
       controlsSet: "deck_d2_controls_set",
       transportSet: "deck_d2_transport_set",
       seedSet: "deck_d2_seed_set",
       restart: "deck_d2_restart",
+      fullscreenStatusGet: "deck_d2_fullscreen_status_get",
+      fullscreenSet: "deck_d2_fullscreen_set",
       captureSnapshot: "deck_d2_capture_snapshot",
       captureLiveStart: "deck_d2_capture_live_start",
       captureLiveStop: "deck_d2_capture_live_stop",
@@ -53,12 +57,15 @@ describe("typed LD-D2 host client", () => {
     };
 
     await client.backendStatusGet();
+    await client.backendRediscover();
     await client.selectDecoder();
     await client.open(openRequest);
     await client.controlsSet(DEFAULT_D2_CONTROLS);
     await client.transportSet(DEFAULT_D2_TRANSPORT);
     await client.seedSet(9);
     await client.restart();
+    await client.fullscreenStatusGet();
+    await client.fullscreenSet(true);
     await client.captureSnapshot();
     await client.captureLiveStart();
     await client.captureLiveStop();
@@ -69,6 +76,7 @@ describe("typed LD-D2 host client", () => {
 
     expect(calls).toEqual([
       { command: "deck_d2_backend_status_get", args: {} },
+      { command: "deck_d2_backend_rediscover", args: {} },
       { command: "deck_d2_select_decoder", args: {} },
       { command: "deck_d2_open", args: openRequest },
       {
@@ -81,6 +89,8 @@ describe("typed LD-D2 host client", () => {
       },
       { command: "deck_d2_seed_set", args: { seed: 9 } },
       { command: "deck_d2_restart", args: {} },
+      { command: "deck_d2_fullscreen_status_get", args: {} },
+      { command: "deck_d2_fullscreen_set", args: { enabled: true } },
       { command: "deck_d2_capture_snapshot", args: {} },
       { command: "deck_d2_capture_live_start", args: {} },
       { command: "deck_d2_capture_live_stop", args: {} },
@@ -116,6 +126,40 @@ describe("typed LD-D2 host client", () => {
     const backend = await createD2Client(host).backendStatusGet();
     expect(backend.decoder?.sha256).toBe("a".repeat(64));
     expect(JSON.stringify(backend)).not.toMatch(/[A-Z]:\\\\/);
+  });
+
+  it("refreshes runtime status after selection so cancel and replacement stay distinct", async () => {
+    const calls: string[] = [];
+    const statuses = [
+      { ...DEFAULT_D2_STATUS, loaded: true },
+      { ...DEFAULT_D2_STATUS, loaded: false },
+    ];
+    const host: D2HostAdapter = {
+      invoke: async <T>(command: string) => {
+        calls.push(command);
+        if (command === D2_COMMANDS.selectDecoder) {
+          return { ...DEFAULT_D2_BACKEND, state: "ready" } as T;
+        }
+        if (command === D2_COMMANDS.statusGet) {
+          return statuses.shift() as T;
+        }
+        throw new Error(`Unexpected command ${command}`);
+      },
+      listen: async () => () => undefined,
+    };
+    const client = createD2Client(host);
+
+    const cancelled = await selectD2DecoderAndStatus(client);
+    const replaced = await selectD2DecoderAndStatus(client);
+
+    expect(cancelled.status.loaded).toBe(true);
+    expect(replaced.status.loaded).toBe(false);
+    expect(calls).toEqual([
+      D2_COMMANDS.selectDecoder,
+      D2_COMMANDS.statusGet,
+      D2_COMMANDS.selectDecoder,
+      D2_COMMANDS.statusGet,
+    ]);
   });
 
   it("subscribes to typed status and error event channels", async () => {

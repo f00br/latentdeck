@@ -26,12 +26,15 @@ export interface D2HostAdapter {
 
 export interface D2Client {
   backendStatusGet(): Promise<D2BackendView>;
+  backendRediscover(): Promise<D2BackendView>;
   selectDecoder(): Promise<D2BackendView>;
   open(request: D2OpenRequest): Promise<D2Status>;
   controlsSet(controls: D2Controls): Promise<D2ControlsAck>;
   transportSet(transport: D2Transport): Promise<D2TransportAck>;
   seedSet(seed: number): Promise<D2SeedAck>;
   restart(): Promise<D2Status>;
+  fullscreenStatusGet(): Promise<boolean | null>;
+  fullscreenSet(enabled: boolean): Promise<boolean>;
   captureSnapshot(): Promise<D2CaptureView | null>;
   captureLiveStart(): Promise<D2CaptureView | null>;
   captureLiveStop(): Promise<D2CaptureView>;
@@ -49,12 +52,15 @@ export interface D2Client {
 
 export const D2_COMMANDS = Object.freeze({
   backendStatusGet: "deck_d2_backend_status_get",
+  backendRediscover: "deck_d2_backend_rediscover",
   selectDecoder: "deck_d2_select_decoder",
   open: "deck_d2_open",
   controlsSet: "deck_d2_controls_set",
   transportSet: "deck_d2_transport_set",
   seedSet: "deck_d2_seed_set",
   restart: "deck_d2_restart",
+  fullscreenStatusGet: "deck_d2_fullscreen_status_get",
+  fullscreenSet: "deck_d2_fullscreen_set",
   captureSnapshot: "deck_d2_capture_snapshot",
   captureLiveStart: "deck_d2_capture_live_start",
   captureLiveStop: "deck_d2_capture_live_stop",
@@ -82,6 +88,8 @@ export function createD2Client(host: D2HostAdapter = tauriHost): D2Client {
   return {
     backendStatusGet: () =>
       host.invoke<D2BackendView>(D2_COMMANDS.backendStatusGet, {}),
+    backendRediscover: () =>
+      host.invoke<D2BackendView>(D2_COMMANDS.backendRediscover, {}),
     selectDecoder: () =>
       host.invoke<D2BackendView>(D2_COMMANDS.selectDecoder, {}),
     open: (request) => host.invoke<D2Status>(D2_COMMANDS.open, { ...request }),
@@ -91,6 +99,10 @@ export function createD2Client(host: D2HostAdapter = tauriHost): D2Client {
       host.invoke<D2TransportAck>(D2_COMMANDS.transportSet, { transport }),
     seedSet: (seed) => host.invoke<D2SeedAck>(D2_COMMANDS.seedSet, { seed }),
     restart: () => host.invoke<D2Status>(D2_COMMANDS.restart, {}),
+    fullscreenStatusGet: () =>
+      host.invoke<boolean | null>(D2_COMMANDS.fullscreenStatusGet, {}),
+    fullscreenSet: (enabled) =>
+      host.invoke<boolean>(D2_COMMANDS.fullscreenSet, { enabled }),
     captureSnapshot: () =>
       host.invoke<D2CaptureView | null>(D2_COMMANDS.captureSnapshot, {}),
     captureLiveStart: () =>
@@ -111,6 +123,24 @@ export function createD2Client(host: D2HostAdapter = tauriHost): D2Client {
     onCaptureError: (handler) =>
       host.listen<D2ErrorEvent>(D2_EVENTS.captureError, handler),
   };
+}
+
+export interface D2DecoderSelectionResult {
+  backend: D2BackendView;
+  status: D2Status;
+}
+
+/**
+ * The native picker intentionally returns the current backend on cancel. Read
+ * the backend-owned runtime status afterwards so cancel preserves a loaded
+ * session while a real decoder replacement reflects its required unload.
+ */
+export async function selectD2DecoderAndStatus(
+  client: Pick<D2Client, "selectDecoder" | "statusGet">,
+): Promise<D2DecoderSelectionResult> {
+  const backend = await client.selectDecoder();
+  const status = await client.statusGet();
+  return { backend, status };
 }
 
 export const d2Client = createD2Client();

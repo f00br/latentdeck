@@ -1,7 +1,11 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { onMount, tick } from "svelte";
-  import { d2Client, type StopD2Listener } from "./d2-client";
+  import {
+    d2Client,
+    selectD2DecoderAndStatus,
+    type StopD2Listener,
+  } from "./d2-client";
   import {
     DEFAULT_D2_BACKEND,
     DEFAULT_D2_CAPTURE,
@@ -12,10 +16,10 @@
     buildD2OpenRequest,
     chooseD2Sources,
     copyD2Controls,
+    d2ControlsValidationError,
     setSlotLoop,
     setSlotPlaying,
     parseD2Seed,
-    isD2CaptureActive,
     type D2BackendView,
     type D2CaptureView,
     type D2Algorithm,
@@ -25,6 +29,7 @@
     type D2Status,
     type D2Transport,
   } from "./d2-model";
+  import { deckCaptureActions, deckCaptureUiPolicy } from "./capture-policy";
   import {
     EMPTY_LIBRARY_VIEW,
     compatibilityReasonsByHash,
@@ -54,6 +59,10 @@
     type DeckPreset,
     type PresetLoopDraft,
   } from "./preset-model";
+  import {
+    LatestValueDispatcher,
+    sameControlSnapshot,
+  } from "./realtime-controls";
 
   type HostState = "checking" | "ready" | "pending" | "error";
 
@@ -104,6 +113,11 @@
   let compatibilityRequest = 0;
   type D2PresetLoops = Pick<D2Transport, "loopA" | "loopB">;
   let presetLoopDraft: PresetLoopDraft<D2PresetLoops> | null = null;
+  let controlsDispatchRunning = false;
+  let controlsDispatchPending = false;
+  let controlsValidation: string | null = null;
+  let fullscreenBusy = false;
+  let outputFullscreen: boolean | null = null;
 
   let activeBank: CollectionView | undefined;
   let sourceA: CartridgeView | undefined;
@@ -115,6 +129,42 @@
   let spoutState = describeSpout(null);
   let selectedCompatibilityReasons: readonly string[] = [];
   let selectedSourcesCompatible = false;
+  let captureUi = deckCaptureUiPolicy(capture.mode, capture.state);
+  let captureActions = deckCaptureActions(capture.mode, capture.state, {
+    loaded: status.loaded,
+    hostBusy,
+    captureBusy,
+    controlsDirty,
+    controlsDispatchRunning,
+    controlsDispatchPending,
+    seedDirty,
+    rolesDirty: false,
+  });
+  let realtimeControlsEnabled = true;
+  const controlsDispatcher = new LatestValueDispatcher<D2Controls>({
+    throttleMs: 75,
+    apply: async (controls) => {
+      if (d2ControlsValidationError(controls) !== null) return;
+      const acknowledgement = await d2Client.controlsSet(controls);
+      status = {
+        ...status,
+        controls: copyD2Controls(acknowledgement.controls),
+      };
+      hostState = "ready";
+      hostMessage = "Realtime controls acknowledged.";
+      if (sameControlSnapshot(controlsDraft, acknowledgement.controls)) {
+        controlsDirty = false;
+      }
+    },
+    onError: (error) => {
+      controlsDirty = true;
+      markHostFailure(error);
+    },
+    onStateChange: ({ running, pending }) => {
+      controlsDispatchRunning = running;
+      controlsDispatchPending = pending;
+    },
+  });
   $: activeBank = bankView.collections.find(
     (collection) => collection.id === bankView.deckSession.activeCollectionId,
   );
@@ -133,8 +183,7 @@
   $: sourceB = sourceOptions.find(
     (cartridge) => cartridge.archiveSha256 === sourceBHash,
   );
-  $: selectedCompatibilityReasons =
-    compatibilityReasons.get(sourceBHash) ?? [];
+  $: selectedCompatibilityReasons = compatibilityReasons.get(sourceBHash) ?? [];
   $: selectedSourcesCompatible =
     compatibilityReady &&
     sourceA !== undefined &&
@@ -143,7 +192,20 @@
   $: presentCount = bankView.cartridges.filter(
     (cartridge) => cartridge.availability === "present",
   ).length;
-  $: captureActive = isD2CaptureActive(capture.state);
+  $: captureUi = deckCaptureUiPolicy(capture.mode, capture.state);
+  $: captureActive = captureUi.active;
+  $: captureActions = deckCaptureActions(capture.mode, capture.state, {
+    loaded: status.loaded,
+    hostBusy,
+    captureBusy,
+    controlsDirty,
+    controlsDispatchRunning,
+    controlsDispatchPending,
+    seedDirty,
+    rolesDirty: false,
+  });
+  $: realtimeControlsEnabled = captureUi.realtimeControls && !captureBusy;
+  $: controlsValidation = d2ControlsValidationError(controlsDraft);
   $: spoutControls = spoutControlsFor(spout, hostBusy || spoutBusy);
   $: spoutState = describeSpout(spout);
 
@@ -167,7 +229,11 @@
             if (!disposed) applyCaptureError(incoming);
           }),
         ]);
-        stopListeners.push(...listeners);
+        if (disposed) {
+          for (const stop of listeners) stop();
+        } else {
+          stopListeners.push(...listeners);
+        }
       } catch (error) {
         if (!disposed) markHostFailure(error);
       }
@@ -176,6 +242,7 @@
         await refreshBank();
         await refreshBackendStatus();
         await refreshHostStatus();
+        await refreshFullscreenStatus();
         await refreshCaptureStatus();
         await refreshSpoutStatus();
       }
@@ -188,6 +255,7 @@
     return () => {
       disposed = true;
       globalThis.clearInterval(spoutTimer);
+      controlsDispatcher.dispose();
       for (const stop of stopListeners) stop();
     };
   });
@@ -329,10 +397,9 @@
       const { sources: globallyResolved, library: incoming } =
         await stagePresetLibraryLoad(
           () =>
-            invoke<(CartridgeView | null)[]>(
-              "library_resolve_preset_sources",
-              { identities },
-            ),
+            invoke<(CartridgeView | null)[]>("library_resolve_preset_sources", {
+              identities,
+            }),
           () =>
             invoke<LibraryView>("library_activate_collection_snapshot", {
               collectionId: preset.active_collection_id,
@@ -343,10 +410,7 @@
         incoming.cartridges,
         globallyResolved,
       );
-      const resolution = resolvePresetSources(
-        identities,
-        sourceOptions,
-      );
+      const resolution = resolvePresetSources(identities, sourceOptions);
       bankView = incoming;
       presetResolvedSources = globallyResolved;
       [sourceAHash, sourceBHash] = resolution.hashes;
@@ -381,10 +445,7 @@
       (source) => source.archiveSha256,
     );
     compatibilityReady = false;
-    if (
-      referenceArchiveSha256 === "" ||
-      candidateArchiveSha256s.length === 0
-    ) {
+    if (referenceArchiveSha256 === "" || candidateArchiveSha256s.length === 0) {
       compatibilityReasons = new Map();
       return;
     }
@@ -498,20 +559,15 @@
     }
   }
 
-  async function selectDecoder(): Promise<void> {
-    if (backendBusy) return;
+  async function rediscoverBackend(): Promise<void> {
+    if (backendBusy || captureBusy || !captureUi.decoder) return;
     backendBusy = true;
     try {
-      backend = await d2Client.selectDecoder();
-      if (backend.state === "ready") {
-        status = {
-          ...DEFAULT_D2_STATUS,
-          controls: copyD2Controls(DEFAULT_D2_CONTROLS),
-          transport: { ...DEFAULT_D2_TRANSPORT },
-          pendingResetReasons: [],
-        };
-        hostMessage = "Decoder validated · load A and B to begin.";
-      }
+      backend = await d2Client.backendRediscover();
+      hostMessage =
+        backend.state === "missing"
+          ? "No compatible H3 Codec Pack was found."
+          : "Codec Pack discovery refreshed.";
     } catch (error) {
       backend = {
         ...backend,
@@ -523,8 +579,43 @@
     }
   }
 
+  async function selectDecoder(): Promise<void> {
+    if (backendBusy || captureBusy || !captureUi.decoder) return;
+    backendBusy = true;
+    try {
+      const selection = await selectD2DecoderAndStatus(d2Client);
+      backend = selection.backend;
+      applyHostStatus(selection.status);
+      if (backend.state === "ready") {
+        hostMessage = selection.status.loaded
+          ? "Decoder selection cancelled · current D2 stream retained."
+          : "Decoder ready · load A and B to begin.";
+      } else {
+        hostState = backend.state === "error" ? "error" : "pending";
+        hostMessage =
+          backend.detail ?? "No compatible TAEH3 decoder is selected.";
+      }
+    } catch (error) {
+      try {
+        applyHostStatus(await d2Client.statusGet());
+      } catch {
+        // Preserve the picker failure while status remains unavailable.
+      }
+      const detail = describeCommandError(error);
+      backend = {
+        ...backend,
+        state: "error",
+        detail,
+      };
+      hostState = "error";
+      hostMessage = detail;
+    } finally {
+      backendBusy = false;
+    }
+  }
+
   async function openDeck(): Promise<void> {
-    if (presetBusy) return;
+    if (presetBusy || captureBusy || !captureUi.load) return;
     if (backend.state !== "ready") {
       hostState = "error";
       hostMessage =
@@ -550,6 +641,12 @@
       hostMessage = `Seed must be an integer from 0 to ${MAX_SAFE_D2_SEED}.`;
       return;
     }
+    if (controlsValidation !== null) {
+      hostState = "error";
+      hostMessage = controlsValidation;
+      return;
+    }
+    outputFullscreen = null;
     await runHostAction(async () => {
       const pendingLoops = presetLoopDraft?.loops;
       const transport =
@@ -576,17 +673,21 @@
       controlsDirty = false;
       seedDirty = false;
     });
+    await refreshFullscreenStatus();
   }
 
   async function applyControls(): Promise<void> {
-    await runHostAction(async () => {
-      await d2Client.controlsSet(copyD2Controls(controlsDraft));
-      applyHostStatus(await d2Client.statusGet());
-      controlsDirty = false;
-    });
+    if (
+      !status.loaded ||
+      !realtimeControlsEnabled ||
+      controlsValidation !== null
+    )
+      return;
+    controlsDispatcher.push(copyD2Controls(controlsDraft), true);
   }
 
   async function applySeed(): Promise<void> {
+    if (!captureUi.seed || captureBusy) return;
     const seed = parseD2Seed(seedDraft);
     if (seed === null) {
       hostState = "error";
@@ -613,6 +714,7 @@
   }
 
   async function setTransport(transport: D2Transport): Promise<void> {
+    if (!captureUi.transport || captureBusy) return;
     await runHostAction(async () => {
       await d2Client.transportSet(transport);
       applyHostStatus(await d2Client.statusGet());
@@ -620,6 +722,7 @@
   }
 
   async function restart(): Promise<void> {
+    if (!captureUi.transport || captureBusy) return;
     await runHostAction(async () => {
       resetMessage = "Restart requested · waiting for causal reset barrier.";
       applyHostStatus(await d2Client.restart());
@@ -627,7 +730,7 @@
   }
 
   async function snapshotCapture(): Promise<void> {
-    if (!status.loaded || captureActive || captureBusy) return;
+    if (!captureActions.snapshotEnabled) return;
     captureBusy = true;
     try {
       const started = await d2Client.captureSnapshot();
@@ -643,15 +746,13 @@
   }
 
   async function toggleLiveCapture(): Promise<void> {
-    if (!status.loaded || captureBusy) return;
+    const action = captureActions.liveAction;
+    if (action === null) return;
     captureBusy = true;
     try {
-      if (
-        capture.mode === "live_capture" &&
-        (capture.state === "capturing" || capture.state === "stop_armed")
-      ) {
+      if (action === "stop") {
         applyCaptureStatus(await d2Client.captureLiveStop());
-      } else if (!captureActive) {
+      } else {
         const started = await d2Client.captureLiveStart();
         if (started !== null) applyCaptureStatus(started);
       }
@@ -690,6 +791,7 @@
     }
     if (!controlsDirty) controlsDraft = copyD2Controls(incoming.controls);
     if (!seedDirty) seedDraft = String(incoming.seed);
+    if (!incoming.loaded) outputFullscreen = null;
   }
 
   function applyHostError(incoming: D2ErrorEvent): void {
@@ -699,6 +801,9 @@
 
   function applyCaptureStatus(incoming: D2CaptureView): void {
     capture = incoming;
+    if (!deckCaptureUiPolicy(incoming.mode, incoming.state).realtimeControls) {
+      controlsDispatcher.cancelPending();
+    }
     if (
       incoming.state === "finished" &&
       incoming.captureId !== null &&
@@ -752,10 +857,62 @@
   }
 
   function selectAlgorithm(algorithm: D2Algorithm): void {
-    if (presetBusy) return;
+    if (presetBusy || !realtimeControlsEnabled) return;
     discardPresetLoopDraft();
     controlsDraft = { ...controlsDraft, algorithm };
     controlsDirty = true;
+    queueRealtimeControls();
+  }
+
+  function controlsChanged(): void {
+    if (!realtimeControlsEnabled) return;
+    discardPresetLoopDraft();
+    controlsDirty = true;
+    queueRealtimeControls();
+  }
+
+  function queueRealtimeControls(): void {
+    void tick().then(() => {
+      if (
+        status.loaded &&
+        !presetBusy &&
+        realtimeControlsEnabled &&
+        controlsDirty &&
+        d2ControlsValidationError(controlsDraft) === null
+      ) {
+        controlsDispatcher.push(copyD2Controls(controlsDraft));
+      }
+    });
+  }
+
+  async function refreshFullscreenStatus(): Promise<void> {
+    if (!status.loaded) {
+      outputFullscreen = null;
+      return;
+    }
+    if (fullscreenBusy) return;
+    fullscreenBusy = true;
+    try {
+      outputFullscreen = await d2Client.fullscreenStatusGet();
+    } catch (error) {
+      outputFullscreen = null;
+      markHostFailure(error);
+    } finally {
+      fullscreenBusy = false;
+    }
+  }
+
+  async function toggleFullscreen(): Promise<void> {
+    if (!status.loaded || fullscreenBusy || outputFullscreen === null) return;
+    fullscreenBusy = true;
+    try {
+      outputFullscreen = await d2Client.fullscreenSet(!outputFullscreen);
+    } catch (error) {
+      outputFullscreen = null;
+      markHostFailure(error);
+    } finally {
+      fullscreenBusy = false;
+    }
   }
 
   function updateSeedDraft(event: Event): void {
@@ -811,8 +968,8 @@
 <section
   class="d2-faceplate"
   aria-labelledby="d2-title"
-  aria-busy={presetBusy}
-  inert={presetBusy}
+  aria-busy={presetBusy || captureBusy}
+  inert={presetBusy || captureBusy}
 >
   <header class="d2-header">
     <div>
@@ -896,14 +1053,18 @@
       <button
         type="button"
         onclick={() => void selectDecoder()}
-        disabled={backendBusy || backend.packId === null}
+        disabled={backendBusy ||
+          captureBusy ||
+          !captureUi.decoder ||
+          backend.packId === null}
         >{backendBusy ? "Checking…" : "Select TAEH3"}</button
       >
       <button
         class="secondary"
         type="button"
-        onclick={() => void refreshBackendStatus()}
-        disabled={backendBusy}>Refresh pack</button
+        onclick={() => void rediscoverBackend()}
+        disabled={backendBusy || captureBusy || !captureUi.decoder}
+        >Refresh Codec Pack</button
       >
     </div>
   </section>
@@ -936,9 +1097,9 @@
       is performed.
     </p>
     <p>
-      Release performance target: 448×800. Each D2 mode remains pending until
-      its final 30-minute receipt passes; larger intrinsic grids are not yet
-      benchmark-certified and are never downscaled implicitly.
+      Realtime acceptance target: 448×800 at 24 fps. Other intrinsic grids
+      remain playable but are not yet Deck benchmark-certified and are never
+      downscaled implicitly.
     </p>
     <div class="d2-preset-controls">
       <span>DECK PRESET · JSON</span>
@@ -946,8 +1107,11 @@
         <button
           type="button"
           onclick={() => void loadPreset()}
-          disabled={presetBusy || bankBusy || backendBusy || hostBusy || captureActive}
-          >Load preset</button
+          disabled={presetBusy ||
+            bankBusy ||
+            backendBusy ||
+            hostBusy ||
+            captureActive}>Load preset</button
         >
         <button
           type="button"
@@ -987,6 +1151,15 @@
           >
         {/each}
       </select>
+      {#if status.loaded && status.sources !== null}<p
+          class="loaded-source-label"
+        >
+          LOADED {shortHash(status.sources.sourceA.archiveSha256)} · {status
+            .sources.sourceA.latentSlotCount} LATENT SLOTS{status.sources
+            .sourceA.archiveSha256 !== sourceAHash
+            ? " · DRAFT DIFFERS"
+            : ""}
+        </p>{/if}
       <div class="source-readout">
         <span>{sourceA?.codecProfile ?? "NO SOURCE"}</span>
         <strong
@@ -1005,7 +1178,10 @@
         <button
           type="button"
           onclick={() => void togglePlaying("A")}
-          disabled={!status.loaded || hostBusy}
+          disabled={!status.loaded ||
+            hostBusy ||
+            captureBusy ||
+            !captureUi.transport}
         >
           {!status.loaded
             ? "Play A"
@@ -1018,7 +1194,10 @@
             type="checkbox"
             checked={status.transport.loopA}
             onchange={(event) => void toggleLoop("A", event)}
-            disabled={!status.loaded || hostBusy}
+            disabled={!status.loaded ||
+              hostBusy ||
+              captureBusy ||
+              !captureUi.transport}
           /> Loop A</label
         >
         <span>HEAD <strong>{status.playheadA}</strong></span>
@@ -1040,17 +1219,16 @@
             type="button"
             class:active={controlsDraft.algorithm === algorithm}
             aria-pressed={controlsDraft.algorithm === algorithm}
-            onclick={() => selectAlgorithm(algorithm)}>{algorithm}</button
+            onclick={() => selectAlgorithm(algorithm)}
+            disabled={!captureUi.realtimeControls}>{algorithm}</button
           >
         {/each}
       </div>
 
       <form
         class="control-form"
-        oninput={() => {
-          discardPresetLoopDraft();
-          controlsDirty = true;
-        }}
+        oninput={controlsChanged}
+        inert={!captureUi.realtimeControls}
         onsubmit={(event) => {
           event.preventDefault();
           void applyControls();
@@ -1067,6 +1245,7 @@
                 max="1"
                 step="0.01"
                 bind:value={controlsDraft.mix}
+                disabled={!captureUi.realtimeControls}
               />
             </label>
             <label class="range-control" for="d2-interaction">
@@ -1082,6 +1261,7 @@
                 max="1"
                 step="0.01"
                 bind:value={controlsDraft.interaction}
+                disabled={!captureUi.realtimeControls}
               />
             </label>
             <label class="range-control" for="d2-preserve">
@@ -1096,6 +1276,7 @@
                 max="1"
                 step="0.01"
                 bind:value={controlsDraft.preserve}
+                disabled={!captureUi.realtimeControls}
               />
             </label>
             <label class="range-control" for="d2-chaos">
@@ -1109,6 +1290,7 @@
                 max="1"
                 step="0.01"
                 bind:value={controlsDraft.chaos}
+                disabled={!captureUi.realtimeControls}
               />
             </label>
           </div>
@@ -1122,6 +1304,7 @@
                   name="d2-mode"
                   value="HYBRIDIZE"
                   bind:group={controlsDraft.mode}
+                  disabled={!captureUi.realtimeControls}
                 /> Hybridize</label
               >
               <label
@@ -1130,6 +1313,7 @@
                   name="d2-mode"
                   value="INTERACT"
                   bind:group={controlsDraft.mode}
+                  disabled={!captureUi.realtimeControls}
                 /> Interact</label
               >
             </fieldset>
@@ -1141,6 +1325,7 @@
                   name="d2-routing"
                   value="A"
                   bind:group={controlsDraft.routing}
+                  disabled={!captureUi.realtimeControls}
                 /> Carrier A</label
               >
               <label
@@ -1149,6 +1334,7 @@
                   name="d2-routing"
                   value="B"
                   bind:group={controlsDraft.routing}
+                  disabled={!captureUi.realtimeControls}
                 /> Carrier B</label
               >
             </fieldset>
@@ -1170,6 +1356,7 @@
                   max="23"
                   step="1"
                   bind:value={controlsDraft.xs1ChannelA}
+                  disabled={!captureUi.realtimeControls}
                 /></label
               >
               <label
@@ -1179,6 +1366,7 @@
                   max="23"
                   step="1"
                   bind:value={controlsDraft.xs1ChannelB}
+                  disabled={!captureUi.realtimeControls}
                 /></label
               >
               <label
@@ -1188,6 +1376,7 @@
                   max="180"
                   step="1"
                   bind:value={controlsDraft.xs1AngleDegrees}
+                  disabled={!captureUi.realtimeControls}
                 /></label
               >
             </div>
@@ -1200,6 +1389,7 @@
                   max="8"
                   step="1"
                   bind:value={controlsDraft.xs2Radius}
+                  disabled={!captureUi.realtimeControls}
                 /></label
               >
             </div>
@@ -1212,6 +1402,7 @@
                   max="2"
                   step="0.05"
                   bind:value={controlsDraft.xs3HighGain}
+                  disabled={!captureUi.realtimeControls}
                 /></label
               >
             </div>
@@ -1224,6 +1415,7 @@
                   max="0.001"
                   step="0.00000001"
                   bind:value={controlsDraft.xs4Epsilon}
+                  disabled={!captureUi.realtimeControls}
                 /></label
               >
             </div>
@@ -1236,6 +1428,7 @@
                   name="xs5-routing"
                   value="TOPK"
                   bind:group={controlsDraft.xs5Routing}
+                  disabled={!captureUi.realtimeControls}
                 /> TOPK</label
               >
               <label
@@ -1244,6 +1437,7 @@
                   name="xs5-routing"
                   value="SINKHORN"
                   bind:group={controlsDraft.xs5Routing}
+                  disabled={!captureUi.realtimeControls}
                 /> SINKHORN</label
               >
             </fieldset>
@@ -1255,6 +1449,7 @@
                   max="1"
                   step="0.01"
                   bind:value={controlsDraft.temperature}
+                  disabled={!captureUi.realtimeControls}
                 /></label
               >
               <label
@@ -1264,6 +1459,7 @@
                   max="64"
                   step="1"
                   bind:value={controlsDraft.topK}
+                  disabled={!captureUi.realtimeControls}
                 /></label
               >
               <label
@@ -1273,24 +1469,36 @@
                   max="12"
                   step="1"
                   bind:value={controlsDraft.sinkhornIterations}
+                  disabled={!captureUi.realtimeControls}
                 /></label
               >
             </div>
           {/if}
         </div>
 
+        {#if controlsValidation !== null}
+          <p class="control-validation-error">{controlsValidation}</p>
+        {/if}
+
         <div class="control-commit">
           <span class:dirty={controlsDirty || hostState !== "ready"}
-            >{hostState !== "ready"
-              ? "DRAFT · HOST PENDING"
-              : controlsDirty
-                ? "DRAFT CHANGED"
-                : "HOST ACKNOWLEDGED"}</span
+            >{controlsValidation !== null
+              ? "INVALID DRAFT"
+              : controlsDispatchRunning || controlsDispatchPending
+                ? "REALTIME APPLYING"
+                : hostState !== "ready"
+                  ? "DRAFT · HOST PENDING"
+                  : controlsDirty
+                    ? "DRAFT CHANGED"
+                    : "HOST ACKNOWLEDGED"}</span
           >
           <button
             type="submit"
-            disabled={!status.loaded || !controlsDirty || hostBusy}
-            >Apply controls</button
+            disabled={!status.loaded ||
+              !controlsDirty ||
+              controlsValidation !== null ||
+              hostBusy ||
+              !captureUi.realtimeControls}>Apply now</button
           >
         </div>
       </form>
@@ -1305,11 +1513,16 @@
           step="1"
           value={seedDraft}
           oninput={updateSeedDraft}
+          disabled={!captureUi.seed || captureBusy}
         />
         <button
           type="button"
           onclick={() => void applySeed()}
-          disabled={!status.loaded || !seedDirty || hostBusy}>Set seed</button
+          disabled={!status.loaded ||
+            !seedDirty ||
+            hostBusy ||
+            captureBusy ||
+            !captureUi.seed}>Set seed</button
         >
       </div>
     </section>
@@ -1338,12 +1551,21 @@
           >
         {/each}
       </select>
+      {#if status.loaded && status.sources !== null}<p
+          class="loaded-source-label"
+        >
+          LOADED {shortHash(status.sources.sourceB.archiveSha256)} · {status
+            .sources.sourceB.latentSlotCount} LATENT SLOTS{status.sources
+            .sourceB.archiveSha256 !== sourceBHash
+            ? " · DRAFT DIFFERS"
+            : ""}
+        </p>{/if}
       {#if selectedCompatibilityReasons.length > 0}<p
           class="d2-bank-error"
           role="status"
         >
-          B cannot mix with A: {selectedCompatibilityReasons.join("; ")}. Use
-          an explicit Toolkit Align/Crop node to create a compatible `.lc`.
+          B cannot mix with A: {selectedCompatibilityReasons.join("; ")}. Use an
+          explicit Toolkit Align/Crop node to create a compatible `.lc`.
         </p>{/if}
       <div class="source-readout">
         <span>{sourceB?.codecProfile ?? "NO SOURCE"}</span>
@@ -1363,7 +1585,10 @@
         <button
           type="button"
           onclick={() => void togglePlaying("B")}
-          disabled={!status.loaded || hostBusy}
+          disabled={!status.loaded ||
+            hostBusy ||
+            captureBusy ||
+            !captureUi.transport}
         >
           {!status.loaded
             ? "Play B"
@@ -1376,7 +1601,10 @@
             type="checkbox"
             checked={status.transport.loopB}
             onchange={(event) => void toggleLoop("B", event)}
-            disabled={!status.loaded || hostBusy}
+            disabled={!status.loaded ||
+              hostBusy ||
+              captureBusy ||
+              !captureUi.transport}
           /> Loop B</label
         >
         <span>HEAD <strong>{status.playheadB}</strong></span>
@@ -1392,11 +1620,14 @@
         type="button"
         onclick={() => void openDeck()}
         disabled={hostBusy ||
+          captureBusy ||
+          !captureUi.load ||
           backend.state !== "ready" ||
           bankBusy ||
           sourceA === undefined ||
           sourceB === undefined ||
-          !selectedSourcesCompatible}>Load A + B</button
+          !selectedSourcesCompatible ||
+          controlsValidation !== null}>Load A + B</button
       >
     </div>
     <div class="restart-module">
@@ -1404,7 +1635,10 @@
       <button
         type="button"
         onclick={() => void restart()}
-        disabled={!status.loaded || hostBusy}>Restart both</button
+        disabled={!status.loaded ||
+          hostBusy ||
+          captureBusy ||
+          !captureUi.transport}>Restart both</button
       >
       <small>Restart and loop require a decoder reset barrier.</small>
     </div>
@@ -1413,7 +1647,7 @@
       <button
         type="button"
         onclick={() => void snapshotCapture()}
-        disabled={!status.loaded || captureActive || captureBusy || hostBusy}
+        disabled={!captureActions.snapshotEnabled}
         title="Capture one complete structural-carrier cycle"
         >{capture.mode === "snapshot" && captureActive
           ? "Snapshot running…"
@@ -1422,14 +1656,9 @@
       <button
         type="button"
         onclick={() => void toggleLiveCapture()}
-        disabled={!status.loaded ||
-          captureBusy ||
-          hostBusy ||
-          (captureActive && capture.mode !== "live_capture") ||
-          capture.state === "stop_armed" ||
-          capture.state === "finalizing"}
+        disabled={captureActions.liveAction === null}
         title="Record a bounded changing post-operator latent stream"
-        >{capture.mode === "live_capture" && capture.state === "capturing"
+        >{captureActions.liveAction === "stop"
           ? "Stop Live Capture"
           : capture.mode === "live_capture" && captureActive
             ? "Live stopping…"
@@ -1478,6 +1707,18 @@
       disabled={!spoutControls.toggle}
       onclick={() => void configureSpout(null, !(spout?.enabled ?? false))}
       >{spout?.enabled ? "Disable sender" : "Enable sender"}</button
+    >
+    <button
+      class:active={outputFullscreen === true}
+      aria-pressed={outputFullscreen ?? false}
+      type="button"
+      disabled={!status.loaded || fullscreenBusy || outputFullscreen === null}
+      onclick={() => void toggleFullscreen()}
+      >{fullscreenBusy
+        ? "Switching…"
+        : outputFullscreen
+          ? "Exit fullscreen"
+          : "Fullscreen output"}</button
     >
     <small>
       {spout === null
@@ -1739,6 +1980,15 @@
 
   .d2-field label span {
     color: var(--d2-green);
+  }
+
+  .loaded-source-label {
+    min-height: 2.2em;
+    margin: 0;
+    color: var(--d2-amber);
+    font:
+      700 0.55rem ui-monospace,
+      monospace;
   }
 
   .d2-bank-meter {
@@ -2049,6 +2299,17 @@
     color: var(--d2-green);
   }
 
+  .control-validation-error {
+    min-height: 30px;
+    margin: 8px 0 0;
+    border: 1px solid #7b4c45;
+    padding: 6px 9px;
+    background: #241715;
+    color: #ed9a90;
+    font-size: 0.63rem;
+    line-height: 1.4;
+  }
+
   .number-grid {
     display: grid;
     grid-template-columns: minmax(120px, 180px);
@@ -2174,7 +2435,9 @@
 
   .d2-spout-strip {
     display: grid;
-    grid-template-columns: minmax(180px, 0.9fr) minmax(240px, 1.25fr) auto auto;
+    grid-template-columns:
+      minmax(180px, 0.9fr) minmax(240px, 1.25fr)
+      auto auto auto;
     align-items: end;
     gap: 7px;
     border-top: 1px solid var(--d2-line-bright);
@@ -2263,6 +2526,23 @@
   }
 
   @media (max-width: 1120px) {
+    .d2-bank-strip {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    }
+
+    .d2-bank-strip > * {
+      min-width: 0;
+    }
+
+    .d2-bank-strip select {
+      width: 100%;
+      min-width: 0;
+    }
+
+    .d2-preset-controls {
+      grid-column: 1 / -1;
+    }
+
     .d2-codec-strip {
       grid-template-columns: 1fr 1fr;
     }

@@ -6,6 +6,7 @@
     EMPTY_LIBRARY_VIEW,
     canReorderActiveMembers,
     describeIntrinsicFormat,
+    describeImportSummary,
     describeLoadedSlots,
     describeCommandError,
     formatDuration,
@@ -126,7 +127,7 @@
       const summary = await invoke<ImportSummary>("library_import_files", {
         paths,
       });
-      return importNotice(summary);
+      return describeImportSummary(summary);
     }, "Import complete.");
   }
 
@@ -138,18 +139,8 @@
         path: selection,
         recursive: recursiveFolderImport,
       });
-      return importNotice(summary);
+      return describeImportSummary(summary);
     }, "Folder import complete.");
-  }
-
-  function importNotice(summary: ImportSummary): string {
-    const parts = [`${summary.accepted} accepted`];
-    if (summary.rejected.length > 0)
-      parts.push(`${summary.rejected.length} rejected`);
-    if (summary.ignoredNonCartridges > 0) {
-      parts.push(`${summary.ignoredNonCartridges} non-cartridge files ignored`);
-    }
-    return parts.join(" · ");
   }
 
   async function reindex(): Promise<void> {
@@ -350,7 +341,7 @@
       await invoke("library_mark_recent", {
         archiveSha256: cartridge.archiveSha256,
       });
-    }, "Cartridge moved to Recent.");
+    }, "Cartridge added to Recent.");
   }
 
   async function saveDiagnostics(): Promise<void> {
@@ -704,9 +695,12 @@
 
                 <div class="format-line">
                   <span>{describeIntrinsicFormat(cartridge).aspectLabel}</span>
-                  <span>{describeIntrinsicFormat(cartridge).decodedGeometry}</span>
+                  <span
+                    >{describeIntrinsicFormat(cartridge).decodedGeometry}</span
+                  >
                   {#if describeIntrinsicFormat(cartridge).latentGrid !== null}<span
-                      >LATENT {describeIntrinsicFormat(cartridge).latentGrid}</span
+                      >LATENT {describeIntrinsicFormat(cartridge)
+                        .latentGrid}</span
                     >{/if}
                   <span
                     >{cartridge.codecFamily}/{cartridge.codecProfile}@{cartridge.codecProfileVersion}</span
@@ -786,7 +780,7 @@
                   <button
                     type="button"
                     onclick={() => void markRecent(cartridge)}
-                    disabled={busy}>Use / Recent</button
+                    disabled={busy}>Add to Recent</button
                   >
                   {#if activeCollection !== undefined && !activeCollection.isVirtual}
                     <button
@@ -829,7 +823,7 @@
         </div>
       </div>
       {#if view.recent.length === 0}
-        <p class="recent-empty">Use a cartridge to place it here.</p>
+        <p class="recent-empty">Choose Add to Recent on a cartridge card.</p>
       {:else}
         <ol class="recent-list">
           {#each view.recent as cartridge, index (cartridge.archiveSha256)}

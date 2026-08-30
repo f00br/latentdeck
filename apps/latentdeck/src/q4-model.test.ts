@@ -7,6 +7,7 @@ import {
   buildQ4OpenRequest,
   chooseQ4Sources,
   findQ4DuplicateSources,
+  q4ControlsValidationError,
   q4LiveCaptureAction,
   resolveQ4DonorWeights,
   setQ4SlotLoop,
@@ -224,6 +225,24 @@ describe("Q4 influence and transport", () => {
         triangleY: 1,
       }),
     ).toThrow("inside");
+  });
+
+  it("keeps invalid triangle edits out of the realtime command lane", () => {
+    expect(q4ControlsValidationError(DEFAULT_Q4_CONTROLS)).toBeNull();
+    expect(
+      q4ControlsValidationError({
+        ...DEFAULT_Q4_CONTROLS,
+        influenceMode: "TRIANGLE",
+        triangleX: 1,
+        triangleY: 1,
+      }),
+    ).toBe("Q4 triangle point must lie inside the B/C/D influence field.");
+    expect(
+      q4ControlsValidationError({
+        ...DEFAULT_Q4_CONTROLS,
+        topK: 2.5,
+      }),
+    ).toBe("Top K must be an integer within 1…64.");
   });
 
   it("changes only the selected physical slot transport flag", () => {

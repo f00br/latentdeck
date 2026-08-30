@@ -3,16 +3,21 @@ import {
   EMPTY_PLAYER_VIEW,
   acceptTrustedSnapshot,
   controlsFor,
+  describeAudioAvailability,
   describeDiagnosticSaveResult,
+  describePlayerOperation,
   describeRuntimeStatus,
   diagnosticSaveEnabled,
   formatFrameRate,
   formatFramePosition,
+  fullscreenActionLabel,
   progressPercent,
+  selectDisplayedError,
   spoutControlsFor,
-  type SpoutStatus,
   type DiagnosticSaveResult,
+  type PlayerError,
   type PlayerView,
+  type SpoutStatus,
 } from "./player-model";
 
 const SPOUT_READY: SpoutStatus = {
@@ -201,5 +206,47 @@ describe("LatentPlayer presentation state", () => {
     expect(describeDiagnosticSaveResult({ status: "cancelled" })).toContain(
       "cancelled",
     );
+  });
+
+  it("gives every long-running master-user action a visible operation label", () => {
+    expect(describePlayerOperation("open")).toBe("Opening cartridge…");
+    expect(describePlayerOperation("decoder")).toBe("Validating decoder…");
+    expect(describePlayerOperation("play")).toBe("Starting playback…");
+    expect(describePlayerOperation("restart")).toBe("Restarting decoder…");
+  });
+
+  it("states the v0.1 audio boundary for both AV and visual-only cartridges", () => {
+    expect(describeAudioAvailability(READY)).toBe(
+      "Audio payload preserved · playback unavailable in v0.1",
+    );
+    expect(
+      describeAudioAvailability({
+        ...READY,
+        cartridge: { ...READY.cartridge!, audioPresent: false },
+      }),
+    ).toBe("Visual-only cartridge · no audio payload");
+    expect(describeAudioAvailability(EMPTY_PLAYER_VIEW)).toBeNull();
+  });
+
+  it("shows a fresh command failure ahead of an older coordinator failure", () => {
+    const persistent: PlayerError = {
+      code: "worker.crashed",
+      message: "The decoder worker stopped.",
+      recoverable: true,
+    };
+    const transient: PlayerError = {
+      code: "codec.asset_validation_failed",
+      message: "The selected decoder is incompatible.",
+      recoverable: true,
+    };
+
+    expect(selectDisplayedError(persistent, transient)).toBe(transient);
+    expect(selectDisplayedError(persistent, null)).toBe(persistent);
+  });
+
+  it("labels fullscreen from confirmed native state", () => {
+    expect(fullscreenActionLabel(null)).toBe("Fullscreen");
+    expect(fullscreenActionLabel({ active: false })).toBe("Fullscreen");
+    expect(fullscreenActionLabel({ active: true })).toBe("Exit fullscreen");
   });
 });

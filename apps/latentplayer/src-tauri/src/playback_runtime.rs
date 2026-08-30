@@ -537,12 +537,30 @@ mod windows {
             Ok(view)
         }
 
-        /// Toggle the separate native output window fullscreen state.
-        pub async fn toggle_fullscreen(&self) -> Result<bool, PlaybackRuntimeError> {
+        /// Return the fullscreen state reported by the separate native output
+        /// window. The control UI uses this confirmed value rather than
+        /// inferring state from the last requested action.
+        pub async fn fullscreen_status(&self) -> Result<bool, PlaybackRuntimeError> {
             self.ensure_open()?;
             match request_presenter(
                 &self.presenter_tx,
-                PresenterRequest::ToggleFullscreen,
+                PresenterRequest::FullscreenStatus,
+                ACTOR_REPLY_TIMEOUT,
+            )
+            .await?
+            {
+                PresenterReply::Fullscreen(value) => Ok(value),
+                _ => Err(PlaybackRuntimeError::channel_closed()),
+            }
+        }
+
+        /// Set the separate native output window fullscreen state explicitly
+        /// and return the state confirmed by the native window.
+        pub async fn set_fullscreen(&self, enabled: bool) -> Result<bool, PlaybackRuntimeError> {
+            self.ensure_open()?;
+            match request_presenter(
+                &self.presenter_tx,
+                PresenterRequest::SetFullscreen { enabled },
                 ACTOR_REPLY_TIMEOUT,
             )
             .await?
@@ -1324,11 +1342,8 @@ mod windows {
                     }
                     result.map(|()| PresenterReply::Unit)
                 }
-                PresenterRequest::ToggleFullscreen => self
-                    .output
-                    .toggle_fullscreen()
-                    .map(PresenterReply::Fullscreen)
-                    .map_err(|error| PlaybackRuntimeError::output(error.code())),
+                PresenterRequest::FullscreenStatus => self.fullscreen_reply(None),
+                PresenterRequest::SetFullscreen { enabled } => self.fullscreen_reply(Some(enabled)),
                 PresenterRequest::Resize { width, height } => self
                     .output
                     .resize(width, height)
@@ -1385,6 +1400,21 @@ mod windows {
                     }
                 }
             }
+        }
+
+        fn fullscreen_reply(
+            &self,
+            requested: Option<bool>,
+        ) -> Result<PresenterReply, PlaybackRuntimeError> {
+            if let Some(enabled) = requested {
+                self.output
+                    .set_fullscreen(enabled)
+                    .map_err(|error| PlaybackRuntimeError::output(error.code()))?;
+            }
+            self.output
+                .fullscreen()
+                .map(PresenterReply::Fullscreen)
+                .map_err(|error| PlaybackRuntimeError::output(error.code()))
         }
 
         fn diagnostic_snapshot(&mut self) -> Result<PresenterReply, PlaybackRuntimeError> {
@@ -1519,7 +1549,10 @@ mod windows {
         Resume,
         Quiesce,
         AdoptGeneration(u64),
-        ToggleFullscreen,
+        FullscreenStatus,
+        SetFullscreen {
+            enabled: bool,
+        },
         Resize {
             width: u32,
             height: u32,
@@ -2015,6 +2048,19 @@ mod windows {
         use super::*;
 
         #[test]
+        fn fullscreen_presenter_contract_is_explicit_and_queryable() {
+            let set = PresenterRequest::SetFullscreen { enabled: true };
+            assert!(matches!(
+                set,
+                PresenterRequest::SetFullscreen { enabled: true }
+            ));
+            assert!(matches!(
+                PresenterRequest::FullscreenStatus,
+                PresenterRequest::FullscreenStatus
+            ));
+        }
+
+        #[test]
         fn rational_clock_accumulates_without_per_frame_rounding_drift() {
             assert_eq!(frame_offset_ns(24, 1, 1).expect("first"), 41_666_666);
             assert_eq!(frame_offset_ns(24, 1, 2).expect("second"), 83_333_333);
@@ -2158,7 +2204,11 @@ impl PlaybackRuntime {
         Err(PlaybackRuntimeError::unsupported())
     }
 
-    pub async fn toggle_fullscreen(&self) -> Result<bool, PlaybackRuntimeError> {
+    pub async fn fullscreen_status(&self) -> Result<bool, PlaybackRuntimeError> {
+        Err(PlaybackRuntimeError::unsupported())
+    }
+
+    pub async fn set_fullscreen(&self, _enabled: bool) -> Result<bool, PlaybackRuntimeError> {
         Err(PlaybackRuntimeError::unsupported())
     }
 

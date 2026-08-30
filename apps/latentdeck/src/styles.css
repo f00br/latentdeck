@@ -369,6 +369,8 @@ input::placeholder {
   border: 1px solid;
   padding: 8px 11px;
   font-size: 0.73rem;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .message.notice {

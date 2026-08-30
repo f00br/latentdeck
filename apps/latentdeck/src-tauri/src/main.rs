@@ -21,9 +21,10 @@ mod runtime_diagnostics;
 
 use d2_runtime::D2_OUTPUT_WINDOW_LABEL;
 use d2_state::{
-    D2AppState, ExitRequest, deck_d2_backend_status_get, deck_d2_capture_live_start,
-    deck_d2_capture_live_stop, deck_d2_capture_snapshot, deck_d2_capture_status_get,
-    deck_d2_controls_set, deck_d2_fullscreen, deck_d2_open, deck_d2_restart, deck_d2_seed_set,
+    D2AppState, ExitRequest, deck_d2_backend_rediscover, deck_d2_backend_status_get,
+    deck_d2_capture_live_start, deck_d2_capture_live_stop, deck_d2_capture_snapshot,
+    deck_d2_capture_status_get, deck_d2_controls_set, deck_d2_fullscreen_set,
+    deck_d2_fullscreen_status_get, deck_d2_open, deck_d2_restart, deck_d2_seed_set,
     deck_d2_select_decoder, deck_d2_spout_configure, deck_d2_spout_status_get, deck_d2_status_get,
     deck_d2_transport_set,
 };
@@ -42,9 +43,10 @@ use library_state::{
 use preset_state::{deck_preset_load, deck_preset_save};
 use q4_runtime::Q4_OUTPUT_WINDOW_LABEL;
 use q4_state::{
-    Q4AppState, deck_q4_backend_status_get, deck_q4_capture_live_start, deck_q4_capture_live_stop,
-    deck_q4_capture_snapshot, deck_q4_capture_status_get, deck_q4_controls_set, deck_q4_fullscreen,
-    deck_q4_open, deck_q4_restart, deck_q4_roles_set, deck_q4_seed_set, deck_q4_select_decoder,
+    Q4AppState, deck_q4_backend_rediscover, deck_q4_backend_status_get, deck_q4_capture_live_start,
+    deck_q4_capture_live_stop, deck_q4_capture_snapshot, deck_q4_capture_status_get,
+    deck_q4_controls_set, deck_q4_fullscreen_set, deck_q4_fullscreen_status_get, deck_q4_open,
+    deck_q4_restart, deck_q4_roles_set, deck_q4_seed_set, deck_q4_select_decoder,
     deck_q4_spout_configure, deck_q4_spout_status_get, deck_q4_status_get, deck_q4_transport_set,
 };
 
@@ -290,6 +292,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             product_version,
             deck_d2_backend_status_get,
+            deck_d2_backend_rediscover,
             deck_d2_select_decoder,
             deck_d2_open,
             deck_d2_controls_set,
@@ -301,10 +304,12 @@ fn main() {
             deck_d2_capture_live_stop,
             deck_d2_capture_status_get,
             deck_d2_status_get,
-            deck_d2_fullscreen,
+            deck_d2_fullscreen_status_get,
+            deck_d2_fullscreen_set,
             deck_d2_spout_status_get,
             deck_d2_spout_configure,
             deck_q4_backend_status_get,
+            deck_q4_backend_rediscover,
             deck_q4_select_decoder,
             deck_q4_open,
             deck_q4_controls_set,
@@ -317,7 +322,8 @@ fn main() {
             deck_q4_capture_live_stop,
             deck_q4_capture_status_get,
             deck_q4_status_get,
-            deck_q4_fullscreen,
+            deck_q4_fullscreen_status_get,
+            deck_q4_fullscreen_set,
             deck_q4_spout_status_get,
             deck_q4_spout_configure,
             library_snapshot,

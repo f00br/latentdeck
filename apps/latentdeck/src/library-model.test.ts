@@ -4,6 +4,7 @@ import {
   EMPTY_LIBRARY_VIEW,
   canReorderActiveMembers,
   compatibilityReasonsByHash,
+  describeImportSummary,
   describeIntrinsicFormat,
   describeLoadedSlots,
   moveItem,
@@ -149,6 +150,31 @@ describe("tag input", () => {
       "warm",
       "Cold",
     ]);
+  });
+});
+
+describe("import feedback", () => {
+  it("shows bounded per-file rejection details instead of only a count", () => {
+    const rejected = Array.from({ length: 6 }, (_, index) => ({
+      path: `W:\\private\\bad-${index + 1}.lc`,
+      code: "cartridge.hash_mismatch",
+      message: "Payload hash does not match the manifest.",
+    }));
+
+    const description = describeImportSummary({
+      accepted: 2,
+      rejected,
+      ignoredNonCartridges: 3,
+    });
+
+    expect(description).toContain(
+      "2 accepted · 6 rejected · 3 non-cartridge files ignored",
+    );
+    expect(description).toContain(
+      "Rejected 1: W:\\private\\bad-1.lc · cartridge.hash_mismatch",
+    );
+    expect(description).not.toContain("bad-6.lc");
+    expect(description).toContain("1 more rejected file.");
   });
 });
 

@@ -461,19 +461,27 @@ impl NativeOutput {
             .map_err(|_| NativeOutputError::WindowFullscreen)
     }
 
+    /// Return the fullscreen state reported by the native output window.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized Tauri window-operation failure.
+    pub fn fullscreen(&self) -> Result<bool, NativeOutputError> {
+        self.window
+            .is_fullscreen()
+            .map_err(|_| NativeOutputError::WindowFullscreen)
+    }
+
     /// Toggle fullscreen and return the newly requested state.
     ///
     /// # Errors
     ///
     /// Returns a sanitized Tauri window-operation failure.
     pub fn toggle_fullscreen(&self) -> Result<bool, NativeOutputError> {
-        let fullscreen = self
-            .window
-            .is_fullscreen()
-            .map_err(|_| NativeOutputError::WindowFullscreen)?;
+        let fullscreen = self.fullscreen()?;
         let next = !fullscreen;
         self.set_fullscreen(next)?;
-        Ok(next)
+        self.fullscreen()
     }
 
     /// Apply a physical resize event. Zero dimensions suspend acquisition and

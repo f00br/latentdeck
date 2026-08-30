@@ -8,6 +8,7 @@ import {
   MAX_SAFE_D2_SEED,
   buildD2OpenRequest,
   chooseD2Sources,
+  d2ControlsValidationError,
   parseD2Seed,
   isD2CaptureActive,
   setSlotPlaying,
@@ -131,6 +132,82 @@ describe("LD-D2 operator draft", () => {
       archiveSha256: "b".repeat(64),
     });
     expect(JSON.stringify(request)).not.toContain("private-");
+  });
+
+  it("mirrors every native numeric bound and D2 cross-field constraint", () => {
+    expect(d2ControlsValidationError(DEFAULT_D2_CONTROLS)).toBeNull();
+    expect(
+      d2ControlsValidationError({
+        ...DEFAULT_D2_CONTROLS,
+        mix: Number.NaN,
+      }),
+    ).toBe("Mix must be within 0…1.");
+    expect(
+      d2ControlsValidationError({
+        ...DEFAULT_D2_CONTROLS,
+        temperature: undefined as unknown as number,
+      }),
+    ).toBe("Temperature must be within 0.02…1.");
+    expect(
+      d2ControlsValidationError({
+        ...DEFAULT_D2_CONTROLS,
+        xs1ChannelA: 1.5,
+      }),
+    ).toBe("XS1 channel A must be an integer within 0…23.");
+    expect(
+      d2ControlsValidationError({
+        ...DEFAULT_D2_CONTROLS,
+        xs1ChannelB: DEFAULT_D2_CONTROLS.xs1ChannelA,
+      }),
+    ).toBe("XS1 channels A and B must differ.");
+    expect(
+      d2ControlsValidationError({
+        ...DEFAULT_D2_CONTROLS,
+        xs2Radius: 9,
+      }),
+    ).toBe("XS2 spatial radius must be an integer within 1…8.");
+    expect(
+      d2ControlsValidationError({
+        ...DEFAULT_D2_CONTROLS,
+        xs1AngleDegrees: 181,
+      }),
+    ).toBe("XS1 angle must be within -180…180.");
+    expect(
+      d2ControlsValidationError({
+        ...DEFAULT_D2_CONTROLS,
+        xs3HighGain: -2.01,
+      }),
+    ).toBe("XS3 high gain must be within -2…2.");
+    expect(
+      d2ControlsValidationError({
+        ...DEFAULT_D2_CONTROLS,
+        xs4Epsilon: 0,
+      }),
+    ).toBe("XS4 epsilon must be within 1e-8…0.001.");
+    expect(
+      d2ControlsValidationError({
+        ...DEFAULT_D2_CONTROLS,
+        topK: 2.5,
+      }),
+    ).toBe("Top K must be an integer within 1…64.");
+    expect(
+      d2ControlsValidationError({
+        ...DEFAULT_D2_CONTROLS,
+        sinkhornIterations: 13,
+      }),
+    ).toBe("Sinkhorn iterations must be an integer within 2…12.");
+  });
+
+  it("refuses to build an open request from an invalid control draft", () => {
+    expect(() =>
+      buildD2OpenRequest(
+        cartridge("a"),
+        cartridge("b"),
+        { ...DEFAULT_D2_CONTROLS, topK: 1.5 },
+        DEFAULT_D2_TRANSPORT,
+        44,
+      ),
+    ).toThrow("Top K must be an integer within 1…64.");
   });
 
   it("chooses deterministic present sources from the active Bank only", () => {

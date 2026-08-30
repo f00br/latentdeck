@@ -38,6 +38,15 @@ export interface D2SourceIdentity {
   archiveSha256: string;
 }
 
+export interface D2SourceStatus extends D2SourceIdentity {
+  latentSlotCount: string;
+}
+
+export interface D2LoadedSources {
+  sourceA: D2SourceStatus;
+  sourceB: D2SourceStatus;
+}
+
 export interface D2OpenRequest {
   sourceA: D2SourceIdentity;
   sourceB: D2SourceIdentity;
@@ -63,6 +72,7 @@ export interface D2SeedAck {
 
 export interface D2Status {
   loaded: boolean;
+  sources: D2LoadedSources | null;
   streamGeneration: string;
   streamSequence: string;
   playheadA: number;
@@ -155,6 +165,7 @@ export const DEFAULT_D2_TRANSPORT: D2Transport = Object.freeze({
 
 export const DEFAULT_D2_STATUS: D2Status = Object.freeze({
   loaded: false,
+  sources: null,
   streamGeneration: "0",
   streamSequence: "0",
   playheadA: 0,
@@ -200,6 +211,51 @@ export function copyD2Controls(controls: D2Controls): D2Controls {
   return { ...controls };
 }
 
+/**
+ * Mirror the native D2 control contract before a draft enters the bounded
+ * realtime command lane. Native validation remains authoritative; this keeps
+ * temporary number-field states such as an empty value, NaN, or a fractional
+ * integer from becoming ordinary host errors while the user is editing.
+ */
+export function d2ControlsValidationError(controls: D2Controls): string | null {
+  const bounded: ReadonlyArray<
+    readonly [label: string, value: number, minimum: number, maximum: number]
+  > = [
+    ["Mix", controls.mix, 0, 1],
+    ["Interaction", controls.interaction, 0, 1],
+    ["Preserve", controls.preserve, 0, 1],
+    ["Chaos", controls.chaos, 0, 1],
+    ["XS1 angle", controls.xs1AngleDegrees, -180, 180],
+    ["XS3 high gain", controls.xs3HighGain, -2, 2],
+    ["XS4 epsilon", controls.xs4Epsilon, 0.00000001, 0.001],
+    ["Temperature", controls.temperature, 0.02, 1],
+  ];
+  for (const [label, value, minimum, maximum] of bounded) {
+    if (!Number.isFinite(value) || value < minimum || value > maximum) {
+      return `${label} must be within ${minimum}…${maximum}.`;
+    }
+  }
+
+  const integers: ReadonlyArray<
+    readonly [label: string, value: number, minimum: number, maximum: number]
+  > = [
+    ["XS1 channel A", controls.xs1ChannelA, 0, 23],
+    ["XS1 channel B", controls.xs1ChannelB, 0, 23],
+    ["XS2 spatial radius", controls.xs2Radius, 1, 8],
+    ["Top K", controls.topK, 1, 64],
+    ["Sinkhorn iterations", controls.sinkhornIterations, 2, 12],
+  ];
+  for (const [label, value, minimum, maximum] of integers) {
+    if (!Number.isInteger(value) || value < minimum || value > maximum) {
+      return `${label} must be an integer within ${minimum}…${maximum}.`;
+    }
+  }
+  if (controls.xs1ChannelA === controls.xs1ChannelB) {
+    return "XS1 channels A and B must differ.";
+  }
+  return null;
+}
+
 export function copyD2Transport(transport: D2Transport): D2Transport {
   return { ...transport };
 }
@@ -231,6 +287,10 @@ export function buildD2OpenRequest(
     sourceB.availability !== "present"
   ) {
     throw new Error("D2 sources must be present before they can be opened.");
+  }
+  const controlsValidation = d2ControlsValidationError(controls);
+  if (controlsValidation !== null) {
+    throw new Error(controlsValidation);
   }
   if (parseD2Seed(seed) === null) {
     throw new Error("D2 seed must be a non-negative u53 integer.");

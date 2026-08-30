@@ -28,6 +28,7 @@ export interface Q4HostAdapter {
 
 export interface Q4Client {
   backendStatusGet(): Promise<Q4BackendView>;
+  backendRediscover(): Promise<Q4BackendView>;
   selectDecoder(): Promise<Q4BackendView>;
   open(request: Q4OpenRequest): Promise<Q4Status>;
   controlsSet(controls: Q4Controls): Promise<Q4ControlsAck>;
@@ -35,6 +36,8 @@ export interface Q4Client {
   transportSet(transport: Q4Transport): Promise<Q4TransportAck>;
   seedSet(seed: number): Promise<Q4SeedAck>;
   restart(): Promise<Q4Status>;
+  fullscreenStatusGet(): Promise<boolean | null>;
+  fullscreenSet(enabled: boolean): Promise<boolean>;
   captureSnapshot(): Promise<Q4CaptureView | null>;
   captureLiveStart(): Promise<Q4CaptureView | null>;
   captureLiveStop(): Promise<Q4CaptureView>;
@@ -45,11 +48,14 @@ export interface Q4Client {
   onStatus(handler: (status: Q4Status) => void): Promise<StopQ4Listener>;
   onError(handler: (error: Q4ErrorEvent) => void): Promise<StopQ4Listener>;
   onCapture(handler: (capture: Q4CaptureView) => void): Promise<StopQ4Listener>;
-  onCaptureError(handler: (error: Q4ErrorEvent) => void): Promise<StopQ4Listener>;
+  onCaptureError(
+    handler: (error: Q4ErrorEvent) => void,
+  ): Promise<StopQ4Listener>;
 }
 
 export const Q4_COMMANDS = Object.freeze({
   backendStatusGet: "deck_q4_backend_status_get",
+  backendRediscover: "deck_q4_backend_rediscover",
   selectDecoder: "deck_q4_select_decoder",
   open: "deck_q4_open",
   controlsSet: "deck_q4_controls_set",
@@ -57,6 +63,8 @@ export const Q4_COMMANDS = Object.freeze({
   transportSet: "deck_q4_transport_set",
   seedSet: "deck_q4_seed_set",
   restart: "deck_q4_restart",
+  fullscreenStatusGet: "deck_q4_fullscreen_status_get",
+  fullscreenSet: "deck_q4_fullscreen_set",
   captureSnapshot: "deck_q4_capture_snapshot",
   captureLiveStart: "deck_q4_capture_live_start",
   captureLiveStop: "deck_q4_capture_live_stop",
@@ -82,21 +90,31 @@ const tauriHost: Q4HostAdapter = {
 
 export function createQ4Client(host: Q4HostAdapter = tauriHost): Q4Client {
   return {
-    backendStatusGet: () => host.invoke<Q4BackendView>(Q4_COMMANDS.backendStatusGet, {}),
-    selectDecoder: () => host.invoke<Q4BackendView>(Q4_COMMANDS.selectDecoder, {}),
+    backendStatusGet: () =>
+      host.invoke<Q4BackendView>(Q4_COMMANDS.backendStatusGet, {}),
+    backendRediscover: () =>
+      host.invoke<Q4BackendView>(Q4_COMMANDS.backendRediscover, {}),
+    selectDecoder: () =>
+      host.invoke<Q4BackendView>(Q4_COMMANDS.selectDecoder, {}),
     open: (request) => host.invoke<Q4Status>(Q4_COMMANDS.open, { ...request }),
     controlsSet: (controls) =>
       host.invoke<Q4ControlsAck>(Q4_COMMANDS.controlsSet, { controls }),
-    rolesSet: (roles) => host.invoke<Q4RolesAck>(Q4_COMMANDS.rolesSet, { roles }),
+    rolesSet: (roles) =>
+      host.invoke<Q4RolesAck>(Q4_COMMANDS.rolesSet, { roles }),
     transportSet: (transport) =>
       host.invoke<Q4TransportAck>(Q4_COMMANDS.transportSet, { transport }),
     seedSet: (seed) => host.invoke<Q4SeedAck>(Q4_COMMANDS.seedSet, { seed }),
     restart: () => host.invoke<Q4Status>(Q4_COMMANDS.restart, {}),
+    fullscreenStatusGet: () =>
+      host.invoke<boolean | null>(Q4_COMMANDS.fullscreenStatusGet, {}),
+    fullscreenSet: (enabled) =>
+      host.invoke<boolean>(Q4_COMMANDS.fullscreenSet, { enabled }),
     captureSnapshot: () =>
       host.invoke<Q4CaptureView | null>(Q4_COMMANDS.captureSnapshot, {}),
     captureLiveStart: () =>
       host.invoke<Q4CaptureView | null>(Q4_COMMANDS.captureLiveStart, {}),
-    captureLiveStop: () => host.invoke<Q4CaptureView>(Q4_COMMANDS.captureLiveStop, {}),
+    captureLiveStop: () =>
+      host.invoke<Q4CaptureView>(Q4_COMMANDS.captureLiveStop, {}),
     captureStatusGet: () =>
       host.invoke<Q4CaptureView>(Q4_COMMANDS.captureStatusGet, {}),
     statusGet: () => host.invoke<Q4Status>(Q4_COMMANDS.statusGet, {}),
@@ -106,10 +124,25 @@ export function createQ4Client(host: Q4HostAdapter = tauriHost): Q4Client {
       host.invoke<SpoutStatus>(Q4_COMMANDS.spoutConfigure, { name, enabled }),
     onStatus: (handler) => host.listen<Q4Status>(Q4_EVENTS.status, handler),
     onError: (handler) => host.listen<Q4ErrorEvent>(Q4_EVENTS.error, handler),
-    onCapture: (handler) => host.listen<Q4CaptureView>(Q4_EVENTS.capture, handler),
+    onCapture: (handler) =>
+      host.listen<Q4CaptureView>(Q4_EVENTS.capture, handler),
     onCaptureError: (handler) =>
       host.listen<Q4ErrorEvent>(Q4_EVENTS.captureError, handler),
   };
+}
+
+export interface Q4DecoderSelectionResult {
+  backend: Q4BackendView;
+  status: Q4Status;
+}
+
+/** See `selectD2DecoderAndStatus`; Q4 has the same picker/runtime contract. */
+export async function selectQ4DecoderAndStatus(
+  client: Pick<Q4Client, "selectDecoder" | "statusGet">,
+): Promise<Q4DecoderSelectionResult> {
+  const backend = await client.selectDecoder();
+  const status = await client.statusGet();
+  return { backend, status };
 }
 
 export const q4Client = createQ4Client();

@@ -1,7 +1,11 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { onMount, tick } from "svelte";
-  import { q4Client, type StopQ4Listener } from "./q4-client";
+  import {
+    q4Client,
+    selectQ4DecoderAndStatus,
+    type StopQ4Listener,
+  } from "./q4-client";
   import {
     DEFAULT_Q4_BACKEND,
     DEFAULT_Q4_CAPTURE,
@@ -17,9 +21,8 @@
     copyQ4Roles,
     copyQ4Transport,
     findQ4DuplicateSources,
-    isQ4CaptureActive,
     parseQ4Seed,
-    q4LiveCaptureAction,
+    q4ControlsValidationError,
     resolveQ4DonorWeights,
     setQ4SlotLoop,
     setQ4SlotPlaying,
@@ -28,7 +31,6 @@
     type Q4CaptureView,
     type Q4Controls,
     type Q4ErrorEvent,
-    type Q4LiveCaptureAction,
     type Q4LoadedSources,
     type Q4Roles,
     type Q4Slot,
@@ -36,6 +38,7 @@
     type Q4Status,
     type Q4Transport,
   } from "./q4-model";
+  import { deckCaptureActions, deckCaptureUiPolicy } from "./capture-policy";
   import {
     EMPTY_LIBRARY_VIEW,
     compatibilityReasonsByHash,
@@ -67,6 +70,10 @@
     type PresetLoopDraft,
     type Q4DeckPreset,
   } from "./preset-model";
+  import {
+    LatestValueDispatcher,
+    sameControlSnapshot,
+  } from "./realtime-controls";
 
   type HostState = "checking" | "ready" | "pending" | "error";
 
@@ -104,11 +111,13 @@
   let compatibilityReasons: ReadonlyMap<string, readonly string[]> = new Map();
   let compatibilityReady = false;
   let compatibilityRequest = 0;
-  type Q4PresetLoops = Pick<
-    Q4Transport,
-    "loopA" | "loopB" | "loopC" | "loopD"
-  >;
+  type Q4PresetLoops = Pick<Q4Transport, "loopA" | "loopB" | "loopC" | "loopD">;
   let presetLoopDraft: PresetLoopDraft<Q4PresetLoops> | null = null;
+  let lastImportedCaptureId = "";
+  let controlsDispatchRunning = false;
+  let controlsDispatchPending = false;
+  let fullscreenBusy = false;
+  let outputFullscreen: boolean | null = null;
 
   let activeBank: CollectionView | undefined;
   let sourceA: CartridgeView | undefined;
@@ -118,7 +127,6 @@
   let sourceOptions: CartridgeView[] = [];
   let presentCount = 0;
   let captureActive = false;
-  let liveCaptureAction: Q4LiveCaptureAction = "start";
   let rolesValid = true;
   let resolvedWeights: readonly [number, number, number] = [
     1 / 3,
@@ -146,6 +154,47 @@
   let loadedDistinctSourceCount = 0;
   let incompatibleSelectedSlots: Q4Slot[] = [];
   let selectedSourcesCompatible = false;
+  let controlsValidation: string | null = null;
+  let triangleXMinimum = 0;
+  let triangleXMaximum = 1;
+  let triangleYMaximum = 1;
+  let captureUi = deckCaptureUiPolicy(capture.mode, capture.state);
+  let captureActions = deckCaptureActions(capture.mode, capture.state, {
+    loaded: status.loaded,
+    hostBusy,
+    captureBusy,
+    controlsDirty,
+    controlsDispatchRunning,
+    controlsDispatchPending,
+    seedDirty,
+    rolesDirty,
+  });
+  let realtimeControlsEnabled = true;
+  const controlsDispatcher = new LatestValueDispatcher<Q4Controls>({
+    throttleMs: 75,
+    apply: async (controls) => {
+      const validation = q4ControlsValidationError(controls);
+      if (validation !== null) throw new Error(validation);
+      const acknowledgement = await q4Client.controlsSet(controls);
+      status = {
+        ...status,
+        controls: copyQ4Controls(acknowledgement.controls),
+      };
+      hostState = "ready";
+      hostMessage = "Realtime controls acknowledged.";
+      if (sameControlSnapshot(controlsDraft, acknowledgement.controls)) {
+        controlsDirty = false;
+      }
+    },
+    onError: (error) => {
+      controlsDirty = true;
+      markFailure(error);
+    },
+    onStateChange: ({ running, pending }) => {
+      controlsDispatchRunning = running;
+      controlsDispatchPending = pending;
+    },
+  });
 
   $: activeBank = bankView.collections.find(
     (collection) => collection.id === bankView.deckSession.activeCollectionId,
@@ -197,10 +246,37 @@
   $: presentCount = bankView.cartridges.filter(
     (cartridge) => cartridge.availability === "present",
   ).length;
-  $: captureActive = isQ4CaptureActive(capture.state);
-  $: liveCaptureAction = q4LiveCaptureAction(capture);
+  $: captureUi = deckCaptureUiPolicy(capture.mode, capture.state);
+  $: captureActive = captureUi.active;
+  $: captureActions = deckCaptureActions(capture.mode, capture.state, {
+    loaded: status.loaded,
+    hostBusy,
+    captureBusy,
+    controlsDirty,
+    controlsDispatchRunning,
+    controlsDispatchPending,
+    seedDirty,
+    rolesDirty,
+  });
+  $: realtimeControlsEnabled = captureUi.realtimeControls && !captureBusy;
   $: rolesValid = validateQ4Roles(rolesDraft);
+  $: controlsValidation = q4ControlsValidationError(controlsDraft);
   $: resolvedWeights = safeResolvedWeights(controlsDraft);
+  $: triangleXMinimum = Number.isFinite(controlsDraft.triangleY)
+    ? controlsDraft.triangleY * 0.5
+    : 0;
+  $: triangleXMaximum = Number.isFinite(controlsDraft.triangleY)
+    ? 1 - controlsDraft.triangleY * 0.5
+    : 1;
+  $: triangleYMaximum = Number.isFinite(controlsDraft.triangleX)
+    ? Math.max(
+        0,
+        Math.min(
+          1,
+          2 * Math.min(controlsDraft.triangleX, 1 - controlsDraft.triangleX),
+        ),
+      )
+    : 0;
   $: spoutControls = spoutControlsFor(spout, spoutBusy || hostBusy);
   $: spoutStateLabel = describeSpout(spout);
 
@@ -210,18 +286,19 @@
     let spoutPoll: ReturnType<typeof setInterval> | undefined;
     void (async () => {
       try {
-        stops.push(
-          ...(await Promise.all([
-            q4Client.onStatus((incoming) => !disposed && applyStatus(incoming)),
-            q4Client.onError((incoming) => !disposed && applyError(incoming)),
-            q4Client.onCapture(
-              (incoming) => !disposed && applyCapture(incoming),
-            ),
-            q4Client.onCaptureError(
-              (incoming) => !disposed && applyError(incoming),
-            ),
-          ])),
-        );
+        const listeners = await Promise.all([
+          q4Client.onStatus((incoming) => !disposed && applyStatus(incoming)),
+          q4Client.onError((incoming) => !disposed && applyError(incoming)),
+          q4Client.onCapture((incoming) => !disposed && applyCapture(incoming)),
+          q4Client.onCaptureError(
+            (incoming) => !disposed && applyCaptureError(incoming),
+          ),
+        ]);
+        if (disposed) {
+          for (const stop of listeners) stop();
+        } else {
+          stops.push(...listeners);
+        }
       } catch (error) {
         if (!disposed) markFailure(error);
       }
@@ -229,6 +306,7 @@
         await refreshBank();
         await refreshBackend();
         await refreshStatus();
+        await refreshFullscreenStatus();
         await refreshCapture();
         await refreshSpout();
         if (!disposed) {
@@ -239,6 +317,7 @@
     return () => {
       disposed = true;
       if (spoutPoll !== undefined) clearInterval(spoutPoll);
+      controlsDispatcher.dispose();
       for (const stop of stops) stop();
     };
   });
@@ -254,9 +333,7 @@
   }
 
   function sourceFor(hash: string): CartridgeView | undefined {
-    return sourceOptions.find(
-      (cartridge) => cartridge.archiveSha256 === hash,
-    );
+    return sourceOptions.find((cartridge) => cartridge.archiveSha256 === hash);
   }
 
   function applySourceChoices(): void {
@@ -405,10 +482,9 @@
       const { sources: globallyResolved, library: incoming } =
         await stagePresetLibraryLoad(
           () =>
-            invoke<(CartridgeView | null)[]>(
-              "library_resolve_preset_sources",
-              { identities },
-            ),
+            invoke<(CartridgeView | null)[]>("library_resolve_preset_sources", {
+              identities,
+            }),
           () =>
             invoke<LibraryView>("library_activate_collection_snapshot", {
               collectionId: preset.active_collection_id,
@@ -419,10 +495,7 @@
         incoming.cartridges,
         globallyResolved,
       );
-      const resolution = resolvePresetSources(
-        identities,
-        sourceOptions,
-      );
+      const resolution = resolvePresetSources(identities, sourceOptions);
       bankView = incoming;
       presetResolvedSources = globallyResolved;
       [sourceAHash, sourceBHash, sourceCHash, sourceDHash] = resolution.hashes;
@@ -463,10 +536,7 @@
       (source) => source.archiveSha256,
     );
     compatibilityReady = false;
-    if (
-      referenceArchiveSha256 === "" ||
-      candidateArchiveSha256s.length === 0
-    ) {
+    if (referenceArchiveSha256 === "" || candidateArchiveSha256s.length === 0) {
       compatibilityReasons = new Map();
       return;
     }
@@ -520,21 +590,56 @@
     }
   }
 
-  async function selectDecoder(): Promise<void> {
-    if (backendBusy) return;
+  async function rediscoverBackend(): Promise<void> {
+    if (backendBusy || captureBusy || !captureUi.decoder) return;
     backendBusy = true;
     try {
-      backend = await q4Client.selectDecoder();
-      if (backend.state === "ready") {
-        status = freshStatus();
-        hostMessage = "Decoder validated · choose four cartridges.";
-      }
+      backend = await q4Client.backendRediscover();
+      hostMessage =
+        backend.state === "missing"
+          ? "No compatible H3 Codec Pack was found."
+          : "Codec Pack discovery refreshed.";
     } catch (error) {
       backend = {
         ...backend,
         state: "error",
         detail: describeCommandError(error),
       };
+    } finally {
+      backendBusy = false;
+    }
+  }
+
+  async function selectDecoder(): Promise<void> {
+    if (backendBusy || captureBusy || !captureUi.decoder) return;
+    backendBusy = true;
+    try {
+      const selection = await selectQ4DecoderAndStatus(q4Client);
+      backend = selection.backend;
+      applyStatus(selection.status);
+      if (backend.state === "ready") {
+        hostMessage = selection.status.loaded
+          ? "Decoder selection cancelled · current Q4 stream retained."
+          : "Decoder ready · choose four cartridges.";
+      } else {
+        hostState = backend.state === "error" ? "error" : "pending";
+        hostMessage =
+          backend.detail ?? "No compatible TAEH3 decoder is selected.";
+      }
+    } catch (error) {
+      try {
+        applyStatus(await q4Client.statusGet());
+      } catch {
+        // Preserve the picker failure while status remains unavailable.
+      }
+      const detail = describeCommandError(error);
+      backend = {
+        ...backend,
+        state: "error",
+        detail,
+      };
+      hostState = "error";
+      hostMessage = detail;
     } finally {
       backendBusy = false;
     }
@@ -570,7 +675,7 @@
   }
 
   async function openDeck(): Promise<void> {
-    if (presetBusy) return;
+    if (presetBusy || captureBusy || !captureUi.load) return;
     if (backend.state !== "ready") {
       hostState = "error";
       hostMessage =
@@ -604,6 +709,12 @@
           : "Roles must be an A/B/C/D permutation.";
       return;
     }
+    if (controlsValidation !== null) {
+      hostState = "error";
+      hostMessage = controlsValidation;
+      return;
+    }
+    outputFullscreen = null;
     await runHostAction(async () => {
       const pendingLoops = presetLoopDraft?.loops;
       const transport =
@@ -641,19 +752,21 @@
       rolesDirty = false;
       seedDirty = false;
     });
+    await refreshFullscreenStatus();
   }
 
   async function applyControls(): Promise<void> {
-    await runHostAction(async () => {
-      resolveQ4DonorWeights(controlsDraft);
-      await q4Client.controlsSet(copyQ4Controls(controlsDraft));
-      applyStatus(await q4Client.statusGet());
-      controlsDirty = false;
-    });
+    if (
+      !status.loaded ||
+      !realtimeControlsEnabled ||
+      controlsValidation !== null
+    )
+      return;
+    controlsDispatcher.push(copyQ4Controls(controlsDraft), true);
   }
 
   async function applyRoles(): Promise<void> {
-    if (!rolesValid) return;
+    if (!rolesValid || !captureUi.roles || captureBusy) return;
     await runHostAction(async () => {
       await q4Client.rolesSet(copyQ4Roles(rolesDraft));
       applyStatus(await q4Client.statusGet());
@@ -662,6 +775,7 @@
   }
 
   async function applySeed(): Promise<void> {
+    if (!captureUi.seed || captureBusy) return;
     const seed = parseQ4Seed(seedDraft);
     if (seed === null) {
       hostState = "error";
@@ -676,7 +790,7 @@
   }
 
   async function setTransport(transport: Q4Transport): Promise<void> {
-    if (captureActive) return;
+    if (!captureUi.transport || captureBusy) return;
     await runHostAction(async () => {
       await q4Client.transportSet(transport);
       applyStatus(await q4Client.statusGet());
@@ -700,7 +814,7 @@
   }
 
   async function restart(): Promise<void> {
-    if (captureActive) return;
+    if (!captureUi.transport || captureBusy) return;
     await runHostAction(async () => {
       resetMessage = "Restart requested · waiting for causal reset barrier.";
       applyStatus(await q4Client.restart());
@@ -708,7 +822,7 @@
   }
 
   async function snapshot(): Promise<void> {
-    if (!status.loaded || captureActive || captureBusy) return;
+    if (!captureActions.snapshotEnabled) return;
     captureBusy = true;
     try {
       const started = await q4Client.captureSnapshot();
@@ -724,11 +838,12 @@
   }
 
   async function toggleLiveCapture(): Promise<void> {
-    if (!status.loaded || captureBusy || liveCaptureAction === null) return;
+    const action = captureActions.liveAction;
+    if (action === null) return;
     captureBusy = true;
     try {
       const incoming =
-        liveCaptureAction === "stop"
+        action === "stop"
           ? await q4Client.captureLiveStop()
           : await q4Client.captureLiveStart();
       if (incoming !== null) applyCapture(incoming);
@@ -816,11 +931,32 @@
     } else {
       hostState = "ready";
       hostMessage = "Q4 worker is not loaded.";
+      outputFullscreen = null;
     }
   }
 
   function applyCapture(incoming: Q4CaptureView): void {
     capture = { ...incoming };
+    if (!deckCaptureUiPolicy(incoming.mode, incoming.state).realtimeControls) {
+      controlsDispatcher.cancelPending();
+    }
+    if (
+      incoming.state === "finished" &&
+      incoming.captureId !== null &&
+      incoming.captureId !== lastImportedCaptureId
+    ) {
+      lastImportedCaptureId = incoming.captureId;
+      void refreshBank();
+    }
+  }
+
+  function applyCaptureError(incoming: Q4ErrorEvent): void {
+    capture = {
+      ...capture,
+      state: "error",
+      detail: `${incoming.code}: ${incoming.detail}`,
+    };
+    applyError(incoming);
   }
 
   function applySpoutStatus(incoming: SpoutStatus | null): void {
@@ -880,6 +1016,65 @@
     }
   }
 
+  function controlsChanged(): void {
+    if (!realtimeControlsEnabled) return;
+    discardPresetLoopDraft();
+    controlsDirty = true;
+    queueRealtimeControls();
+  }
+
+  function selectAlgorithm(algorithm: Q4Controls["algorithm"]): void {
+    if (!realtimeControlsEnabled) return;
+    discardPresetLoopDraft();
+    controlsDraft = { ...controlsDraft, algorithm };
+    controlsDirty = true;
+    queueRealtimeControls();
+  }
+
+  function queueRealtimeControls(): void {
+    void tick().then(() => {
+      if (
+        status.loaded &&
+        !presetBusy &&
+        realtimeControlsEnabled &&
+        controlsDirty &&
+        q4ControlsValidationError(controlsDraft) === null
+      ) {
+        controlsDispatcher.push(copyQ4Controls(controlsDraft));
+      }
+    });
+  }
+
+  async function refreshFullscreenStatus(): Promise<void> {
+    if (!status.loaded) {
+      outputFullscreen = null;
+      return;
+    }
+    if (fullscreenBusy) return;
+    fullscreenBusy = true;
+    try {
+      outputFullscreen = await q4Client.fullscreenStatusGet();
+    } catch (error) {
+      outputFullscreen = null;
+      markFailure(error);
+    } finally {
+      fullscreenBusy = false;
+    }
+  }
+
+  async function toggleFullscreen(): Promise<void> {
+    if (!status.loaded || fullscreenBusy || outputFullscreen === null) return;
+    fullscreenBusy = true;
+    try {
+      outputFullscreen = await q4Client.fullscreenSet(!outputFullscreen);
+    } catch (error) {
+      outputFullscreen = null;
+      markFailure(error);
+    } finally {
+      fullscreenBusy = false;
+    }
+  }
+
   function discardPresetLoopDraft(): void {
     if (presetLoopDraft === null) return;
     presetLoopDraft = transitionPresetLoopDraft(presetLoopDraft, {
@@ -904,10 +1099,7 @@
     return compatibilityReasons.get(cartridge.archiveSha256) ?? [];
   }
 
-  function compatibilityLabel(
-    slot: Q4Slot,
-    cartridge: CartridgeView,
-  ): string {
+  function compatibilityLabel(slot: Q4Slot, cartridge: CartridgeView): string {
     const reasons = compatibilityReasonsFor(cartridge);
     return slot === rolesDraft.carrier || reasons.length === 0
       ? cartridgeLabel(cartridge)
@@ -947,8 +1139,8 @@
 <section
   class="q4-faceplate"
   aria-labelledby="q4-title"
-  aria-busy={presetBusy}
-  inert={presetBusy}
+  aria-busy={presetBusy || captureBusy}
+  inert={presetBusy || captureBusy}
 >
   <header class="q4-header">
     <div>
@@ -1009,7 +1201,16 @@
     <button
       type="button"
       onclick={() => void selectDecoder()}
-      disabled={backendBusy}>Select decoder</button
+      disabled={backendBusy ||
+        captureBusy ||
+        !captureUi.decoder ||
+        backend.packId === null}>Select decoder</button
+    >
+    <button
+      type="button"
+      onclick={() => void rediscoverBackend()}
+      disabled={backendBusy || captureBusy || !captureUi.decoder}
+      >Refresh Codec Pack</button
     >
   </section>
 
@@ -1049,6 +1250,18 @@
       disabled={!spoutControls.toggle}
       >{spout?.enabled ? "Disable sender" : "Enable sender"}</button
     >
+    <button
+      class:active={outputFullscreen === true}
+      aria-pressed={outputFullscreen ?? false}
+      type="button"
+      disabled={!status.loaded || fullscreenBusy || outputFullscreen === null}
+      onclick={() => void toggleFullscreen()}
+      >{fullscreenBusy
+        ? "Switching…"
+        : outputFullscreen
+          ? "Exit fullscreen"
+          : "Fullscreen output"}</button
+    >
     <div class="spout-receiver">
       <span>RECEIVER NAME</span>
       <strong>{spout?.activeName || spout?.requestedName || "—"}</strong>
@@ -1087,9 +1300,9 @@
       slots.
     </p>
     <p>
-      Release performance target: 448×800. Q4 TOPK and Sinkhorn remain pending
-      until their final 30-minute receipts pass; larger intrinsic grids are not
-      yet benchmark-certified and are never downscaled implicitly.
+      Realtime acceptance target: 448×800 at 24 fps. Other intrinsic grids
+      remain playable but are not yet Deck benchmark-certified and are never
+      downscaled implicitly.
     </p>
     <div class="preset-controls">
       <span>DECK PRESET · JSON</span>
@@ -1097,8 +1310,11 @@
         <button
           type="button"
           onclick={() => void loadPreset()}
-          disabled={presetBusy || bankBusy || backendBusy || hostBusy || captureActive}
-          >Load preset</button
+          disabled={presetBusy ||
+            bankBusy ||
+            backendBusy ||
+            hostBusy ||
+            captureActive}>Load preset</button
         >
         <button
           type="button"
@@ -1149,8 +1365,7 @@
             >
           {/each}
         </select>
-        {#if slot !== rolesDraft.carrier &&
-        (compatibilityReasons.get(sourceHash(slot))?.length ?? 0) > 0}<p
+        {#if slot !== rolesDraft.carrier && (compatibilityReasons.get(sourceHash(slot))?.length ?? 0) > 0}<p
             class="inline-error"
             role="status"
           >
@@ -1185,7 +1400,10 @@
           <button
             type="button"
             onclick={() => void togglePlay(slot)}
-            disabled={!status.loaded || hostBusy || captureActive}
+            disabled={!status.loaded ||
+              hostBusy ||
+              captureBusy ||
+              !captureUi.transport}
             >{status.transport[`playing${slot}`] ? "Pause" : "Play"}</button
           >
           <label
@@ -1193,7 +1411,10 @@
               type="checkbox"
               checked={status.transport[`loop${slot}`]}
               onchange={(event) => void toggleLoop(slot, event)}
-              disabled={!status.loaded || hostBusy || captureActive}
+              disabled={!status.loaded ||
+                hostBusy ||
+                captureBusy ||
+                !captureUi.transport}
             /> Loop</label
           >
           <small>HEAD {status[`playhead${slot}`]}</small>
@@ -1249,30 +1470,35 @@
       </div>
       <code>org.latentdeck.builtin.ld_q4@0.1.0</code>
     </header>
-    <div
-      class="role-grid"
-      onchange={() => void rolesChanged()}
-    >
+    <div class="role-grid" onchange={() => void rolesChanged()}>
       <label
-        >Carrier<select bind:value={rolesDraft.carrier}
+        >Carrier<select
+          bind:value={rolesDraft.carrier}
+          disabled={!captureUi.roles || captureBusy}
           >{#each Q4_SLOTS as slot}<option value={slot}>{slot}</option
             >{/each}</select
         ></label
       >
       <label
-        >Donor B<select bind:value={rolesDraft.donorB}
+        >Donor B<select
+          bind:value={rolesDraft.donorB}
+          disabled={!captureUi.roles || captureBusy}
           >{#each Q4_SLOTS as slot}<option value={slot}>{slot}</option
             >{/each}</select
         ></label
       >
       <label
-        >Donor C<select bind:value={rolesDraft.donorC}
+        >Donor C<select
+          bind:value={rolesDraft.donorC}
+          disabled={!captureUi.roles || captureBusy}
           >{#each Q4_SLOTS as slot}<option value={slot}>{slot}</option
             >{/each}</select
         ></label
       >
       <label
-        >Donor D<select bind:value={rolesDraft.donorD}
+        >Donor D<select
+          bind:value={rolesDraft.donorD}
+          disabled={!captureUi.roles || captureBusy}
           >{#each Q4_SLOTS as slot}<option value={slot}>{slot}</option
             >{/each}</select
         ></label
@@ -1280,8 +1506,12 @@
       <button
         type="button"
         onclick={() => void applyRoles()}
-        disabled={!status.loaded || !rolesDirty || !rolesValid || hostBusy}
-        >Apply roles</button
+        disabled={!status.loaded ||
+          !rolesDirty ||
+          !rolesValid ||
+          hostBusy ||
+          captureBusy ||
+          !captureUi.roles}>Apply roles</button
       >
     </div>
     {#if !rolesValid}<p class="inline-error">
@@ -1291,10 +1521,8 @@
 
   <form
     class="operator-panel"
-    oninput={() => {
-      discardPresetLoopDraft();
-      controlsDirty = true;
-    }}
+    oninput={controlsChanged}
+    inert={!captureUi.realtimeControls}
     onsubmit={(event) => {
       event.preventDefault();
       void applyControls();
@@ -1309,19 +1537,13 @@
         <button
           type="button"
           class:active={controlsDraft.algorithm === "LINEAR"}
-          onclick={() => {
-            discardPresetLoopDraft();
-            controlsDraft.algorithm = "LINEAR";
-            controlsDirty = true;
-          }}>LINEAR</button
+          onclick={() => selectAlgorithm("LINEAR")}
+          disabled={!captureUi.realtimeControls}>LINEAR</button
         ><button
           type="button"
           class:active={controlsDraft.algorithm === "XS5"}
-          onclick={() => {
-            discardPresetLoopDraft();
-            controlsDraft.algorithm = "XS5";
-            controlsDirty = true;
-          }}>XS5</button
+          onclick={() => selectAlgorithm("XS5")}
+          disabled={!captureUi.realtimeControls}>XS5</button
         >
       </div>
     </header>
@@ -1334,6 +1556,7 @@
           max="1"
           step="0.01"
           bind:value={controlsDraft.interaction}
+          disabled={!captureUi.realtimeControls}
         /></label
       >
       <label
@@ -1343,6 +1566,7 @@
           max="1"
           step="0.01"
           bind:value={controlsDraft.preserve}
+          disabled={!captureUi.realtimeControls}
         /></label
       >
       <label
@@ -1352,6 +1576,7 @@
           max="1"
           step="0.01"
           bind:value={controlsDraft.chaos}
+          disabled={!captureUi.realtimeControls}
         /></label
       >
       <fieldset>
@@ -1360,12 +1585,14 @@
             type="radio"
             value="HYBRIDIZE"
             bind:group={controlsDraft.mode}
+            disabled={!captureUi.realtimeControls}
           /> Hybridize</label
         ><label
           ><input
             type="radio"
             value="INTERACT"
             bind:group={controlsDraft.mode}
+            disabled={!captureUi.realtimeControls}
           /> Interact</label
         >
       </fieldset>
@@ -1375,12 +1602,14 @@
             type="radio"
             value="MANUAL"
             bind:group={controlsDraft.influenceMode}
+            disabled={!captureUi.realtimeControls}
           /> Manual</label
         ><label
           ><input
             type="radio"
             value="TRIANGLE"
             bind:group={controlsDraft.influenceMode}
+            disabled={!captureUi.realtimeControls}
           /> Triangle</label
         >
       </fieldset>
@@ -1394,6 +1623,7 @@
             max="1"
             step="0.01"
             bind:value={controlsDraft.donorWeightB}
+            disabled={!captureUi.realtimeControls}
           /></label
         ><label
           >C<input
@@ -1402,6 +1632,7 @@
             max="1"
             step="0.01"
             bind:value={controlsDraft.donorWeightC}
+            disabled={!captureUi.realtimeControls}
           /></label
         ><label
           >D<input
@@ -1410,6 +1641,7 @@
             max="1"
             step="0.01"
             bind:value={controlsDraft.donorWeightD}
+            disabled={!captureUi.realtimeControls}
           /></label
         >
       </div>
@@ -1418,18 +1650,20 @@
         <label
           >Triangle X<input
             type="number"
-            min="0"
-            max="1"
+            min={triangleXMinimum}
+            max={triangleXMaximum}
             step="0.01"
             bind:value={controlsDraft.triangleX}
+            disabled={!captureUi.realtimeControls}
           /></label
         ><label
           >Triangle Y<input
             type="number"
             min="0"
-            max="1"
+            max={triangleYMaximum}
             step="0.01"
             bind:value={controlsDraft.triangleY}
+            disabled={!captureUi.realtimeControls}
           /></label
         >
       </div>
@@ -1439,10 +1673,20 @@
         >C {(resolvedWeights[1] * 100).toFixed(1)}%</span
       ><span>D {(resolvedWeights[2] * 100).toFixed(1)}%</span>
     </div>
+    {#if controlsValidation !== null}
+      <p class="inline-error">{controlsValidation}</p>
+    {:else if controlsDraft.influenceMode === "TRIANGLE"}
+      <p class="control-hint">
+        Triangle point constrained to the B/C/D field · X
+        {triangleXMinimum.toFixed(2)}…{triangleXMaximum.toFixed(2)} at current Y.
+      </p>
+    {/if}
     {#if controlsDraft.algorithm === "XS5"}
       <div class="xs5-grid">
         <label
-          >Routing<select bind:value={controlsDraft.xs5Routing}
+          >Routing<select
+            bind:value={controlsDraft.xs5Routing}
+            disabled={!captureUi.realtimeControls}
             ><option value="TOPK">TOPK</option><option value="SINKHORN"
               >SINKHORN</option
             ></select
@@ -1454,6 +1698,7 @@
             max="1"
             step="0.01"
             bind:value={controlsDraft.temperature}
+            disabled={!captureUi.realtimeControls}
           /></label
         ><label
           >Top K<input
@@ -1462,6 +1707,7 @@
             max="64"
             step="1"
             bind:value={controlsDraft.topK}
+            disabled={!captureUi.realtimeControls}
           /></label
         ><label
           >Iterations<input
@@ -1470,16 +1716,27 @@
             max="12"
             step="1"
             bind:value={controlsDraft.sinkhornIterations}
+            disabled={!captureUi.realtimeControls}
           /></label
         >
       </div>
     {/if}
     <footer>
-      <span>{controlsDirty ? "DRAFT CHANGED" : "HOST ACKNOWLEDGED"}</span
+      <span
+        >{controlsValidation !== null
+          ? "INVALID DRAFT"
+          : controlsDispatchRunning || controlsDispatchPending
+            ? "REALTIME APPLYING"
+            : controlsDirty
+              ? "DRAFT CHANGED"
+              : "HOST ACKNOWLEDGED"}</span
       ><button
         type="submit"
-        disabled={!status.loaded || !controlsDirty || hostBusy}
-        >Apply controls</button
+        disabled={!status.loaded ||
+          !controlsDirty ||
+          controlsValidation !== null ||
+          hostBusy ||
+          !captureUi.realtimeControls}>Apply now</button
       >
     </footer>
   </form>
@@ -1491,10 +1748,12 @@
         type="button"
         onclick={() => void openDeck()}
         disabled={hostBusy ||
+          captureBusy ||
+          !captureUi.load ||
           backend.state !== "ready" ||
           !allSourcesReady ||
-          !selectedSourcesCompatible}
-        >Load Q4</button
+          !selectedSourcesCompatible ||
+          controlsValidation !== null}>Load Q4</button
       >
     </div>
     <div>
@@ -1508,31 +1767,39 @@
           seedDraft = (event.currentTarget as HTMLInputElement).value;
           seedDirty = true;
         }}
+        disabled={!captureUi.seed || captureBusy}
       /><button
         type="button"
         onclick={() => void applySeed()}
-        disabled={!status.loaded || !seedDirty || hostBusy}>Set</button
+        disabled={!status.loaded ||
+          !seedDirty ||
+          hostBusy ||
+          captureBusy ||
+          !captureUi.seed}>Set</button
       >
     </div>
     <div>
       <span>CAUSAL TRANSPORT</span><button
         type="button"
         onclick={() => void restart()}
-        disabled={!status.loaded || hostBusy || captureActive}
-        >Restart all</button
+        disabled={!status.loaded ||
+          hostBusy ||
+          captureBusy ||
+          !captureUi.transport}>Restart all</button
       >
     </div>
     <div class="capture">
       <span>POST-OPERATOR RESAMPLE</span><button
         type="button"
         onclick={() => void snapshot()}
-        disabled={!status.loaded || captureActive || captureBusy}
-        >Snapshot</button
+        disabled={!captureActions.snapshotEnabled}>Snapshot</button
       ><button
         type="button"
         onclick={() => void toggleLiveCapture()}
-        disabled={!status.loaded || captureBusy || liveCaptureAction === null}
-        >{liveCaptureAction === "stop" ? "Stop Live" : "Start Live"}</button
+        disabled={captureActions.liveAction === null}
+        >{captureActions.liveAction === "stop"
+          ? "Stop Live"
+          : "Start Live"}</button
       ><small
         >{capture.detail ??
           `${capture.state} · ${capture.latentSlots} slots`}</small
@@ -1633,7 +1900,8 @@
   .status-line,
   .reset-line,
   .bank-error,
-  .inline-error {
+  .inline-error,
+  .control-hint {
     min-height: 30px;
     padding: 5px 12px;
     border-bottom: 1px solid #343548;
@@ -1656,12 +1924,15 @@
   .inline-error {
     color: #ec9aa2;
   }
+  .control-hint {
+    color: #8fa8c7;
+  }
   .reset-line {
     color: #d7c27d;
   }
   .codec-bank {
     display: grid;
-    grid-template-columns: 1fr 0.7fr 1.5fr auto;
+    grid-template-columns: 1fr 0.7fr 1.5fr auto auto;
     gap: 1px;
     border-bottom: 1px solid var(--line);
     background: #3a3b52;
@@ -1710,7 +1981,7 @@
     display: grid;
     grid-template-columns:
       minmax(190px, 0.8fr) minmax(230px, 1fr)
-      auto auto minmax(210px, 1fr);
+      auto auto auto minmax(210px, 1fr);
     align-items: end;
     gap: 7px;
     padding: 8px 12px;
@@ -2074,6 +2345,19 @@
     font-size: 0.57rem;
   }
   @media (max-width: 1180px) {
+    .bank-strip {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    }
+    .bank-strip > * {
+      min-width: 0;
+    }
+    .bank-strip select {
+      width: 100%;
+      min-width: 0;
+    }
+    .preset-controls {
+      grid-column: 1 / -1;
+    }
     .slot-grid {
       grid-template-columns: 1fr 1fr;
     }

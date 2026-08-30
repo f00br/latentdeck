@@ -32,9 +32,7 @@ export interface CartridgePathView {
 
 export type SignalOrientation = "portrait" | "landscape" | "square";
 export type SignalCompatibilityPolicy =
-  | "playback"
-  | "spatial_synthesis"
-  | "full_tensor_synthesis";
+  "playback" | "spatial_synthesis" | "full_tensor_synthesis";
 
 export interface SignalGeometry {
   codec_family: string;
@@ -142,6 +140,30 @@ export interface ImportSummary {
   accepted: number;
   rejected: ImportFailureView[];
   ignoredNonCartridges: number;
+}
+
+const MAX_VISIBLE_IMPORT_FAILURES = 5;
+
+export function describeImportSummary(summary: ImportSummary): string {
+  const parts = [`${summary.accepted} accepted`];
+  if (summary.rejected.length > 0) {
+    parts.push(`${summary.rejected.length} rejected`);
+  }
+  if (summary.ignoredNonCartridges > 0) {
+    parts.push(`${summary.ignoredNonCartridges} non-cartridge files ignored`);
+  }
+
+  const details = summary.rejected
+    .slice(0, MAX_VISIBLE_IMPORT_FAILURES)
+    .map(
+      (failure, index) =>
+        `Rejected ${index + 1}: ${failure.path} · ${failure.code} · ${failure.message}`,
+    );
+  const hidden = summary.rejected.length - details.length;
+  if (hidden > 0) {
+    details.push(`${hidden} more rejected file${hidden === 1 ? "" : "s"}.`);
+  }
+  return [parts.join(" · "), ...details].join("\n");
 }
 
 export interface ReindexSummary {

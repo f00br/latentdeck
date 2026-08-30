@@ -46,6 +46,20 @@ export interface PlayerError {
   recoverable: boolean;
 }
 
+export type PlayerOperation =
+  | "open"
+  | "decoder"
+  | "play"
+  | "pause"
+  | "loop"
+  | "restart"
+  | "fullscreen-enter"
+  | "fullscreen-exit";
+
+export interface FullscreenStatus {
+  active: boolean;
+}
+
 export interface PlayerView {
   revision: number;
   phase: PlayerPhase;
@@ -165,6 +179,47 @@ export function describeDiagnosticSaveResult(
   const size = `${kibibytes.toFixed(kibibytes >= 100 ? 0 : 1)} KiB`;
   const eventLabel = result.eventCount === 1 ? "event" : "events";
   return `Diagnostic bundle saved · ${size} · ${result.eventCount} ${eventLabel} · schema ${result.schemaVersion}`;
+}
+
+export function describePlayerOperation(operation: PlayerOperation): string {
+  switch (operation) {
+    case "open":
+      return "Opening cartridge…";
+    case "decoder":
+      return "Validating decoder…";
+    case "play":
+      return "Starting playback…";
+    case "pause":
+      return "Pausing playback…";
+    case "loop":
+      return "Updating loop mode…";
+    case "restart":
+      return "Restarting decoder…";
+    case "fullscreen-enter":
+      return "Entering fullscreen…";
+    case "fullscreen-exit":
+      return "Exiting fullscreen…";
+  }
+}
+
+export function describeAudioAvailability(view: PlayerView): string | null {
+  if (view.cartridge === null) return null;
+  return view.cartridge.audioPresent
+    ? "Audio payload preserved · playback unavailable in v0.1"
+    : "Visual-only cartridge · no audio payload";
+}
+
+export function selectDisplayedError(
+  persistent: PlayerError | null,
+  transient: PlayerError | null,
+): PlayerError | null {
+  return transient ?? persistent;
+}
+
+export function fullscreenActionLabel(
+  status: FullscreenStatus | null,
+): "Fullscreen" | "Exit fullscreen" {
+  return status?.active === true ? "Exit fullscreen" : "Fullscreen";
 }
 
 export function acceptTrustedSnapshot(

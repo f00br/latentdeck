@@ -130,6 +130,25 @@ pub(crate) fn deck_q4_backend_status_get(
     state.backend_view().map_err(command_error)
 }
 
+/// Re-run bounded physical Codec Pack discovery so an installation performed
+/// after app startup becomes available without restarting `LatentDeck`.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) async fn deck_q4_backend_rediscover(
+    state: State<'_, Q4AppState>,
+) -> Result<Q4BackendView, CommandError> {
+    let discovered = tauri::async_runtime::spawn_blocking(Q4BackendController::discover_default)
+        .await
+        .map_err(|_| {
+            CommandError::new(
+                "codec.discovery_failed",
+                "Codec Pack discovery stopped unexpectedly.",
+            )
+        })?;
+    let mut backend = lock_backend(&state.backend).map_err(command_error)?;
+    Ok(backend.accept_rediscovery(discovered))
+}
+
 /// Open a native picker and validate the selected external TAEH3 asset.
 /// There is intentionally no path argument on this command.
 #[tauri::command]
@@ -452,11 +471,29 @@ pub(crate) async fn deck_q4_status_get(
 
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
-pub(crate) async fn deck_q4_fullscreen(state: State<'_, Q4AppState>) -> Result<bool, CommandError> {
+pub(crate) async fn deck_q4_fullscreen_status_get(
+    state: State<'_, Q4AppState>,
+) -> Result<Option<bool>, CommandError> {
+    let Some(runtime) = clone_slot(&state.runtime).await else {
+        return Ok(None);
+    };
+    match runtime.fullscreen_status().await {
+        Ok(active) => Ok(Some(active)),
+        Err(error) if error.code == "deck.runtime_unavailable" => Ok(None),
+        Err(error) => Err(command_error(error)),
+    }
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) async fn deck_q4_fullscreen_set(
+    state: State<'_, Q4AppState>,
+    enabled: bool,
+) -> Result<bool, CommandError> {
     let runtime = clone_slot(&state.runtime)
         .await
         .ok_or_else(runtime_inactive)?;
-    runtime.toggle_fullscreen().await.map_err(command_error)
+    runtime.set_fullscreen(enabled).await.map_err(command_error)
 }
 
 #[tauri::command]

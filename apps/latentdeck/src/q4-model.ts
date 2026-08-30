@@ -384,6 +384,55 @@ export function resolveQ4DonorWeights(
   return [values[0] / total, values[1] / total, values[2] / total];
 }
 
+/**
+ * Validate a complete Q4 control draft before it enters the bounded realtime
+ * command lane. Native validation remains authoritative; this mirror exists so
+ * normal number-field editing cannot turn a temporary invalid value into a
+ * host error.
+ */
+export function q4ControlsValidationError(controls: Q4Controls): string | null {
+  const bounded: ReadonlyArray<
+    readonly [label: string, value: number, minimum: number, maximum: number]
+  > = [
+    ["Interaction", controls.interaction, 0, 1],
+    ["Preserve", controls.preserve, 0, 1],
+    ["Chaos", controls.chaos, 0, 1],
+    ["Donor B", controls.donorWeightB, 0, 1],
+    ["Donor C", controls.donorWeightC, 0, 1],
+    ["Donor D", controls.donorWeightD, 0, 1],
+    ["Triangle X", controls.triangleX, 0, 1],
+    ["Triangle Y", controls.triangleY, 0, 1],
+    ["Temperature", controls.temperature, 0.02, 1],
+  ];
+  for (const [label, value, minimum, maximum] of bounded) {
+    if (!Number.isFinite(value) || value < minimum || value > maximum) {
+      return `${label} must be within ${minimum}…${maximum}.`;
+    }
+  }
+  if (
+    !Number.isInteger(controls.topK) ||
+    controls.topK < 1 ||
+    controls.topK > 64
+  ) {
+    return "Top K must be an integer within 1…64.";
+  }
+  if (
+    !Number.isInteger(controls.sinkhornIterations) ||
+    controls.sinkhornIterations < 2 ||
+    controls.sinkhornIterations > 12
+  ) {
+    return "Sinkhorn iterations must be an integer within 2…12.";
+  }
+  try {
+    resolveQ4DonorWeights(controls);
+  } catch (error) {
+    return error instanceof Error
+      ? error.message
+      : "Q4 donor influence is invalid.";
+  }
+  return null;
+}
+
 export function buildQ4OpenRequest(
   sources: readonly [
     CartridgeView,

@@ -16,8 +16,8 @@ use latentdeck_cartridge::{
     reader::{ValidationOptions, open_validated},
 };
 use latentdeck_control::{
-    D2Algorithm, D2Controls, D2Mode, D2ResetReason, D2Routing, D2Status, D2Transport, D2Xs5Routing,
-    FiniteF64, MAX_D2_SAFE_INTEGER,
+    D2Algorithm, D2Controls, D2Mode, D2ResetReason, D2Routing, D2SourceStatus, D2Status,
+    D2Transport, D2Xs5Routing, FiniteF64, MAX_D2_SAFE_INTEGER,
 };
 use latentdeck_core::{
     codec_pack::{
@@ -199,6 +199,7 @@ impl From<D2Transport> for D2TransportView {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct D2StatusView {
     pub(crate) loaded: bool,
+    sources: Option<D2LoadedSourcesView>,
     stream_generation: String,
     stream_sequence: String,
     playhead_a: u64,
@@ -210,11 +211,38 @@ pub(crate) struct D2StatusView {
     pending_reset_reasons: Vec<String>,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct D2SourceStatusView {
+    cartridge_id: String,
+    archive_sha256: String,
+    latent_slot_count: String,
+}
+
+impl From<&D2SourceStatus> for D2SourceStatusView {
+    fn from(value: &D2SourceStatus) -> Self {
+        Self {
+            cartridge_id: value.cartridge_id.to_string(),
+            archive_sha256: value.archive_sha256.clone(),
+            latent_slot_count: value.latent_slot_count.to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct D2LoadedSourcesView {
+    #[serde(rename = "sourceA")]
+    a: D2SourceStatusView,
+    #[serde(rename = "sourceB")]
+    b: D2SourceStatusView,
+}
+
 impl Default for D2StatusView {
     fn default() -> Self {
         let controls = D2Controls::default();
         Self {
             loaded: false,
+            sources: None,
             stream_generation: "0".to_owned(),
             stream_sequence: "0".to_owned(),
             playhead_a: 0,
@@ -232,6 +260,10 @@ impl D2StatusView {
     fn from_status(status: &D2Status) -> Self {
         Self {
             loaded: true,
+            sources: Some(D2LoadedSourcesView {
+                a: (&status.source_a).into(),
+                b: (&status.source_b).into(),
+            }),
             stream_generation: status.stream_generation.to_string(),
             stream_sequence: status.stream_sequence.to_string(),
             playhead_a: status.playhead_a,
@@ -348,6 +380,16 @@ impl D2BackendController {
         }
     }
 
+    pub(crate) fn accept_rediscovery(&mut self, mut discovered: Self) -> D2BackendView {
+        if let (Some(pack), Some(asset)) = (&discovered.codec_pack, &self.decoder_asset)
+            && decoder_asset_matches(pack, asset)
+        {
+            discovered.decoder_asset = Some(asset.clone());
+        }
+        *self = discovered;
+        self.view()
+    }
+
     pub(crate) fn view(&self) -> D2BackendView {
         if let Some(error) = &self.discovery_fault {
             return D2BackendView {
@@ -429,6 +471,9 @@ impl D2BackendController {
             .decoder_asset
             .clone()
             .ok_or_else(D2RuntimeError::decoder_missing)?;
+        if !decoder_asset_matches(&codec_pack, &decoder_asset) {
+            return Err(D2RuntimeError::decoder_missing());
+        }
         Ok(D2LaunchBackend {
             codec_pack,
             decoder_asset,
@@ -857,10 +902,11 @@ fn decoder_view(
         .external_assets
         .iter()
         .find(|candidate| candidate.asset_id == asset.asset_id)?;
-    let variant = descriptor
-        .accepted_variants
-        .iter()
-        .find(|candidate| candidate.variant_id == asset.variant_id)?;
+    let variant = descriptor.accepted_variants.iter().find(|candidate| {
+        candidate.variant_id == asset.variant_id
+            && candidate.sha256.eq_ignore_ascii_case(&asset.sha256)
+            && candidate.byte_length == asset.byte_length
+    })?;
     Some(D2DecoderView {
         asset_id: asset.asset_id.clone(),
         variant_id: asset.variant_id.clone(),
@@ -870,6 +916,10 @@ fn decoder_view(
         license_label: variant.license_label.clone(),
         license_url: variant.license_url.clone(),
     })
+}
+
+fn decoder_asset_matches(pack: &ValidatedCodecPack, asset: &ValidatedExternalAsset) -> bool {
+    decoder_view(pack, asset).is_some()
 }
 
 fn inspect_source(resolved: &ResolvedDeckSource) -> Result<TrustedD2Source, D2RuntimeError> {
@@ -1283,12 +1333,24 @@ mod platform {
             receive_owned(receiver).await?
         }
 
-        pub(crate) async fn toggle_fullscreen(&self) -> Result<bool, D2RuntimeError> {
+        pub(crate) async fn fullscreen_status(&self) -> Result<bool, D2RuntimeError> {
             self.ensure_open()?;
             let (reply, receiver) = oneshot::channel();
             send_bounded(
                 &self.sender,
-                RuntimeCommand::ToggleFullscreen { reply },
+                RuntimeCommand::FullscreenStatus { reply },
+                ACTOR_REPLY_TIMEOUT,
+            )
+            .await?;
+            receive_owned(receiver).await?
+        }
+
+        pub(crate) async fn set_fullscreen(&self, enabled: bool) -> Result<bool, D2RuntimeError> {
+            self.ensure_open()?;
+            let (reply, receiver) = oneshot::channel();
+            send_bounded(
+                &self.sender,
+                RuntimeCommand::SetFullscreen { enabled, reply },
                 ACTOR_REPLY_TIMEOUT,
             )
             .await?;
@@ -1959,6 +2021,17 @@ mod platform {
             }
         }
 
+        fn fullscreen_reply(&self, requested: Option<bool>) -> Result<bool, D2RuntimeError> {
+            if let Some(enabled) = requested {
+                self.output
+                    .set_fullscreen(enabled)
+                    .map_err(|error| D2RuntimeError::output(error.code()))?;
+            }
+            self.output
+                .fullscreen()
+                .map_err(|error| D2RuntimeError::output(error.code()))
+        }
+
         async fn handle_command(&mut self, command: RuntimeCommand) -> bool {
             // Tauri has no cancellation surface for an invoke already being
             // executed, but a queued command whose caller disappeared must
@@ -2008,11 +2081,12 @@ mod platform {
                         .map_err(|error| D2RuntimeError::output(error.code()));
                     self.finish_command(result, reply).await
                 }
-                RuntimeCommand::ToggleFullscreen { reply } => {
-                    let result = self
-                        .output
-                        .toggle_fullscreen()
-                        .map_err(|error| D2RuntimeError::output(error.code()));
+                RuntimeCommand::FullscreenStatus { reply } => {
+                    let result = self.fullscreen_reply(None);
+                    self.finish_command(result, reply).await
+                }
+                RuntimeCommand::SetFullscreen { enabled, reply } => {
+                    let result = self.fullscreen_reply(Some(enabled));
                     self.finish_command(result, reply).await
                 }
                 RuntimeCommand::SpoutStatus { reply } => {
@@ -2981,7 +3055,11 @@ mod platform {
             height: u32,
             reply: oneshot::Sender<Result<ResizeOutcome, D2RuntimeError>>,
         },
-        ToggleFullscreen {
+        FullscreenStatus {
+            reply: oneshot::Sender<Result<bool, D2RuntimeError>>,
+        },
+        SetFullscreen {
+            enabled: bool,
             reply: oneshot::Sender<Result<bool, D2RuntimeError>>,
         },
         SpoutStatus {
@@ -3011,7 +3089,9 @@ mod platform {
                 | Self::CaptureStop { reply }
                 | Self::CaptureStatus { reply } => reply.is_closed(),
                 Self::Resize { reply, .. } => reply.is_closed(),
-                Self::ToggleFullscreen { reply } => reply.is_closed(),
+                Self::FullscreenStatus { reply } | Self::SetFullscreen { reply, .. } => {
+                    reply.is_closed()
+                }
                 Self::SpoutStatus { reply } | Self::ConfigureSpout { reply, .. } => {
                     reply.is_closed()
                 }
@@ -3732,6 +3812,25 @@ mod platform {
             assert!(command.reply_is_closed());
         }
 
+        #[test]
+        fn fullscreen_actor_contract_is_explicit_and_queryable() {
+            let (status_reply, _status_receiver) = oneshot::channel();
+            assert!(matches!(
+                RuntimeCommand::FullscreenStatus {
+                    reply: status_reply
+                },
+                RuntimeCommand::FullscreenStatus { .. }
+            ));
+            let (set_reply, _set_receiver) = oneshot::channel();
+            assert!(matches!(
+                RuntimeCommand::SetFullscreen {
+                    enabled: true,
+                    reply: set_reply
+                },
+                RuntimeCommand::SetFullscreen { enabled: true, .. }
+            ));
+        }
+
         fn actor_status() -> D2Status {
             let source = latentdeck_control::D2SourceStatus {
                 cartridge_id: WireUuid::new_v4(),
@@ -3854,7 +3953,11 @@ impl D2Runtime {
         Ok(())
     }
 
-    pub(crate) async fn toggle_fullscreen(&self) -> Result<bool, D2RuntimeError> {
+    pub(crate) async fn fullscreen_status(&self) -> Result<bool, D2RuntimeError> {
+        Err(D2RuntimeError::unsupported())
+    }
+
+    pub(crate) async fn set_fullscreen(&self, _enabled: bool) -> Result<bool, D2RuntimeError> {
         Err(D2RuntimeError::unsupported())
     }
 
@@ -3904,10 +4007,15 @@ mod common_tests {
 
     #[test]
     fn status_view_stringifies_lossless_u64_counters() {
-        let source = latentdeck_control::D2SourceStatus {
+        let source_a = latentdeck_control::D2SourceStatus {
             cartridge_id: WireUuid::new_v4(),
             archive_sha256: "a".repeat(64),
             latent_slot_count: 7,
+        };
+        let source_b = latentdeck_control::D2SourceStatus {
+            cartridge_id: WireUuid::new_v4(),
+            archive_sha256: "b".repeat(64),
+            latent_slot_count: 12,
         };
         let status = D2Status {
             deck_id: D2_DECK_ID.to_owned(),
@@ -3924,12 +4032,34 @@ mod common_tests {
             pending_reset: false,
             pending_reset_reasons: latentdeck_control::BoundedVec::default(),
             decoded_start_frame: 0,
-            source_a: source.clone(),
-            source_b: source,
+            source_a,
+            source_b,
         };
         let view = D2StatusView::from_status(&status);
         assert_eq!(view.stream_generation, u64::MAX.to_string());
         assert_eq!(view.stream_sequence, (u64::MAX - 1).to_string());
+        let sources = view.sources.expect("loaded D2 source identities");
+        assert_eq!(sources.a.archive_sha256, "a".repeat(64));
+        assert_eq!(sources.a.latent_slot_count, "7");
+        assert_eq!(sources.b.archive_sha256, "b".repeat(64));
+        assert_eq!(sources.b.latent_slot_count, "12");
+    }
+
+    #[test]
+    fn backend_rediscovery_replaces_the_stale_startup_snapshot() {
+        let mut backend = D2BackendController {
+            codec_pack: None,
+            decoder_asset: None,
+            discovery_fault: Some(D2RuntimeError::new(
+                "codec.stale",
+                "stale startup discovery",
+                true,
+                false,
+            )),
+        };
+        let view = backend.accept_rediscovery(D2BackendController::discover(&[]));
+        assert_eq!(view.state, "missing");
+        assert!(backend.discovery_fault.is_none());
     }
 
     #[test]

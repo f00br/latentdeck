@@ -54,6 +54,18 @@ struct CommandError {
     recoverable: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FullscreenStatus {
+    active: bool,
+}
+
+impl From<bool> for FullscreenStatus {
+    fn from(active: bool) -> Self {
+        Self { active }
+    }
+}
+
 impl CommandError {
     fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self::with_recoverability(code, message, true)
@@ -305,13 +317,35 @@ async fn player_restart(
 
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)] // Tauri command extractor owns `State`.
-async fn player_fullscreen(state: State<'_, AppState>) -> Result<PlayerView, CommandError> {
+async fn player_fullscreen_status(
+    state: State<'_, AppState>,
+) -> Result<Option<FullscreenStatus>, CommandError> {
     let runtime = state.runtime.lock().await;
-    let runtime = runtime
+    let Some(runtime) = runtime.as_ref() else {
+        return Ok(None);
+    };
+    runtime
+        .fullscreen_status()
+        .await
+        .map(FullscreenStatus::from)
+        .map(Some)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri command extractor owns `State`.
+async fn player_set_fullscreen(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<FullscreenStatus, CommandError> {
+    let runtime = state.runtime.lock().await;
+    runtime
         .as_ref()
-        .ok_or_else(CommandError::runtime_inactive)?;
-    let _fullscreen = runtime.toggle_fullscreen().await?;
-    trusted_snapshot(&state.player)
+        .ok_or_else(CommandError::runtime_inactive)?
+        .set_fullscreen(enabled)
+        .await
+        .map(FullscreenStatus::from)
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -498,7 +532,8 @@ fn main() {
             player_play,
             player_pause,
             player_restart,
-            player_fullscreen,
+            player_fullscreen_status,
+            player_set_fullscreen,
             player_spout_status,
             player_spout_configure,
             player_save_diagnostics,
@@ -562,5 +597,14 @@ mod tests {
         let json = value.to_string();
         assert!(!json.contains("C:\\"));
         assert!(!json.contains("W:\\"));
+    }
+
+    #[test]
+    fn fullscreen_status_serializes_the_confirmed_native_state() {
+        let active = serde_json::to_value(FullscreenStatus::from(true)).expect("serialize");
+        let inactive = serde_json::to_value(FullscreenStatus::from(false)).expect("serialize");
+
+        assert_eq!(active, serde_json::json!({ "active": true }));
+        assert_eq!(inactive, serde_json::json!({ "active": false }));
     }
 }
