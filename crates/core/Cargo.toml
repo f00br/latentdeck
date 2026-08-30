@@ -7,6 +7,7 @@ license.workspace = true
 description = "UI-independent LatentDeck runtime coordination"
 
 [dependencies]
+crc32fast.workspace = true
 getrandom.workspace = true
 hex.workspace = true
 latentdeck-cartridge = { path = "../cartridge" }

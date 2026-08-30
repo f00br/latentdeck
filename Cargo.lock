@@ -2105,6 +2105,7 @@ dependencies = [
 name = "latentdeck-core"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
  "getrandom 0.4.3",
  "hex",
  "latentdeck-cartridge",
@@ -2184,6 +2185,7 @@ dependencies = [
  "latentdeck-gpu",
  "latentdeck-native-output",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

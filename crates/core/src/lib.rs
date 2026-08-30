@@ -6,6 +6,7 @@ pub mod diagnostics;
 pub mod playback_schedule;
 pub mod player;
 pub mod q4_worker_client;
+pub mod realtime_diagnostics;
 pub mod worker_client;
 pub mod worker_supervisor;
 
