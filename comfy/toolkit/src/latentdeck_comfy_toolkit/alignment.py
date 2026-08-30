@@ -9,6 +9,7 @@ import torch
 
 from .cartridge_io import LATENTDECK_METADATA_KEY, H3AVSamples, ToolkitIOError
 from .compatibility import check_h3_compatibility
+from .h3_timing import H3_VISUAL_TEMPORAL_RULE, is_valid_h3_visual_temporal_slots
 from .workflow_metadata import annotate_operation
 
 ALIGNMENT_VERSION = "0.1.0"
@@ -105,6 +106,12 @@ def crop_h3_latent(
         )
     temporal_start = _axis(temporal_start, "temporal_start", allow_zero=True)
     temporal_slots = _axis(temporal_slots, "temporal_slots", allow_zero=False)
+    if not is_valid_h3_visual_temporal_slots(temporal_slots):
+        raise ToolkitIOError(
+            "align.temporal_contract_invalid",
+            f"requested H3 visual temporal slots T={temporal_slots} must satisfy "
+            f"{H3_VISUAL_TEMPORAL_RULE}; no automatic adjustment was performed",
+        )
     spatial_top = _axis(spatial_top, "spatial_top", allow_zero=True)
     spatial_left = _axis(spatial_left, "spatial_left", allow_zero=True)
     spatial_height = _axis(spatial_height, "spatial_height", allow_zero=False)
@@ -145,6 +152,13 @@ def crop_h3_latent(
             "spatial_height": spatial_height,
             "spatial_width": spatial_width,
             "audio_policy": audio_policy,
+        },
+        "temporal_contract": {
+            "rule": H3_VISUAL_TEMPORAL_RULE,
+            "requested_slots": temporal_slots,
+            "output_slots": output_video.shape[2],
+            "valid": True,
+            "adjustment_performed": False,
         },
         "audio_action": audio_action,
         "conversion": {

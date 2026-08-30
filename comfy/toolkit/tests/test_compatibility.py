@@ -66,3 +66,29 @@ def test_compatibility_reports_each_mismatched_contract_field_without_conversion
         }
     ]
     assert report["conversion_performed"] is False
+
+
+def test_compatibility_rejects_matching_inputs_with_an_invalid_h3_temporal_contract() -> None:
+    report = check_h3_compatibility([_latent(3), _latent(3)])
+
+    assert report["compatible"] is False
+    assert report["temporal_contract"] == {
+        "rule": "T = 2 + 5n (n >= 0)",
+        "all_inputs_valid": False,
+    }
+    assert [item["temporal_contract_valid"] for item in report["inputs"]] == [False, False]
+    assert report["mismatches"] == [
+        {
+            "input_index": 0,
+            "field": "temporal_slots_contract",
+            "reference": "T = 2 + 5n (n >= 0)",
+            "actual": 3,
+        },
+        {
+            "input_index": 1,
+            "field": "temporal_slots_contract",
+            "reference": "T = 2 + 5n (n >= 0)",
+            "actual": 3,
+        },
+    ]
+    assert report["conversion_performed"] is False

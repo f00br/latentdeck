@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
+from latentdeck_comfy_toolkit.decoder_compare import ToolkitContractError
 from latentdeck_comfy_toolkit.research_labs import (
     OperatorStep,
     channel_lab,
@@ -13,23 +15,53 @@ from latentdeck_comfy_toolkit.research_labs import (
 
 
 def test_temporal_lab_applies_visible_crop_reverse_offset_and_loop_in_order() -> None:
-    source = torch.arange(4, dtype=torch.float32).reshape(1, 1, 4, 1, 1)
-    source = source.expand(1, 24, 4, 2, 2).contiguous()
+    source = torch.arange(7, dtype=torch.float32).reshape(1, 1, 7, 1, 1)
+    source = source.expand(1, 24, 7, 2, 2).contiguous()
 
     result = temporal_lab(
         source,
         crop_start=1,
-        crop_length=2,
+        crop_length=6,
         reverse=True,
         offset=1,
         loop_count=2,
     )
 
-    assert result.output[0, 0, :, 0, 0].tolist() == [1.0, 2.0, 1.0, 2.0]
-    assert result.output.shape == source.shape
+    assert result.output[0, 0, :, 0, 0].tolist() == [
+        1.0,
+        6.0,
+        5.0,
+        4.0,
+        3.0,
+        2.0,
+        1.0,
+        6.0,
+        5.0,
+        4.0,
+        3.0,
+        2.0,
+    ]
+    assert result.output.shape == (1, 24, 12, 2, 2)
     assert result.output.dtype == source.dtype
     assert result.provenance["parameters"]["order"] == ["CROP", "REVERSE", "OFFSET", "LOOP"]
     assert result.provenance["parameters"]["audio_policy"] == "NONE"
+    assert result.provenance["parameters"]["temporal_contract"] == {
+        "rule": "T = 2 + 5n (n >= 0)",
+        "requested_output_slots": 12,
+        "output_slots": 12,
+        "valid": True,
+        "adjustment_performed": False,
+    }
+
+
+def test_temporal_lab_rejects_a_loop_result_outside_the_h3_clip_contract() -> None:
+    source = torch.zeros((1, 24, 7, 2, 2), dtype=torch.float16)
+
+    with pytest.raises(ToolkitContractError) as caught:
+        temporal_lab(source, crop_length=2, loop_count=2)
+
+    assert caught.value.code == "temporal.h3_contract"
+    assert "T = 2 + 5n" in caught.value.detail
 
 
 def test_feedback_lab_is_causal_and_iteration_bounded_without_wraparound() -> None:

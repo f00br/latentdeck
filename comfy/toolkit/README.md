@@ -25,9 +25,12 @@ The canonical Comfy registry exports 32 nodes under `LatentDeck / Toolkit`.
   cartridge with parent cartridges, operation history, and explicit audio
   disposition derived from the bounded metadata ledger carried by the graph.
 - **Compatibility Checker** — reports exact codec/profile, geometry, temporal,
-  and timing disagreements before synthesis.
+  and timing disagreements before synthesis, including whether every H3 visual
+  length satisfies the codec-valid `T = 2 + 5n` contract.
 - **Explicit H3 Crop** and **Explicit H3 Pair Align** — visible, user-selected
-  temporal/spatial policies. There is no implicit resize or re-encode.
+  temporal/spatial policies. A requested output `T` that does not satisfy
+  `T = 2 + 5n` fails visibly; it is never rounded or otherwise adjusted. There
+  is no implicit resize or re-encode.
 
 All cartridge bytes are read and written through the shared Rust Cartridge SDK
 binding. The Toolkit does not implement a second ZIP/Safetensors trust path.
@@ -53,7 +56,10 @@ downscales, drops a donor, crops a stream, or changes algorithm for speed.
 
 ### Research labs and evaluation
 
-- **Temporal Lab** — explicit offset, reverse, loop, and crop operations.
+- **Temporal Lab** — explicit offset, reverse, loop, and crop operations. The
+  exact post-loop output must satisfy `T = 2 + 5n`; invalid crop/loop
+  combinations fail before any temporal transform and are never silently
+  changed.
 - **Feedback Lab** — bounded safe feedback variants; no unbounded recursive
   graph or hidden persistent state.
 - **Channel Lab** — explicit 24×24 rotation/matrix operations.

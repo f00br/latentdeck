@@ -169,12 +169,13 @@ class LatentDeckToolkitExplicitCrop:
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, dict[str, object]]:
         positive = {"default": 1, "min": 1, "max": 1_048_576}
+        temporal_slots = {"default": 2, "min": 2, "max": 512, "step": 5}
         offset = {"default": 0, "min": 0, "max": 1_048_575}
         return {
             "required": {
                 "latent": ("LATENT",),
                 "temporal_start": ("INT", offset),
-                "temporal_slots": ("INT", positive),
+                "temporal_slots": ("INT", temporal_slots),
                 "spatial_top": ("INT", offset),
                 "spatial_left": ("INT", offset),
                 "spatial_height": ("INT", positive),

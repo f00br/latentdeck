@@ -20,6 +20,11 @@ The examples never download assets and never hide crop, resize, dtype
 conversion, or re-encoding. The native H3 VAE and taeh3 weights are external
 inputs and are not part of this repository.
 
+H3 visual temporal lengths use the exact codec contract `T = 2 + 5n`. The
+Compatibility Checker reports that state per input. Explicit Crop and Temporal
+Lab reject an invalid requested/post-loop `T` instead of rounding, padding, or
+truncating it; choose a valid value directly in the visible node controls.
+
 ## Included graphs
 
 - [`01_LC_INSPECT.json`](01_LC_INSPECT.json) loads and validates one `.lc`,

@@ -48,7 +48,33 @@ def test_explicit_crop_materializes_only_the_selected_h3_region() -> None:
         "dtype_cast": False,
         "materialized_contiguous": True,
     }
+    assert result.report["temporal_contract"] == {
+        "rule": "T = 2 + 5n (n >= 0)",
+        "requested_slots": 2,
+        "output_slots": 2,
+        "valid": True,
+        "adjustment_performed": False,
+    }
     assert result.latent["latentdeck"]["operation_chain"][-1] == result.report
+
+
+def test_explicit_crop_rejects_a_temporal_length_outside_the_h3_clip_contract() -> None:
+    video = torch.zeros((1, 24, 7, 2, 2), dtype=torch.float16)
+
+    with pytest.raises(ToolkitIOError) as caught:
+        crop_h3_latent(
+            _latent(video),
+            temporal_start=0,
+            temporal_slots=3,
+            spatial_top=0,
+            spatial_left=0,
+            spatial_height=2,
+            spatial_width=2,
+            audio_policy="PRESERVE_EXACT",
+        )
+
+    assert caught.value.code == "align.temporal_contract_invalid"
+    assert "T = 2 + 5n" in caught.value.detail
 
 
 def test_temporal_crop_requires_a_visible_audio_drop_policy() -> None:

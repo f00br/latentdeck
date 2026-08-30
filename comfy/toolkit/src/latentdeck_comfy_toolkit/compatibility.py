@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import torch
 
 from .cartridge_io import LATENTDECK_METADATA_KEY, ToolkitIOError
+from .h3_timing import H3_VISUAL_TEMPORAL_RULE, is_valid_h3_visual_temporal_slots
 
 COMPATIBILITY_VERSION = "0.1.0"
 _KEY_FIELDS = (
@@ -160,6 +161,22 @@ def check_h3_compatibility(latents: Sequence[object]) -> dict[str, object]:
     descriptors = [_descriptor(latent) for latent in latents]
     reference = descriptors[0].key
     mismatches: list[dict[str, object]] = []
+    temporal_contract_valid = [
+        is_valid_h3_visual_temporal_slots(descriptor.temporal_slots)
+        for descriptor in descriptors
+    ]
+    for index, (descriptor, valid) in enumerate(
+        zip(descriptors, temporal_contract_valid, strict=True)
+    ):
+        if not valid:
+            mismatches.append(
+                {
+                    "input_index": index,
+                    "field": "temporal_slots_contract",
+                    "reference": H3_VISUAL_TEMPORAL_RULE,
+                    "actual": descriptor.temporal_slots,
+                }
+            )
     for index, descriptor in enumerate(descriptors[1:], start=1):
         for field in _KEY_FIELDS:
             if descriptor.key[field] != reference[field]:
@@ -175,11 +192,16 @@ def check_h3_compatibility(latents: Sequence[object]) -> dict[str, object]:
         "schema_version": COMPATIBILITY_VERSION,
         "compatible": not mismatches,
         "compatibility_key": dict(reference),
+        "temporal_contract": {
+            "rule": H3_VISUAL_TEMPORAL_RULE,
+            "all_inputs_valid": all(temporal_contract_valid),
+        },
         "inputs": [
             {
                 "input_index": index,
                 "source_kind": descriptor.source_kind,
                 "temporal_slots": descriptor.temporal_slots,
+                "temporal_contract_valid": temporal_contract_valid[index],
                 "key": dict(descriptor.key),
             }
             for index, descriptor in enumerate(descriptors)

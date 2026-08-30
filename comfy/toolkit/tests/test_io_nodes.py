@@ -37,6 +37,11 @@ def test_io_node_module_exposes_the_complete_explicit_toolkit_surface() -> None:
     assert json.loads(report_json) == expected.report
     assert node.CATEGORY == "LatentDeck/Toolkit/Cartridge"
 
+    crop_slots = IO_NODE_CLASS_MAPPINGS["LatentDeckToolkitExplicitCrop"].INPUT_TYPES()[
+        "required"
+    ]["temporal_slots"]
+    assert crop_slots == ("INT", {"default": 2, "min": 2, "max": 512, "step": 5})
+
 
 def test_save_node_derives_genealogy_and_returns_output_receipt_in_the_ledger(
     tmp_path: Path,

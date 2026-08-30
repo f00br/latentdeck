@@ -11,6 +11,7 @@ from typing import Any
 import torch
 
 from .decoder_compare import ToolkitContractError
+from .h3_timing import H3_VISUAL_TEMPORAL_RULE, is_valid_h3_visual_temporal_slots
 from .research_ops import ResearchResult, _provenance, _research_result, _surface
 
 MAX_TEMPORAL_LOOPS = 16
@@ -52,8 +53,15 @@ def temporal_lab(
         raise ToolkitContractError(
             "temporal.loop", f"loop_count must be in [1,{MAX_TEMPORAL_LOOPS}]"
         )
-    if length * loop_count > 512:
+    output_slots = length * loop_count
+    if output_slots > 512:
         raise ToolkitContractError("temporal.bound", "temporal output exceeds 512 slots")
+    if not is_valid_h3_visual_temporal_slots(output_slots):
+        raise ToolkitContractError(
+            "temporal.h3_contract",
+            f"requested H3 visual temporal output T={output_slots} must satisfy "
+            f"{H3_VISUAL_TEMPORAL_RULE}; no automatic adjustment was performed",
+        )
     if audio_policy not in {"REJECT", "DROP"}:
         raise ToolkitContractError("audio.policy", "audio_policy must be REJECT or DROP")
 
@@ -91,6 +99,13 @@ def temporal_lab(
             loop_count=loop_count,
             order=["CROP", "REVERSE", "OFFSET", "LOOP"],
             audio_policy=resolved_audio_policy,
+            temporal_contract={
+                "rule": H3_VISUAL_TEMPORAL_RULE,
+                "requested_output_slots": output_slots,
+                "output_slots": output.shape[2],
+                "valid": True,
+                "adjustment_performed": False,
+            },
         )
     return _research_result(
         surface.repack(output, keep_audio=not (surface.audio and changes_mapping)),
