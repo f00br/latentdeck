@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-local-equivalent:
+    runs-on: windows-2025
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install pinned uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: 0.11.8
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Run workspace contract
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/Check-Workspace.ps1
+
+      - name: Verify release packaging contracts
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/Test-ReleasePackaging.ps1
+
+      - name: Generate public-safe SBOM
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/New-Sbom.ps1

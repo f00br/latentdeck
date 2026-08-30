@@ -1,5 +1,6 @@
 use std::fs;
 
+use latentdeck_core::diagnostics::{LogLevel, initialize_global_json_log, record_global};
 use latentdeck_library::Library;
 use tauri::{Emitter as _, Manager as _, RunEvent, Window, WindowEvent};
 
@@ -52,6 +53,11 @@ fn handle_d2_output_event(window: &Window, event: &WindowEvent) {
             let app = window.app_handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = app.state::<D2AppState>().shutdown_runtime().await {
+                    record_global(
+                        LogLevel::Error,
+                        "deck.d2.shutdown_failed",
+                        Some(&error.code),
+                    );
                     let _ = app.emit("deck-d2-error", error.event());
                 }
                 // Runtime shutdown normally owns destruction. If its output
@@ -79,6 +85,11 @@ fn handle_q4_output_event(window: &Window, event: &WindowEvent) {
             let app = window.app_handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = app.state::<Q4AppState>().shutdown_runtime().await {
+                    record_global(
+                        LogLevel::Error,
+                        "deck.q4.shutdown_failed",
+                        Some(&error.code),
+                    );
                     let _ = app.emit("deck-q4-error", error.event());
                 }
                 if let Some(window) = app.get_window(Q4_OUTPUT_WINDOW_LABEL) {
@@ -98,6 +109,9 @@ fn main() {
         .setup(|app| {
             let app_data_dir = app.path().app_local_data_dir()?;
             fs::create_dir_all(&app_data_dir)?;
+            if initialize_global_json_log(&app_data_dir.join("logs"), "latentdeck").is_ok() {
+                record_global(LogLevel::Info, "app.started", None);
+            }
             let library = Library::open(database_path(&app_data_dir))?;
             app.manage(AppState::new(library));
             app.state::<D2AppState>()
@@ -167,6 +181,7 @@ fn main() {
 
     app.run(|app_handle, event| {
         if let RunEvent::ExitRequested { api, code, .. } = event {
+            record_global(LogLevel::Info, "app.exit_requested", None);
             let state = app_handle.state::<D2AppState>();
             match state.request_exit() {
                 ExitRequest::BeginShutdown => {
@@ -176,6 +191,7 @@ fn main() {
                         let _ = app_handle.state::<D2AppState>().shutdown_runtime().await;
                         let _ = app_handle.state::<Q4AppState>().shutdown_runtime().await;
                         app_handle.state::<D2AppState>().mark_exit_ready();
+                        record_global(LogLevel::Info, "app.exit_ready", None);
                         app_handle.exit(code.unwrap_or_default());
                     });
                 }

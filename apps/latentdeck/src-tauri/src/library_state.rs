@@ -4,6 +4,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
+use latentdeck_core::diagnostics::{LogLevel, record_global};
 use latentdeck_library::{
     ALL_CARTRIDGES_ID, Availability, CartridgeKey, CartridgeRecord, CollectionId, CollectionRecord,
     DeckSourceIdentity, FolderImportOptions, Library, LibraryError, PathState, QueryOptions,
@@ -25,8 +26,10 @@ pub(crate) struct CommandError {
 
 impl CommandError {
     pub(crate) fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        let code = code.into();
+        record_global(LogLevel::Error, "app.command_failed", Some(&code));
         Self {
-            code: code.into(),
+            code,
             message: message.into(),
         }
     }

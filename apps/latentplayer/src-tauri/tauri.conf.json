@@ -24,6 +24,28 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": false,
+    "publisher": "LatentDeck Project",
+    "icon": ["icons/icon.ico"],
+    "license": "Apache-2.0",
+    "licenseFile": "../../../LICENSE",
+    "category": "Video",
+    "shortDescription": "Standalone Latent Cartridge player.",
+    "longDescription": "LatentPlayer opens and presents validated Latent Cartridge media through an independently installed codec runtime.",
+    "windows": {
+      "allowDowngrades": false,
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["English"],
+        "displayLanguageSelector": false,
+        "startMenuFolder": "LatentDeck"
+      }
+    }
   }
 }

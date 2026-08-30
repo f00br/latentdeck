@@ -8,6 +8,7 @@ mod playback_runtime;
 
 use latentdeck_core::{
     codec_pack::default_codec_pack_roots,
+    diagnostics::{LogLevel, initialize_global_json_log, record_global},
     player::{PlayerCoordinator, PlayerCoordinatorError, PlayerView},
 };
 use latentdeck_native_output::NativeSpoutStatus;
@@ -47,8 +48,10 @@ struct CommandError {
 
 impl CommandError {
     fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        let code = code.into();
+        record_global(LogLevel::Error, "player.command_failed", Some(&code));
         Self {
-            code: code.into(),
+            code,
             message: message.into(),
         }
     }
@@ -299,6 +302,13 @@ fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::discover())
+        .setup(|app| {
+            let app_data_dir = app.path().app_local_data_dir()?;
+            if initialize_global_json_log(&app_data_dir.join("logs"), "latentplayer").is_ok() {
+                record_global(LogLevel::Info, "app.started", None);
+            }
+            Ok(())
+        })
         .on_window_event(|window, event| {
             if window.label() != NATIVE_OUTPUT_WINDOW_LABEL {
                 return;
@@ -347,6 +357,7 @@ fn main() {
 
     app.run(|app_handle, event| {
         if let RunEvent::ExitRequested { api, code, .. } = event {
+            record_global(LogLevel::Info, "app.exit_requested", None);
             let state = app_handle.state::<AppState>();
             if state.exit_started.swap(true, Ordering::AcqRel) {
                 return;
@@ -358,6 +369,7 @@ fn main() {
             tauri::async_runtime::spawn(async move {
                 let mut runtime = runtime.lock().await;
                 let _ = shutdown_runtime(&mut runtime).await;
+                record_global(LogLevel::Info, "app.exit_ready", None);
                 app_handle.exit(code.unwrap_or_default());
             });
         }

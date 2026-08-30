@@ -1,6 +1,7 @@
 //! UI-independent `SQLite` index for validated Latent Cartridges and flat
 //! many-to-many collections.
 
+mod backup;
 mod collections;
 mod db;
 mod error;

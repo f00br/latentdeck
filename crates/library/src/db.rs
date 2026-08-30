@@ -20,7 +20,22 @@ impl Library {
     ///
     /// Returns a path-free filesystem/database error or rejects a newer schema.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let existing_bytes = match std::fs::metadata(path) {
+            Ok(metadata) => Some(metadata.len()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => {
+                return Err(LibraryError::new(
+                    ErrorCode::Filesystem,
+                    "library database metadata could not be read",
+                ));
+            }
+        };
         let mut connection = Connection::open(path).map_err(LibraryError::database)?;
+        let current = migrations::current_version(&connection)?;
+        if existing_bytes.is_some_and(|bytes| bytes > 0) && current < migrations::SCHEMA_VERSION {
+            crate::backup::backup_before_migration(&connection, path, current)?;
+        }
         migrations::migrate(&mut connection)?;
         Ok(Self { connection })
     }

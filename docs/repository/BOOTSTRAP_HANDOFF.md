@@ -1,9 +1,15 @@
-# Repository bootstrap handoff
+# Repository bootstrap handoff (historical)
 
-## Current state
+This document records the state established by the initial public-safe
+bootstrap commit. It is not the current implementation status. See the
+[repository README](../../README.md) and
+[0.1.0 acceptance status](../release/ACCEPTANCE_STATUS.md) for the current
+local release candidate.
 
-This repository was prepared as a clean local foundation for future LatentDeck
-development. At bootstrap time it contains documentation, empty component
+## Bootstrap state
+
+This repository was prepared as a clean local foundation for LatentDeck
+development. At bootstrap time it contained documentation, empty component
 boundaries, and repository-safety tooling only. The owner may keep ignored,
 project-local generated interface sketches as visual references, but they are
 not technical repository inputs.
@@ -21,7 +27,7 @@ release-candidate contract. `latentdeck_0.1-plan.md` retains the underlying
 product and architecture rationale. This handoff deliberately does not restate
 either document as a second roadmap.
 
-## What the scaffold means
+## What the scaffold meant
 
 The directory tree mirrors the monorepo shape already selected in the plan. It
 reserves boundaries for the applications, Rust crates, isolated Python codec

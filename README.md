@@ -10,8 +10,8 @@ state into a new cartridge.
 
 ## Repository status
 
-The public-safe bootstrap is complete and the reproducible 0.1 workspace is
-active. It currently contains:
+The source implementation for the local unsigned `0.1.0` release candidate is
+complete on `main`. It currently contains:
 
 - the accepted 0.1 product and architecture plan;
 - public-repository boundaries and agent instructions;
@@ -23,13 +23,36 @@ active. It currently contains:
 - the independent `Save Latent Cartridge (.lc)` ComfyUI recorder;
 - the clean-room LatentDeck Comfy Toolkit research nodes and explicit-install
   external Operator API;
+- isolated H3 Player, LD-D2, and LD-Q4 workers with native DX12 presentation;
+- a shared SQLite Library with many-to-many Collections and virtual `All` and
+  `Unassigned` banks;
+- deterministic Snapshot and bounded Live Capture resampling back into `.lc`;
+- Spout2 output, structured diagnostics, database backup/migration, Windows
+  application packaging, independent Codec Pack lifecycle tooling, and SBOM
+  generation;
 - a policy for local-only, non-binding interface references.
 
-The product behavior, codec runtime, native output, and release packaging are
-still being implemented. There is no supported release, bundled model, codec
-pack, or cartridge in this repository yet.
+The local RC is intentionally unsigned and does not bundle a Codec Pack,
+decoder, model weight, or cartridge. Real four-source Q4 corpus acceptance,
+30-minute performance soaks, clean-machine installer/Codec Pack lifecycle, and
+code signing remain external gates. See the
+[0.1.0 acceptance status](docs/release/ACCEPTANCE_STATUS.md). There is no
+published release or supported bundled model in this repository.
 
-## Planned ecosystem
+## Implemented interfaces
+
+The public screenshots come from the running applications with isolated empty
+data and codec roots. They do not use the local concept sketches or private
+cartridges.
+
+![LatentDeck Library with virtual collection banks](docs/assets/screenshots/latentdeck-library-empty.png)
+
+- [LD-D2 faceplate and missing-codec state](docs/assets/screenshots/latentdeck-d2-missing-codec.png)
+- [LD-Q4 carrier/donor faceplate and missing-codec state](docs/assets/screenshots/latentdeck-q4-missing-codec.png)
+- [LatentPlayer empty playback surface](docs/assets/screenshots/latentplayer-empty.png)
+- [Screenshot provenance and capture boundary](docs/assets/screenshots/README.md)
+
+## Ecosystem components
 
 - **LatentDeck App** — standalone real-time latent synthesis instrument.
 - **LatentPlayer App** — lightweight `.lc` playback application.
@@ -62,6 +85,9 @@ MiniMax H3 is the first intended codec profile. It is not the definition of
 - [Repository layout](docs/repository/REPOSITORY_LAYOUT.md)
 - [Public repository boundary](docs/repository/REPOSITORY_BOUNDARY.md)
 - [Public release checklist](docs/repository/PUBLIC_RELEASE_CHECKLIST.md)
+- [Local Windows release engineering](docs/release/README.md)
+- [0.1.0 acceptance status](docs/release/ACCEPTANCE_STATUS.md)
+- [Diagnostics and sanitized support bundles](docs/repository/DIAGNOSTICS.md)
 - [Pinned toolchains](docs/repository/TOOLCHAINS.md)
 - [Interface reference policy](docs/assets/concepts/README.md)
 - [Contributing](CONTRIBUTING.md)

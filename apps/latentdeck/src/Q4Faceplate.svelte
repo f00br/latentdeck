@@ -438,7 +438,7 @@
       hostMessage = incoming.pendingReset ? "Reset barrier pending." : "Q4 worker acknowledged.";
       if (!incoming.pendingReset) resetMessage = "";
     } else {
-      hostState = "checking";
+      hostState = "ready";
       hostMessage = "Q4 worker is not loaded.";
     }
   }

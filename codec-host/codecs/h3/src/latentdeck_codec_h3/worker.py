@@ -29,6 +29,36 @@ EXIT_WORKER_ERROR = 2
 MAX_COMMANDS_PER_SESSION = 65_536
 DIAGNOSTIC_SCHEMA_VERSION = 1
 MAX_DIAGNOSTIC_BYTES = 1024 * 1024
+MAX_DIAGNOSTIC_FILES = 16
+MAX_DIAGNOSTIC_RECORD_BYTES = 2048
+
+
+def _is_diagnostic_token(value: object, *, limit: int) -> bool:
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= limit
+        and all(
+            character.isascii() and (character.isalnum() or character in "._-")
+            for character in value
+        )
+    )
+
+
+def _prune_diagnostic_files(directory: Path, current: Path) -> None:
+    """Retain the current process file and at most fifteen recent peers."""
+
+    try:
+        candidates: list[tuple[int, str, Path]] = []
+        for candidate in directory.glob("worker-*.jsonl"):
+            if candidate == current or candidate.is_symlink() or not candidate.is_file():
+                continue
+            stat = candidate.stat()
+            candidates.append((stat.st_mtime_ns, candidate.name, candidate))
+        candidates.sort(reverse=True)
+        for _, _, stale in candidates[MAX_DIAGNOSTIC_FILES - 1 :]:
+            stale.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _record_diagnostic(
@@ -42,41 +72,42 @@ def _record_diagnostic(
     try:
         import json
 
-        directory = Path(tempfile.gettempdir()) / "LatentDeck" / "worker-diagnostics"
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"worker-{os.getpid()}.jsonl"
-        if path.exists() and path.stat().st_size >= MAX_DIAGNOSTIC_BYTES:
+        if not _is_diagnostic_token(event, limit=64):
             return
+        directory = Path(tempfile.gettempdir()) / "LatentDeck" / "worker-diagnostics"
+        if directory.is_symlink():
+            return
+        directory.mkdir(parents=True, exist_ok=True)
+        if directory.is_symlink():
+            return
+        path = directory / f"worker-{os.getpid()}.jsonl"
+        if path.is_symlink():
+            return
+        _prune_diagnostic_files(directory, path)
         record: dict[str, object] = {
             "schema_version": DIAGNOSTIC_SCHEMA_VERSION,
             "timestamp_ns": time.time_ns(),
-            "pid": os.getpid(),
             "event": event,
         }
-        if code is not None:
+        if _is_diagnostic_token(code, limit=128):
             record["code"] = code
         if error is not None:
-            record["error_type"] = type(error).__name__
-            if isinstance(error, (ProtocolError, WorkerCommandError)):
-                detail = str(error).replace("\0", "")[:256]
-                if detail:
-                    record["detail"] = detail
+            error_type = type(error).__name__
+            if _is_diagnostic_token(error_type, limit=64):
+                record["error_type"] = error_type
             if isinstance(error, WorkerCommandError):
                 diagnostic_code = error.diagnostic_code
-                diagnostic_detail = error.diagnostic_detail
-                if diagnostic_code is not None:
-                    safe_code = diagnostic_code.replace("\0", "")[:64]
-                    if safe_code and all(
-                        character.isascii() and (character.isalnum() or character in "._-")
-                        for character in safe_code
-                    ):
-                        record["cause_code"] = safe_code
-                if diagnostic_detail is not None:
-                    safe_detail = diagnostic_detail.replace("\0", "")[:256]
-                    if safe_detail:
-                        record["cause_detail"] = safe_detail
-        with path.open("a", encoding="utf-8", newline="\n") as stream:
-            stream.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+                if _is_diagnostic_token(diagnostic_code, limit=64):
+                    record["cause_code"] = diagnostic_code
+        encoded = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        if len(encoded) > MAX_DIAGNOSTIC_RECORD_BYTES:
+            return
+        existing_bytes = path.stat().st_size if path.exists() else 0
+        if existing_bytes + len(encoded) > MAX_DIAGNOSTIC_BYTES:
+            return
+        with path.open("ab") as stream:
+            stream.write(encoded)
+            stream.flush()
     except Exception:
         pass
 

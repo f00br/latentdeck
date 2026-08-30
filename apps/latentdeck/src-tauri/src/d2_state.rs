@@ -5,6 +5,7 @@ use std::sync::{
     atomic::{AtomicU8, Ordering},
 };
 
+use latentdeck_core::diagnostics::{LogLevel, record_global};
 use latentdeck_library::{CartridgeKey, DeckSourceIdentity};
 use latentdeck_native_output::NativeSpoutStatus;
 use serde::Deserialize;
@@ -587,6 +588,7 @@ fn runtime_inactive() -> CommandError {
 }
 
 fn command_error(error: D2RuntimeError) -> CommandError {
+    record_global(LogLevel::Error, "deck.d2.command_failed", Some(&error.code));
     CommandError::new(error.code, error.message)
 }
 

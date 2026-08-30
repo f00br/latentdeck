@@ -4,6 +4,12 @@ use crate::error::{ErrorCode, LibraryError, Result};
 
 pub const SCHEMA_VERSION: u32 = 1;
 
+pub(crate) fn current_version(connection: &Connection) -> Result<u32> {
+    connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(LibraryError::database)
+}
+
 const MIGRATION_1: &str = r"
 CREATE TABLE cartridges (
     archive_sha256 TEXT PRIMARY KEY NOT NULL CHECK(length(archive_sha256) = 64),
@@ -91,9 +97,7 @@ pub fn migrate(connection: &mut Connection) -> Result<()> {
         .busy_timeout(std::time::Duration::from_secs(5))
         .map_err(LibraryError::database)?;
 
-    let current = connection
-        .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
-        .map_err(LibraryError::database)?;
+    let current = current_version(connection)?;
     if current > SCHEMA_VERSION {
         return Err(LibraryError::new(
             ErrorCode::UnsupportedSchema,

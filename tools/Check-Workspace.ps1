@@ -49,6 +49,7 @@ try {
     } 'Python lock/install'
     Invoke-Checked { uv run --no-sync ruff check pyproject.toml codec-host comfy operators sdk/python } 'Python lint'
     Invoke-Checked { uv run --no-sync pytest } 'Python tests'
+    Invoke-Checked { pwsh -NoProfile -File tools/Test-DiagnosticBundle.ps1 } 'Diagnostic bundle contract'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-PublicTree.ps1 } 'Public-tree audit'
     Invoke-Checked { git diff --check } 'Working-tree whitespace'
     Invoke-Checked { git diff --cached --check } 'Staged whitespace'

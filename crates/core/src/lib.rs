@@ -2,6 +2,7 @@
 
 pub mod codec_pack;
 pub mod d2_worker_client;
+pub mod diagnostics;
 pub mod playback_schedule;
 pub mod player;
 pub mod q4_worker_client;
