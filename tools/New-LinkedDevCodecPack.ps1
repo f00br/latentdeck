@@ -32,6 +32,17 @@ if (-not (Test-Path -LiteralPath $pythonPackages -PathType Container)) {
 if (-not (Test-Path -LiteralPath $workerPackages -PathType Container)) {
     throw 'WorkerSitePackages must be an existing directory.'
 }
+$workerModuleRoot = Join-Path $workerPackages 'latentdeck_codec_h3'
+foreach ($entrypoint in @('__init__.py', 'worker.py', 'd2_worker.py', 'q4_worker.py')) {
+    $entrypointPath = Join-Path $workerModuleRoot $entrypoint
+    if (-not (Test-Path -LiteralPath $entrypointPath -PathType Leaf)) {
+        throw "WorkerSitePackages does not contain required H3 entrypoint latentdeck_codec_h3/$entrypoint."
+    }
+    $entrypointItem = Get-Item -LiteralPath $entrypointPath -Force
+    if (($entrypointItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Linked Codec Pack entrypoint must be a regular file: latentdeck_codec_h3/$entrypoint."
+    }
+}
 if ($PackVersion -notmatch '^0\.1\.0$') {
     throw 'The linked development pack currently supports only version 0.1.0.'
 }
@@ -182,9 +193,9 @@ $manifest = [ordered]@{
     }
     worker           = [ordered]@{
         executable       = 'runtime/python.exe'
-        arguments        = @('-s', '-m', 'latentdeck_codec_h3.worker')
-        d2_arguments     = @('-s', '-m', 'latentdeck_codec_h3.d2_worker')
-        q4_arguments     = @('-s', '-m', 'latentdeck_codec_h3.q4_worker')
+        arguments        = @('-B', '-s', '-m', 'latentdeck_codec_h3.worker')
+        d2_arguments     = @('-B', '-s', '-m', 'latentdeck_codec_h3.d2_worker')
+        q4_arguments     = @('-B', '-s', '-m', 'latentdeck_codec_h3.q4_worker')
         working_directory = 'runtime'
         probe_timeout_ms = 120000
     }
