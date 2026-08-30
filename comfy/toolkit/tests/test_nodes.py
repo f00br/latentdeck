@@ -5,6 +5,7 @@ import json
 import torch
 
 from latentdeck_comfy_toolkit import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+from latentdeck_comfy_toolkit.device_nodes import DEVICE_NODE_CLASS_MAPPINGS
 from latentdeck_comfy_toolkit.io_nodes import IO_NODE_CLASS_MAPPINGS
 from latentdeck_comfy_toolkit.report_nodes import REPORT_NODE_CLASS_MAPPINGS
 from latentdeck_comfy_toolkit.research_nodes import RESEARCH_NODE_CLASS_MAPPINGS
@@ -22,7 +23,7 @@ def latent_pair() -> tuple[dict[str, object], dict[str, object]]:
 def test_canonical_registry_aggregates_io_research_and_vae_surfaces_without_collisions() -> None:
     expected = set(IO_NODE_CLASS_MAPPINGS) | set(RESEARCH_NODE_CLASS_MAPPINGS) | set(
         VAE_NODE_CLASS_MAPPINGS
-    ) | set(REPORT_NODE_CLASS_MAPPINGS) | {
+    ) | set(REPORT_NODE_CLASS_MAPPINGS) | set(DEVICE_NODE_CLASS_MAPPINGS) | {
         "LatentDeckToolkitCompareDecoders",
         "LatentDeckToolkitOfflineProjector",
     }
@@ -34,6 +35,7 @@ def test_canonical_registry_aggregates_io_research_and_vae_surfaces_without_coll
         + len(RESEARCH_NODE_CLASS_MAPPINGS)
         + len(VAE_NODE_CLASS_MAPPINGS)
         + len(REPORT_NODE_CLASS_MAPPINGS)
+        + len(DEVICE_NODE_CLASS_MAPPINGS)
         + 2
     )
 

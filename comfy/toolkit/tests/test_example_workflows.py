@@ -4,6 +4,9 @@ import json
 import re
 from pathlib import Path
 
+from latentdeck_comfy_cartridge.nodes import NODE_CLASS_MAPPINGS as RECORDER_NODE_TYPES
+
+from latentdeck_comfy_toolkit.device_nodes import DEVICE_NODE_CLASS_MAPPINGS
 from latentdeck_comfy_toolkit.io_nodes import IO_NODE_CLASS_MAPPINGS
 from latentdeck_comfy_toolkit.report_nodes import REPORT_NODE_CLASS_MAPPINGS
 from latentdeck_comfy_toolkit.research_nodes import RESEARCH_NODE_CLASS_MAPPINGS
@@ -11,6 +14,8 @@ from latentdeck_comfy_toolkit.vae_nodes import VAE_NODE_CLASS_MAPPINGS
 
 WORKFLOW_DIRECTORY = Path(__file__).parents[1] / "workflows"
 CUSTOM_NODE_TYPES = {
+    **RECORDER_NODE_TYPES,
+    **DEVICE_NODE_CLASS_MAPPINGS,
     **IO_NODE_CLASS_MAPPINGS,
     **RESEARCH_NODE_CLASS_MAPPINGS,
     **VAE_NODE_CLASS_MAPPINGS,
@@ -30,6 +35,7 @@ EXPECTED_WORKFLOWS = {
         "LatentDeckToolkitLCLoadInspect",
         "LatentDeckToolkitCompatibility",
         "LatentDeckToolkitDualMixerLab",
+        "LatentDeckToolkitExplicitDeviceTransfer",
         "LatentDeckToolkitFastDecode",
     },
     "04_QUAD_CARRIER_DONORS.json": {
@@ -37,6 +43,7 @@ EXPECTED_WORKFLOWS = {
         "LatentDeckToolkitCompatibility",
         "LatentDeckToolkitCarrierDonorRouter",
         "LatentDeckToolkitQuadMixerLab",
+        "LatentDeckToolkitExplicitDeviceTransfer",
         "LatentDeckToolkitFastDecode",
     },
     "05_PROJECT_RESAMPLE.json": {
@@ -49,10 +56,24 @@ EXPECTED_WORKFLOWS = {
     "99_OPERATOR_DEVELOPER_TEMPLATE.json": {
         "LatentDeckToolkitLCLoadInspect",
         "LatentDeckToolkitDualOperatorHook",
+        "LatentDeckToolkitExplicitDeviceTransfer",
         "LatentDeckToolkitOperatorBenchmark",
         "LatentDeckToolkitDeterminismTest",
         "LatentDeckToolkitStreamingCompatibilityTest",
         "LatentDeckToolkitResearchReport",
+    },
+    "06_RAW_RECORD_INSPECT.json": {
+        "LatentDeckToolkitRawH3Import",
+        "LatentDeckSaveLatentCartridge",
+        "LatentDeckToolkitLatentScopes",
+    },
+    "07_EXPLICIT_ALIGN_CROP.json": {
+        "LatentDeckToolkitLCLoadInspect",
+        "LatentDeckToolkitExplicitAlign",
+        "LatentDeckToolkitCompatibility",
+        "LatentDeckToolkitDualMixerLab",
+        "LatentDeckToolkitLCSaveResample",
+        "LatentDeckToolkitLatentScopes",
     },
 }
 
@@ -72,9 +93,11 @@ def _all_strings(value: object):
 def test_example_workflows_are_loadable_sanitized_comfy_graphs() -> None:
     installed_types = {
         *IO_NODE_CLASS_MAPPINGS,
+        *DEVICE_NODE_CLASS_MAPPINGS,
         *RESEARCH_NODE_CLASS_MAPPINGS,
         *VAE_NODE_CLASS_MAPPINGS,
         *REPORT_NODE_CLASS_MAPPINGS,
+        *RECORDER_NODE_TYPES,
         "VAELoader",
         "PreviewAny",
         "PreviewImage",
@@ -153,6 +176,26 @@ def test_workflow_and_operator_template_guides_cover_every_public_example() -> N
     assert "docs/OPERATOR_DEVELOPER_TEMPLATE.md" in toolkit_readme
 
 
+def test_comparison_previews_are_unambiguous_for_visual_master_testing() -> None:
+    fast_hq = json.loads(
+        (WORKFLOW_DIRECTORY / "02_FAST_HQ_COMPARE.json").read_text(encoding="utf-8")
+    )
+    fast_hq_titles = {node.get("title") for node in fast_hq["nodes"]}
+    assert "FAST preview (TAEHV / taeh3)" in fast_hq_titles
+    assert "HQ reference preview (native H3 VAE)" in fast_hq_titles
+
+    projector = json.loads(
+        (WORKFLOW_DIRECTORY / "05_PROJECT_RESAMPLE.json").read_text(encoding="utf-8")
+    )
+    projector_titles = {node.get("title") for node in projector["nodes"]}
+    assert {
+        "RAW latent — FAST preview",
+        "PROJECTED latent — FAST preview",
+        "RAW latent — HQ reference",
+        "PROJECTED latent — HQ reference",
+    } <= projector_titles
+
+
 def test_example_workflow_ports_match_the_registered_comfy_contracts() -> None:
     for path in WORKFLOW_DIRECTORY.glob("*.json"):
         workflow = json.loads(path.read_text(encoding="utf-8"))
@@ -203,3 +246,63 @@ def test_example_workflow_ports_match_the_registered_comfy_contracts() -> None:
                 node["type"],
                 required_widgets,
             )
+
+
+def test_cuda_research_examples_stage_every_operator_source_explicitly() -> None:
+    expected_transfer_counts = {
+        "03_DUAL_SYNTH_LAB.json": 2,
+        "04_QUAD_CARRIER_DONORS.json": 4,
+        "99_OPERATOR_DEVELOPER_TEMPLATE.json": 2,
+    }
+    downstream_inputs = {
+        "03_DUAL_SYNTH_LAB.json": ("LatentDeckToolkitDualMixerLab", {"carrier", "donor"}),
+        "04_QUAD_CARRIER_DONORS.json": (
+            "LatentDeckToolkitCarrierDonorRouter",
+            {"carrier", "donor_b", "donor_c", "donor_d"},
+        ),
+        "99_OPERATOR_DEVELOPER_TEMPLATE.json": (
+            "LatentDeckToolkitDualOperatorHook",
+            {"donor"},
+        ),
+    }
+
+    for name, expected_count in expected_transfer_counts.items():
+        workflow = json.loads((WORKFLOW_DIRECTORY / name).read_text(encoding="utf-8"))
+        nodes = {node["id"]: node for node in workflow["nodes"]}
+        links = {link[0]: link for link in workflow["links"]}
+        transfers = [
+            node
+            for node in workflow["nodes"]
+            if node["type"] == "LatentDeckToolkitExplicitDeviceTransfer"
+        ]
+        assert len(transfers) == expected_count
+        for transfer in transfers:
+            assert transfer["widgets_values"] == ["CUDA", 0, "FALLBACK_TO_CPU"]
+            assert "explicit CPU fallback" in transfer["title"]
+            assert transfer["inputs"][0]["link"] is not None
+            assert transfer["outputs"][0]["links"]
+
+        downstream_type, input_names = downstream_inputs[name]
+        downstream = next(node for node in workflow["nodes"] if node["type"] == downstream_type)
+        for input_socket in downstream["inputs"]:
+            if input_socket["name"] not in input_names:
+                continue
+            origin_id = links[input_socket["link"]][1]
+            assert nodes[origin_id]["type"] == "LatentDeckToolkitExplicitDeviceTransfer"
+
+    template = json.loads(
+        (WORKFLOW_DIRECTORY / "99_OPERATOR_DEVELOPER_TEMPLATE.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    nodes = {node["id"]: node for node in template["nodes"]}
+    links = {link[0]: link for link in template["links"]}
+    benchmark = next(
+        node
+        for node in template["nodes"]
+        if node["type"] == "LatentDeckToolkitOperatorBenchmark"
+    )
+    latent_input = next(value for value in benchmark["inputs"] if value["name"] == "latent")
+    assert nodes[links[latent_input["link"]][1]]["type"] == (
+        "LatentDeckToolkitExplicitDeviceTransfer"
+    )

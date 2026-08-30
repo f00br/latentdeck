@@ -122,6 +122,7 @@
     {
       "id": 9,
       "type": "PreviewAny",
+      "title": "FAST vs HQ metrics",
       "pos": [920, 420],
       "size": [350, 220],
       "flags": {},
@@ -137,6 +138,7 @@
     {
       "id": 7,
       "type": "PreviewImage",
+      "title": "FAST preview (TAEHV / taeh3)",
       "pos": [1340, 80],
       "size": [360, 300],
       "flags": {},
@@ -152,6 +154,7 @@
     {
       "id": 8,
       "type": "PreviewImage",
+      "title": "HQ reference preview (native H3 VAE)",
       "pos": [1340, 440],
       "size": [360, 300],
       "flags": {},

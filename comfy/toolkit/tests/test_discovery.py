@@ -24,9 +24,17 @@ def test_comfy_discovery_shim_uses_the_complete_canonical_package_registry() -> 
         "LatentDeckToolkitQuadMixerLab",
         "LatentDeckToolkitFastHQComparator",
         "LatentDeckToolkitManifoldProjector",
+        "LatentDeckToolkitExplicitDeviceTransfer",
         "LatentDeckToolkitOperatorBenchmark",
         "LatentDeckToolkitResearchReport",
     }
 
     assert required <= set(discovery.NODE_CLASS_MAPPINGS)
     assert set(discovery.NODE_CLASS_MAPPINGS) == set(discovery.NODE_DISPLAY_NAME_MAPPINGS)
+    web_directory = Path(discovery.WEB_DIRECTORY)
+    assert web_directory.is_dir()
+    picker = (web_directory / "input_picker.js").read_text(encoding="utf-8")
+    assert "LatentDeckToolkitLCLoadInspect" in picker
+    assert "LatentDeckToolkitRawH3Import" in picker
+    assert 'fetch("/upload/image"' in picker
+    assert 'body.append("type", "input")' in picker

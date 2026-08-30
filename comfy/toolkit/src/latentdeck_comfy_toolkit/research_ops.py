@@ -42,8 +42,16 @@ class VisualLatent:
     samples: object
 
     def repack(self, visual: torch.Tensor, *, keep_audio: bool = True) -> object:
-        streams = (visual, *self.audio) if keep_audio else (visual,)
+        audio = self.audio if keep_audio else ()
+        return self.repack_streams(visual, audio)
+
+    def repack_streams(
+        self, visual: torch.Tensor, audio: tuple[object, ...]
+    ) -> object:
+        streams = (visual, *audio)
         if self.mapping is None:
+            if bool(getattr(self.samples, "is_nested", False)):
+                return _rebuild_nested(self.samples, streams)
             return visual
         output = dict(self.mapping)
         if not bool(getattr(self.samples, "is_nested", False)):

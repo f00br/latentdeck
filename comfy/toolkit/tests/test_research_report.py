@@ -40,6 +40,8 @@ def test_export_research_report_writes_deterministic_json_and_markdown_atomicall
     assert result.receipt["markdown_sha256"]
     assert result.receipt["json_file"] == "session-001.json"
     assert result.receipt["markdown_file"] == "session-001.md"
+    assert result.receipt["json_path"] == str((tmp_path / "session-001.json").resolve())
+    assert result.receipt["markdown_path"] == str((tmp_path / "session-001.md").resolve())
     assert "# LatentDeck Research Report" in markdown_text
     assert "org.latentdeck.xs5" in markdown_text
     assert not list(tmp_path.glob("*.partial"))

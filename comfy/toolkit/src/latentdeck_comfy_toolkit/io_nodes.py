@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
+from pathlib import Path
 
 from .alignment import AlignmentResult, PairAlignmentResult, align_h3_pair, crop_h3_latent
 from .cartridge_io import (
@@ -22,6 +24,113 @@ def _json(value: object) -> str:
     return json.dumps(value, allow_nan=False, separators=(",", ":"), sort_keys=True)
 
 
+_NO_LC_INPUT = "Select or upload an .lc file"
+_NO_RAW_INPUT = "Select or upload an H3 .safetensors file"
+_MAX_INPUT_CHOICES = 4_096
+_MAX_INPUT_SCAN_ENTRIES = 32_768
+
+
+def _comfy_input_choices(suffix: str, empty_label: str) -> list[str]:
+    """List bounded data files from Comfy's explicit input directory only."""
+
+    try:
+        import folder_paths  # type: ignore[import-not-found]
+    except ImportError:
+        return [empty_label]
+
+    input_root = Path(folder_paths.get_input_directory())
+    if not input_root.is_dir():
+        return [empty_label]
+
+    choices: list[str] = []
+    scanned_entries = 0
+    for directory, child_directories, file_names in os.walk(input_root, followlinks=False):
+        child_directories[:] = [
+            name for name in child_directories if not (Path(directory) / name).is_symlink()
+        ]
+        scanned_entries += len(child_directories)
+        if scanned_entries > _MAX_INPUT_SCAN_ENTRIES:
+            return sorted(choices) or [empty_label]
+        for file_name in file_names:
+            scanned_entries += 1
+            if scanned_entries > _MAX_INPUT_SCAN_ENTRIES:
+                return sorted(choices) or [empty_label]
+            candidate = Path(directory) / file_name
+            if candidate.is_symlink() or candidate.suffix.lower() != suffix:
+                continue
+            choices.append(candidate.relative_to(input_root).as_posix())
+            if len(choices) >= _MAX_INPUT_CHOICES:
+                return sorted(choices)
+    return sorted(choices) or [empty_label]
+
+
+def _resolve_comfy_input_file(selection: str, suffix: str, empty_label: str) -> str:
+    """Resolve an uploaded/selected file without accepting arbitrary host paths."""
+
+    if not isinstance(selection, str) or not selection.strip() or selection == empty_label:
+        raise ToolkitIOError("input.file_required", empty_label)
+    if Path(selection).suffix.lower() != suffix:
+        raise ToolkitIOError(
+            "input.extension_invalid", f"selected Comfy input must use the {suffix} extension"
+        )
+
+    try:
+        import folder_paths  # type: ignore[import-not-found]
+    except ImportError as error:
+        raise ToolkitIOError(
+            "input.comfy_unavailable", "safe file selection requires a running ComfyUI host"
+        ) from error
+
+    try:
+        input_root = Path(folder_paths.get_input_directory()).resolve(strict=True)
+        annotated = Path(folder_paths.get_annotated_filepath(selection))
+        if annotated.is_symlink():
+            raise ToolkitIOError(
+                "input.symlink_forbidden", "selected Comfy input cannot be a symlink"
+            )
+        resolved = annotated.resolve(strict=True)
+        resolved.relative_to(input_root)
+    except ToolkitIOError:
+        raise
+    except (FileNotFoundError, OSError, ValueError) as error:
+        raise ToolkitIOError(
+            "input.path_invalid", "selected file must exist inside ComfyUI's input directory"
+        ) from error
+    if not resolved.is_file():
+        raise ToolkitIOError("input.file_invalid", "selected Comfy input is not a regular file")
+    return str(resolved)
+
+
+def _resolve_comfy_output_path(relative_path: str, *, subdirectory: str, suffix: str) -> str:
+    """Resolve a visible relative output below Comfy's dedicated LatentDeck folder."""
+
+    if not isinstance(relative_path, str) or not relative_path.strip():
+        raise ToolkitIOError("output.path_required", "output path cannot be empty")
+    requested = Path(relative_path)
+    if requested.is_absolute() or requested.drive or ".." in requested.parts:
+        raise ToolkitIOError(
+            "output.path_invalid", "output path must be relative to the LatentDeck output folder"
+        )
+    if requested.suffix.lower() != suffix:
+        raise ToolkitIOError("output.extension_invalid", f"output path must use {suffix}")
+    try:
+        import folder_paths  # type: ignore[import-not-found]
+    except ImportError as error:
+        raise ToolkitIOError(
+            "output.comfy_unavailable", "safe output selection requires a running ComfyUI host"
+        ) from error
+
+    root = (Path(folder_paths.get_output_directory()) / "latentdeck" / subdirectory).resolve()
+    target = (root / requested).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as error:
+        raise ToolkitIOError(
+            "output.path_invalid", "output path escaped the LatentDeck output folder"
+        ) from error
+    return str(target)
+
+
 class LatentDeckToolkitLCLoadInspect:
     RETURN_TYPES = ("LATENT", "STRING")
     RETURN_NAMES = ("latent", "inspection_json")
@@ -29,20 +138,28 @@ class LatentDeckToolkitLCLoadInspect:
     CATEGORY = "LatentDeck/Toolkit/Cartridge"
 
     def __init__(
-        self, loader: Callable[[str], LoadedH3Latent] | None = None
+        self,
+        loader: Callable[[str], LoadedH3Latent] | None = None,
+        path_resolver: Callable[[str], str] | None = None,
     ) -> None:
         self._loader = loader or load_lc
+        self._path_resolver = path_resolver or (
+            lambda selection: _resolve_comfy_input_file(selection, ".lc", _NO_LC_INPUT)
+        )
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, dict[str, object]]:
         return {
             "required": {
-                "lc_path": ("STRING", {"default": "", "multiline": False}),
+                "lc_file": (
+                    _comfy_input_choices(".lc", _NO_LC_INPUT),
+                    {"tooltip": "Select from Comfy input or use Upload .lc below."},
+                ),
             }
         }
 
-    def load(self, lc_path: str) -> tuple[dict[str, object], str]:
-        loaded = self._loader(lc_path)
+    def load(self, lc_file: str) -> tuple[dict[str, object], str]:
+        loaded = self._loader(self._path_resolver(lc_file))
         return loaded.latent, _json(loaded.report)
 
 
@@ -53,20 +170,30 @@ class LatentDeckToolkitRawH3Import:
     CATEGORY = "LatentDeck/Toolkit/Cartridge"
 
     def __init__(
-        self, loader: Callable[[str], LoadedH3Latent] | None = None
+        self,
+        loader: Callable[[str], LoadedH3Latent] | None = None,
+        path_resolver: Callable[[str], str] | None = None,
     ) -> None:
         self._loader = loader or import_raw_h3
+        self._path_resolver = path_resolver or (
+            lambda selection: _resolve_comfy_input_file(
+                selection, ".safetensors", _NO_RAW_INPUT
+            )
+        )
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, dict[str, object]]:
         return {
             "required": {
-                "safetensors_path": ("STRING", {"default": "", "multiline": False}),
+                "safetensors_file": (
+                    _comfy_input_choices(".safetensors", _NO_RAW_INPUT),
+                    {"tooltip": "Select from Comfy input or use Upload .safetensors below."},
+                ),
             }
         }
 
-    def load(self, safetensors_path: str) -> tuple[dict[str, object], str]:
-        loaded = self._loader(safetensors_path)
+    def load(self, safetensors_file: str) -> tuple[dict[str, object], str]:
+        loaded = self._loader(self._path_resolver(safetensors_file))
         return loaded.latent, _json(loaded.report)
 
 
@@ -77,8 +204,17 @@ class LatentDeckToolkitLCSaveResample:
     OUTPUT_NODE = True
     CATEGORY = "LatentDeck/Toolkit/Cartridge"
 
-    def __init__(self, saver: Callable[..., SavedCartridge] | None = None) -> None:
+    def __init__(
+        self,
+        saver: Callable[..., SavedCartridge] | None = None,
+        output_resolver: Callable[[str], str] | None = None,
+    ) -> None:
         self._saver = saver or save_resampled_lc
+        self._output_resolver = output_resolver or (
+            lambda path: _resolve_comfy_output_path(
+                path, subdirectory="cartridges", suffix=".lc"
+            )
+        )
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, dict[str, object]]:
@@ -97,11 +233,13 @@ class LatentDeckToolkitLCSaveResample:
         overwrite: bool,
     ) -> dict[str, object]:
         derived = derive_resample_inputs(latent)
+        resolved_output = self._output_resolver(output_path)
         saved = self._saver(
             latent,
-            output_path,
+            resolved_output,
             overwrite=overwrite,
         )
+        saved_path = saved.output_path.resolve()
         validation = saved.receipt.get("validation")
         cartridge_id = saved.manifest.get("cartridge_id")
         archive_sha256 = (
@@ -116,10 +254,11 @@ class LatentDeckToolkitLCSaveResample:
             latent,
             cartridge_id=cartridge_id,
             archive_sha256=archive_sha256,
-            file_name=saved.output_path.name,
+            file_name=saved_path.name,
         )
         report = {
-            "output_name": saved.output_path.name,
+            "output_name": saved_path.name,
+            "output_path": str(saved_path),
             "receipt": saved.receipt,
             "cartridge_id": cartridge_id,
             "genealogy": {
@@ -129,7 +268,7 @@ class LatentDeckToolkitLCSaveResample:
             },
         }
         return {
-            "ui": {"text": [f"Saved {saved.output_path.name}"]},
+            "ui": {"text": [f"Saved {saved_path}"]},
             "result": (annotated, _json(report)),
         }
 

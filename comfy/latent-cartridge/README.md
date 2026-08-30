@@ -43,6 +43,11 @@ path traversal and Windows device names are not accepted as output paths. Each
 recording receives a cartridge UUID, so the node never needs to scan the output
 directory for a counter.
 
+For an old raw H3 Safetensors file that was not produced by this Recorder, open
+the Toolkit's `06_RAW_RECORD_INSPECT.json`: **Raw H3 Latent Import** validates
+the file, then this same official Recorder writes the `.lc`. Renaming a
+`.safetensors` file to `.lc` does not create a cartridge.
+
 ## Development tests
 
 From the repository root:

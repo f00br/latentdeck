@@ -1,8 +1,8 @@
 {
   "id": "cb6c0d8f-3a55-45cf-9a0e-cc84322e99e3",
   "revision": 0,
-  "last_node_id": 9,
-  "last_link_id": 9,
+  "last_node_id": 11,
+  "last_link_id": 11,
   "nodes": [
     {
       "id": 1,
@@ -14,7 +14,7 @@
       "mode": 0,
       "inputs": [],
       "outputs": [
-        {"name": "latent", "type": "LATENT", "links": [1, 3], "slot_index": 0},
+        {"name": "latent", "type": "LATENT", "links": [10], "slot_index": 0},
         {"name": "inspection_json", "type": "STRING", "links": [], "slot_index": 1}
       ],
       "properties": {"Node name for S&R": "LatentDeckToolkitLCLoadInspect"},
@@ -30,19 +30,57 @@
       "mode": 0,
       "inputs": [],
       "outputs": [
-        {"name": "latent", "type": "LATENT", "links": [2, 4], "slot_index": 0},
+        {"name": "latent", "type": "LATENT", "links": [11], "slot_index": 0},
         {"name": "inspection_json", "type": "STRING", "links": [], "slot_index": 1}
       ],
       "properties": {"Node name for S&R": "LatentDeckToolkitLCLoadInspect"},
       "widgets_values": ["donor.lc"]
     },
     {
-      "id": 3,
-      "type": "LatentDeckToolkitCompatibility",
-      "pos": [430, 30],
-      "size": [320, 120],
+      "id": 10,
+      "type": "LatentDeckToolkitExplicitDeviceTransfer",
+      "title": "Carrier → CUDA:0 (explicit CPU fallback)",
+      "pos": [390, 70],
+      "size": [360, 170],
       "flags": {},
       "order": 2,
+      "mode": 0,
+      "inputs": [
+        {"name": "latent", "type": "LATENT", "link": 10}
+      ],
+      "outputs": [
+        {"name": "latent", "type": "LATENT", "links": [1, 3], "slot_index": 0},
+        {"name": "device_receipt_json", "type": "STRING", "links": [], "slot_index": 1}
+      ],
+      "properties": {"Node name for S&R": "LatentDeckToolkitExplicitDeviceTransfer"},
+      "widgets_values": ["CUDA", 0, "FALLBACK_TO_CPU"]
+    },
+    {
+      "id": 11,
+      "type": "LatentDeckToolkitExplicitDeviceTransfer",
+      "title": "Donor → CUDA:0 (explicit CPU fallback)",
+      "pos": [390, 290],
+      "size": [360, 170],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {"name": "latent", "type": "LATENT", "link": 11}
+      ],
+      "outputs": [
+        {"name": "latent", "type": "LATENT", "links": [2, 4], "slot_index": 0},
+        {"name": "device_receipt_json", "type": "STRING", "links": [], "slot_index": 1}
+      ],
+      "properties": {"Node name for S&R": "LatentDeckToolkitExplicitDeviceTransfer"},
+      "widgets_values": ["CUDA", 0, "FALLBACK_TO_CPU"]
+    },
+    {
+      "id": 3,
+      "type": "LatentDeckToolkitCompatibility",
+      "pos": [820, 30],
+      "size": [320, 120],
+      "flags": {},
+      "order": 4,
       "mode": 0,
       "inputs": [
         {"name": "latent_a", "type": "LATENT", "link": 1},
@@ -58,10 +96,10 @@
     {
       "id": 9,
       "type": "PreviewAny",
-      "pos": [800, 20],
+      "pos": [1190, 20],
       "size": [360, 180],
       "flags": {},
-      "order": 8,
+      "order": 10,
       "mode": 0,
       "inputs": [{"name": "source", "type": "*", "link": 9}],
       "outputs": [
@@ -73,10 +111,10 @@
     {
       "id": 4,
       "type": "LatentDeckToolkitDualMixerLab",
-      "pos": [430, 240],
+      "pos": [820, 240],
       "size": [390, 210],
       "flags": {},
-      "order": 3,
+      "order": 5,
       "mode": 0,
       "inputs": [
         {"name": "carrier", "type": "LATENT", "link": 3},
@@ -96,10 +134,10 @@
     {
       "id": 5,
       "type": "VAELoader",
-      "pos": [430, 560],
+      "pos": [820, 600],
       "size": [320, 60],
       "flags": {},
-      "order": 4,
+      "order": 6,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -111,10 +149,10 @@
     {
       "id": 6,
       "type": "LatentDeckToolkitDeclareH3Vae",
-      "pos": [830, 500],
+      "pos": [1220, 500],
       "size": [390, 220],
       "flags": {},
-      "order": 5,
+      "order": 7,
       "mode": 0,
       "inputs": [
         {"name": "vae", "type": "VAE", "link": 6}
@@ -135,10 +173,10 @@
     {
       "id": 7,
       "type": "LatentDeckToolkitFastDecode",
-      "pos": [920, 230],
+      "pos": [1350, 230],
       "size": [330, 110],
       "flags": {},
-      "order": 6,
+      "order": 8,
       "mode": 0,
       "inputs": [
         {"name": "latent", "type": "LATENT", "link": 5},
@@ -154,10 +192,10 @@
     {
       "id": 8,
       "type": "PreviewImage",
-      "pos": [1330, 200],
+      "pos": [1760, 200],
       "size": [390, 330],
       "flags": {},
-      "order": 7,
+      "order": 9,
       "mode": 0,
       "inputs": [
         {"name": "images", "type": "IMAGE", "link": 8}
@@ -168,15 +206,17 @@
     }
   ],
   "links": [
-    [1, 1, 0, 3, 0, "LATENT"],
-    [2, 2, 0, 3, 1, "LATENT"],
-    [3, 1, 0, 4, 0, "LATENT"],
-    [4, 2, 0, 4, 1, "LATENT"],
+    [1, 10, 0, 3, 0, "LATENT"],
+    [2, 11, 0, 3, 1, "LATENT"],
+    [3, 10, 0, 4, 0, "LATENT"],
+    [4, 11, 0, 4, 1, "LATENT"],
     [5, 4, 0, 7, 0, "LATENT"],
     [6, 5, 0, 6, 0, "VAE"],
     [7, 6, 0, 7, 1, "LATENTDECK_H3_VAE"],
     [8, 7, 0, 8, 0, "IMAGE"],
-    [9, 3, 1, 9, 0, "STRING"]
+    [9, 3, 1, 9, 0, "STRING"],
+    [10, 1, 0, 10, 0, "LATENT"],
+    [11, 2, 0, 11, 0, "LATENT"]
   ],
   "groups": [],
   "config": {},

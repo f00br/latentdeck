@@ -328,9 +328,9 @@ try {
     $exampleShim = Join-Path $customNodes 'latentdeck_example_channel_roll\__init__.py'
     Write-Utf8File -Path $toolkitShim -Content @'
 """Generated ComfyUI discovery shim for the isolated LatentDeck test profile."""
-from latentdeck_comfy_toolkit import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+from latentdeck_comfy_toolkit import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS, WEB_DIRECTORY
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
 '@
     Write-Utf8File -Path $recorderShim -Content @'
 """Generated ComfyUI discovery shim for the isolated LatentCartridge test profile."""

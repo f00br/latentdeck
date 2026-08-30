@@ -1,9 +1,11 @@
 # Channel Roll external operator example
 
-This package is the copyable `MyLatentOperator`-style example for the
-LatentDeck explicit-install Operator API 0.1. The complete PyTorch operator is
-50 lines in `operator.py`: copy the package, change the ID, descriptor, and
-`process_sources`, then explicitly install it into a trusted research host.
+This package is the fully packaged reference for the LatentDeck
+explicit-install Operator API 0.1. For a first experiment, copy the Toolkit's
+single [`MyLatentOperator.py`](../../../comfy/toolkit/templates/MyLatentOperator.py)
+file instead. Graduate to this package layout when the operator needs a wheel,
+separate descriptor resource, package tests, and independent license metadata.
+The complete PyTorch operator remains 50 lines in `operator.py`.
 
 The descriptor declares a `dual_source` topology with two ordered inputs,
 full-clip/streaming/chunk support, deterministic behavior, controls, and an

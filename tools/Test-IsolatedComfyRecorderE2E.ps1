@@ -142,12 +142,13 @@ $baseDirectory = [string]$environmentReceipt.paths.base_directory
 $database = [string]$environmentReceipt.paths.database
 $modelConfig = [string]$environmentReceipt.paths.extra_model_paths
 $pythonPackages = [string]$environmentReceipt.paths.python_packages
+$inputRoot = [string]$environmentReceipt.paths.input
 $outputRoot = [string]$environmentReceipt.paths.output
 foreach ($requiredPath in @($python, $bootstrap, $modelConfig)) {
     Assert-True -Condition (Test-Path -LiteralPath $requiredPath -PathType Leaf) `
         -Message "Required isolated runtime file is missing: $requiredPath"
 }
-foreach ($requiredDirectory in @($baseDirectory, $pythonPackages, $outputRoot)) {
+foreach ($requiredDirectory in @($baseDirectory, $pythonPackages, $inputRoot, $outputRoot)) {
     Assert-True -Condition (Test-Path -LiteralPath $requiredDirectory -PathType Container) `
         -Message "Required isolated runtime directory is missing: $requiredDirectory"
 }
@@ -224,6 +225,15 @@ $stderrTask = $null
 $promptId = $null
 $history = $null
 $newOutput = $null
+$inputRelative = 'latentdeck/e2e/' + [Guid]::NewGuid().ToString('N') + '.safetensors'
+$inputCopy = Join-Path $inputRoot $inputRelative
+Assert-ChildPath -Root $inputRoot -Candidate $inputCopy -Label 'temporary raw input copy'
+[System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($inputCopy)) | Out-Null
+Copy-Item -LiteralPath $sourcePath -Destination $inputCopy
+Assert-True `
+    -Condition ((Get-FileHash -LiteralPath $inputCopy -Algorithm SHA256).Hash.ToLowerInvariant() -ceq
+        $sourceHashBefore) `
+    -Message 'Temporary Comfy input copy disagrees with the raw source hash.'
 try {
     Assert-True -Condition $process.Start() -Message 'Failed to start isolated Comfy server.'
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
@@ -263,7 +273,7 @@ try {
     $graph = [ordered]@{
         '1' = [ordered]@{
             class_type = 'LatentDeckToolkitRawH3Import'
-            inputs = [ordered]@{ safetensors_path = $sourcePath }
+            inputs = [ordered]@{ safetensors_file = $inputRelative.Replace('\', '/') }
         }
         '2' = [ordered]@{
             class_type = 'LatentDeckSaveLatentCartridge'
@@ -365,6 +375,9 @@ finally {
     )
     if ($null -ne $process) {
         $process.Dispose()
+    }
+    if (Test-Path -LiteralPath $inputCopy -PathType Leaf) {
+        [System.IO.File]::Delete($inputCopy)
     }
 }
 

@@ -1,8 +1,8 @@
 {
   "id": "a91ec116-14d3-43d4-917e-69faf2ce0d05",
   "revision": 0,
-  "last_node_id": 13,
-  "last_link_id": 14,
+  "last_node_id": 14,
+  "last_link_id": 15,
   "nodes": [
     {
       "id": 1,
@@ -145,6 +145,7 @@
     {
       "id": 13,
       "type": "PreviewAny",
+      "title": "RAW vs PROJECTED comparison metrics",
       "pos": [1280, 500],
       "size": [380, 220],
       "flags": {},
@@ -170,7 +171,7 @@
       ],
       "outputs": [
         {"name": "latent", "type": "LATENT", "links": [], "slot_index": 0},
-        {"name": "receipt_json", "type": "STRING", "links": [], "slot_index": 1}
+        {"name": "receipt_json", "type": "STRING", "links": [15], "slot_index": 1}
       ],
       "properties": {"Node name for S&R": "LatentDeckToolkitLCSaveResample"},
       "widgets_values": [
@@ -181,6 +182,7 @@
     {
       "id": 9,
       "type": "PreviewImage",
+      "title": "RAW latent — FAST preview",
       "pos": [1750, 10],
       "size": [320, 250],
       "flags": {},
@@ -194,6 +196,7 @@
     {
       "id": 10,
       "type": "PreviewImage",
+      "title": "PROJECTED latent — FAST preview",
       "pos": [2110, 10],
       "size": [320, 250],
       "flags": {},
@@ -207,6 +210,7 @@
     {
       "id": 11,
       "type": "PreviewImage",
+      "title": "RAW latent — HQ reference",
       "pos": [1750, 330],
       "size": [320, 250],
       "flags": {},
@@ -220,6 +224,7 @@
     {
       "id": 12,
       "type": "PreviewImage",
+      "title": "PROJECTED latent — HQ reference",
       "pos": [2110, 330],
       "size": [320, 250],
       "flags": {},
@@ -228,6 +233,22 @@
       "inputs": [{"name": "images", "type": "IMAGE", "link": 13}],
       "outputs": [],
       "properties": {"Node name for S&R": "PreviewImage"},
+      "widgets_values": []
+    },
+    {
+      "id": 14,
+      "type": "PreviewAny",
+      "title": "Saved projected .lc (full resolved path)",
+      "pos": [850, 900],
+      "size": [430, 230],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [{"name": "source", "type": "*", "link": 15}],
+      "outputs": [
+        {"name": "STRING", "type": "STRING", "links": [], "slot_index": 0}
+      ],
+      "properties": {"Node name for S&R": "PreviewAny"},
       "widgets_values": []
     }
   ],
@@ -245,7 +266,8 @@
     [11, 7, 1, 10, 0, "IMAGE"],
     [12, 7, 2, 11, 0, "IMAGE"],
     [13, 7, 3, 12, 0, "IMAGE"],
-    [14, 7, 4, 13, 0, "STRING"]
+    [14, 7, 4, 13, 0, "STRING"],
+    [15, 8, 1, 14, 0, "STRING"]
   ],
   "groups": [],
   "config": {},

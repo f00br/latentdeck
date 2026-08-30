@@ -1,20 +1,25 @@
 # LatentDeck Toolkit example workflows
 
-These six graphs are public, data-free ComfyUI workflow examples. They contain
+These eight graphs are public, data-free ComfyUI workflow examples. They contain
 no cartridge, latent payload, model weight, prompt, generated output, private
 path, or credential. Open a graph with ComfyUI's **Workflow → Open** command or
 drag its JSON file onto the canvas.
 
 Before queueing a graph:
 
-1. replace every relative `.lc` placeholder with a cartridge you selected;
+1. use the LC Load or Raw Import **Upload** button to copy a selected file into
+   Comfy's input area, or select a file already present there;
 2. select the external FAST and/or native HQ H3 VAE where the graph asks for
    one;
 3. replace `REPLACE_WITH_LOWERCASE_SHA256` and the source/license placeholders
    with the identity of that exact external asset;
-4. keep output names relative, or deliberately select your own output
-   directory in the corresponding node;
+4. keep output names relative; LC Save resolves below
+   `output/latentdeck/cartridges`, and Research Report resolves its relative
+   session directory below `output/latentdeck/reports`;
 5. run the compatibility branch before judging an operator result.
+6. inspect every **Explicit Device Transfer** node: choose one device for all
+   synthesis inputs, and change `FALLBACK_TO_CPU` to `ERROR` when a CUDA-only
+   benchmark or acceptance result is required.
 
 The examples never download assets and never hide crop, resize, dtype
 conversion, or re-encoding. The native H3 VAE and taeh3 weights are external
@@ -25,6 +30,13 @@ Compatibility Checker reports that state per input. Explicit Crop and Temporal
 Lab reject an invalid requested/post-loop `T` instead of rounding, padding, or
 truncating it; choose a valid value directly in the visible node controls.
 
+The standalone realtime Deck and this full-clip laboratory deliberately differ
+on clip length. D2/Q4 Deck slots have independent cyclic playheads, so source
+cartridges may have different valid `T`/durations when the shared spatial,
+runtime, codec, and timing contracts match. Toolkit operators receive complete
+tensors in one graph execution and therefore require the same `T`; use the
+visible Explicit Pair Align/Crop node to make that full-clip choice explicit.
+
 ## Included graphs
 
 - [`01_LC_INSPECT.json`](01_LC_INSPECT.json) loads and validates one `.lc`,
@@ -34,23 +46,52 @@ truncating it; choose a valid value directly in the visible node controls.
   visual latent through explicitly declared FAST and HQ VAE assets, displays
   both images, and previews numeric comparison metrics.
 - [`03_DUAL_SYNTH_LAB.json`](03_DUAL_SYNTH_LAB.json) loads a carrier and donor,
+  moves both through visible CUDA:0 transfer nodes (with explicit CPU fallback),
   executes the compatibility checker, runs the Dual Mixer Lab with XS5 in
   `HYBRIDIZE` mode, and performs FAST decode.
 - [`04_QUAD_CARRIER_DONORS.json`](04_QUAD_CARRIER_DONORS.json) loads one carrier
-  plus three donors, previews four-way compatibility, fixes donor order with
-  the Carrier / Donor Router, feeds its reordered normalized B/C/D weights into
-  the Quad Mixer Lab, runs deterministic XS5, and FAST decodes the result. The
-  four files may be duplicate development inputs, but
+  plus three donors, moves all four through visible device-transfer nodes,
+  previews four-way compatibility, fixes donor order with the Carrier / Donor
+  Router, feeds its reordered normalized B/C/D weights into the Quad Mixer Lab,
+  runs deterministic XS5, and FAST decodes the result. The four files may be
+  duplicate development inputs, but
   duplicate content is not evidence of independent four-source diversity.
 - [`05_PROJECT_RESAMPLE.json`](05_PROJECT_RESAMPLE.json) performs the explicit
   offline native-H3 decode→encode projection, compares RAW and PROJECTED through
   the same FAST/HQ pair, then writes the projected latent as a new `.lc`.
   Source cartridges, the projector identity/controls, and the audio policy are
   collected automatically from the latent flowing through the graph.
+- [`06_RAW_RECORD_INSPECT.json`](06_RAW_RECORD_INSPECT.json) selects/uploads an
+  old H3 Safetensors file, passes it through the official lightweight
+  `Save Latent Cartridge (.lc)` Recorder, and shows both import inspection and
+  post-Recorder latent scopes. The Recorder writes below
+  `output/latentdeck/cartridges`.
+- [`07_EXPLICIT_ALIGN_CROP.json`](07_EXPLICIT_ALIGN_CROP.json) is the master
+  mixed-geometry path: two cartridges enter an explicitly labelled center/end
+  crop, compatibility is rechecked, a Linear mix is produced, and the
+  provenance-bearing result is saved. The graph visibly uses
+  `DROP_EXPLICIT` for audio; it performs no hidden resize or re-encode.
 - [`99_OPERATOR_DEVELOPER_TEMPLATE.json`](99_OPERATOR_DEVELOPER_TEMPLATE.json)
-  supplies the smallest developer harness: one carrier, one donor, an operator
-  hook, benchmark, determinism test, full-vs-chunk streaming test, and a
-  JSON/Markdown report exporter that reads the accumulated graph ledger.
+  supplies the smallest developer harness: one carrier and one donor each pass
+  through an explicit CUDA:0/CPU-policy transfer node before the operator hook,
+  benchmark, determinism test, full-vs-chunk streaming test, and JSON/Markdown
+  report exporter that reads the accumulated graph ledger.
+
+## Explicit device staging contract
+
+LC Load and Raw H3 Import produce bounded CPU tensors. Toolkit operators never
+move them implicitly. **LatentDeck Explicit Device Transfer — CPU / CUDA** is a
+visible graph decision that transfers both H3 visual and optional audio streams,
+preserves shape/dtype, normalizes dense contiguity, and returns a JSON receipt.
+
+`target=CUDA` takes a zero-based `cuda_index`. `ERROR` is the safe default when
+CUDA is absent. `FALLBACK_TO_CPU` is a visible opt-in used only when no CUDA
+device exists; an invalid index, CUDA query failure, transfer/allocation error,
+or input above the 512 MiB node bound remains an error. The supplied 03/04/99
+graphs select CUDA:0 plus explicit CPU fallback so they remain runnable for
+functional inspection on CPU-only hosts. A fallback run is not CUDA benchmark
+evidence: confirm `device: cuda` and non-null VRAM fields in the Benchmark
+receipt, or set every transfer policy to `ERROR` before queueing.
 
 ### Replace the built-in hook with an installed external operator
 
@@ -58,12 +99,14 @@ truncating it; choose a valid value directly in the visible node controls.
 `LatentDeckToolkitDualOperatorHook`, so the graph remains loadable when only the
 Toolkit is installed. To evaluate separately installed trusted code:
 
-1. explicitly install the external operator package as a ComfyUI custom node
-   and restart ComfyUI;
+1. explicitly install the external operator package or copy
+   [`MyLatentOperator.py`](../templates/MyLatentOperator.py) into ComfyUI's
+   `custom_nodes` directory, then restart ComfyUI;
 2. delete `LatentDeckToolkitDualOperatorHook` from the graph;
-3. add that package's topology-specific hook-builder node. For the checked-in
-   Channel Roll example, add `LatentDeckExampleChannelRollHook` and connect the
-   donor plus its visible controls;
+3. add that module's topology-specific hook-builder node. For the one-file
+   template, add `MyLatentOperatorTestHook`; for the packaged Channel Roll
+   example, add `LatentDeckExampleChannelRollHook`. Connect the donor plus its
+   visible controls;
 4. connect the hook builder's `LATENTDECK_OPERATOR_HOOK` output to **Operator
    Benchmark**, **Determinism Test**, and **Streaming Compatibility Test**;
 5. keep the carrier connected directly to those three evaluation nodes. A
@@ -72,7 +115,7 @@ Toolkit is installed. To evaluate separately installed trusted code:
    fixed, ordered Comfy input.
 
 Do not paste an entrypoint string into the graph or add a dynamic loader. The
-external package imports its own trusted implementation during explicit
+external module imports its own trusted implementation during explicit
 installation and gives the Toolkit an already constructed hook value. Loading
 a cartridge never installs or imports operator code.
 
@@ -91,6 +134,64 @@ The graph ledger is path-free and bounded. LC loaders add content identity,
 operators append their declared version/seed/controls, diagnostics append their
 measurements, and LC Save appends the new cartridge hash. Users do not retype
 parent or operation JSON in the supplied workflows.
+
+## Private master-test prefill
+
+The public JSON files intentionally contain no private cartridge, raw latent,
+or model path. For a local master-user session, generate queue-ready private
+copies of 01, 02, 03, 04, 05, 06, 07, and 99 from four exactly
+full-clip-compatible mixer roles, one raw H3 source, the native H3 VAE selected
+by the isolated profile, and an explicit-align pair that may intentionally have
+different `T` or geometry:
+
+```powershell
+pwsh -NoProfile -File tools/New-PrivateComfyMasterWorkflows.ps1 `
+  -SourceA <same-t-cartridge-b.lc> -SourceB <same-t-cartridge-c.lc> `
+  -SourceC <same-t-cartridge-b.lc> -SourceD <same-t-cartridge-c.lc> `
+  -RawSource <raw-h3-latent.safetensors> `
+  -HqVaePath <isolated-profile-native-h3-vae.safetensors> `
+  -HqVaeExpectedSha256 <fresh-lowercase-sha256> `
+  -HqVaeSource <https-source-url> `
+  -HqVaeLicense <exact-external-license-label> `
+  -AlignSourceA <portrait-cartridge.lc> `
+  -AlignSourceB <landscape-cartridge.lc>
+```
+
+`SourceA` through `SourceD` are the Toolkit mixer inputs. Because these graphs
+operate on full tensors, the generator requires one exact signature across all
+four: spec and codec/profile versions; every tensor's stream/name, declared
+layout, storage/runtime dtype and full shape; latent and decoded `T/H/W`;
+decoded frame count/duration; timing contract; and frame rate. A mismatch is
+reported before anything is materialized. Duplicates such as `B,C,B,C` are
+deliberately allowed for a functional master-test; they do not prove
+four-source visual diversity.
+
+`AlignSourceA` and `AlignSourceB` are validated and materialized separately but
+are not required to share that signature: workflow 07 exists to expose an
+intentional crop/alignment decision for mixed portrait/landscape or different
+valid `T`. They default to `SourceA` and `SourceD` when omitted.
+
+`RawSource` is inspected by the isolated native Cartridge SDK before it is
+materialized. `HqVaePath` must resolve to the exact native H3 VAE already
+recorded by that isolated profile, and `HqVaeExpectedSha256` must be a fresh
+lowercase SHA-256 calculated for that file. The generator checks its profile
+receipt size and then hashes the selected asset again; it does not trust a
+filename, an old note, or a copied checksum. Source and license values are
+explicit because the weight remains an external private asset with its own
+terms.
+
+After validation and inspection, the script materializes hardlinks (or a
+byte-copy fallback) beneath the isolated Comfy input area and writes ignored
+private workflow copies under `artifacts/`. Its private receipt has separate
+`mixer_sources`, `align_sources`, `raw_source`, `full_clip_signature`, and
+`external_assets` sections. It resolves and rehashes TAEH3 as well as the native
+H3 VAE, fills every applicable VAE loader and truthful declaration, preselects
+every LC/raw input, and preserves the explicit device routes in workflows 03,
+04, and 99. All eight private graphs are queue-ready and contain no unresolved
+placeholder. The script never edits the public templates and never puts an
+absolute private path into generated graphs or their receipt. Rebuild the
+isolated profile first if its `environment.json` refers to an older commit or
+external model selection.
 
 For a custom implementation, continue with the
 [operator developer template](../docs/OPERATOR_DEVELOPER_TEMPLATE.md).

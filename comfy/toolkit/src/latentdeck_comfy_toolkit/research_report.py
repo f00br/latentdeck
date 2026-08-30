@@ -208,6 +208,8 @@ def export_research_report(
         "status": "ok",
         "json_file": json_path.name,
         "markdown_file": markdown_path.name,
+        "json_path": str(json_path.resolve()),
+        "markdown_path": str(markdown_path.resolve()),
         "json_sha256": hashlib.sha256(json_text.encode("utf-8")).hexdigest(),
         "markdown_sha256": hashlib.sha256(markdown_text.encode("utf-8")).hexdigest(),
     }

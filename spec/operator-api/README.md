@@ -7,9 +7,10 @@ LatentDeck Comfy Toolkit 0.1. It complements the standalone application's
 closed builtin registry; it does not make arbitrary Python operators part of
 the realtime release worker.
 
-An external operator is a separately installed, trusted Python distribution.
-It is not cartridge content. `.lc` readers never inspect, import, install, or
-execute an operator.
+An external operator is separately installed trusted Python code: either a
+normal distribution or an explicitly copied ComfyUI module. It is not
+cartridge content. `.lc` readers never inspect, import, install, or execute an
+operator.
 
 ## Versioning
 
@@ -82,7 +83,8 @@ executing operator code. This guarantees an exact, inspectable identity path.
 
 ## Installation
 
-Installation is one explicit host call:
+After the trusted module has been explicitly installed and imported by its
+host, registration is one explicit host call:
 
 ```python
 registry.install(
@@ -99,8 +101,10 @@ rejected. Loading requires the exact installed ID and version.
 
 This boundary establishes explicit consent and predictable identity; it is not
 a Python sandbox. After installation the operator has the permissions of the
-hosting Python process. Only separately reviewed distributions should be
-installed.
+hosting Python process. Only separately reviewed distributions or module files
+should be installed. Copying a standalone `.py` operator into ComfyUI's
+`custom_nodes` directory is therefore an executable-code trust decision, not a
+cartridge-loading feature.
 
 ## Callable contract
 
@@ -147,10 +151,10 @@ exception text.
 ## Cartridge security invariant
 
 There is intentionally no `install_from_cartridge`, descriptor auto-discovery,
-or dynamic entrypoint import. A cartridge cannot select a package, provide
-Python source, supply a download URL, or trigger registry mutation. Operator
-installation and cartridge loading are separate actions and separate trust
-domains.
+or dynamic entrypoint import. A cartridge cannot select a package or module,
+provide Python source, supply a download URL, or trigger registry mutation.
+Operator installation and cartridge loading are separate actions and separate
+trust domains.
 
 The public reference implementation is the
 [50-line Channel Roll / MyLatentOperator example](../../operators/examples/channel-roll/README.md).

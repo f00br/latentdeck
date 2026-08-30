@@ -14,7 +14,7 @@ from latentdeck_comfy_toolkit.workflow_metadata import (
 
 
 def test_research_report_node_exports_both_formats_and_returns_a_safe_receipt(tmp_path) -> None:
-    node = LatentDeckToolkitResearchReport()
+    node = LatentDeckToolkitResearchReport(directory_resolver=lambda path: path)
     source = initialize_lc_metadata(
         {"samples": torch.zeros((1, 24, 2, 1, 1), dtype=torch.float16)},
         manifest={"cartridge_id": "source-id", "codec": {}, "timing": {}},
@@ -59,9 +59,10 @@ def test_research_report_node_exports_both_formats_and_returns_a_safe_receipt(tm
     assert "# LatentDeck Research Report" in report_markdown
     assert receipt["json_file"] == "operator-study.json"
     assert receipt["markdown_file"] == "operator-study.md"
-    assert str(tmp_path) not in receipt_json
+    assert receipt["json_path"] == str((tmp_path / "operator-study.json").resolve())
+    assert receipt["markdown_path"] == str((tmp_path / "operator-study.md").resolve())
     assert response["ui"]["text"] == [
-        "Saved operator-study.json",
-        "Saved operator-study.md",
+        f"Saved {(tmp_path / 'operator-study.json').resolve()}",
+        f"Saved {(tmp_path / 'operator-study.md').resolve()}",
     ]
     assert LatentDeckToolkitResearchReport.OUTPUT_NODE is True

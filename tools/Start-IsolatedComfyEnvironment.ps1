@@ -126,12 +126,19 @@ $arguments = @(
     '--extra-model-paths-config', [string]$receipt.paths.extra_model_paths,
     '--listen', '127.0.0.1',
     '--port', "$launchPort",
-    '--disable-auto-launch',
     '--disable-api-nodes',
     '--disable-all-custom-nodes',
     '--whitelist-custom-nodes', 'latentdeck_toolkit', 'comfyui_latent_cartridge', 'latentdeck_example_channel_roll',
     '--log-stdout'
 )
+if ($OpenBrowser) {
+    # Comfy invokes --auto-launch only after aiohttp has successfully bound the
+    # listening site, so the browser never races a server that is still starting.
+    $arguments += '--auto-launch'
+}
+else {
+    $arguments += '--disable-auto-launch'
+}
 if ($Cpu) {
     $arguments += '--cpu'
 }
@@ -143,10 +150,6 @@ Write-Host "Base directory: $($receipt.paths.base_directory)"
 Write-Host "Python overlay: $($receipt.paths.python_packages)"
 Write-Host 'Only Toolkit, ComfyUI-LatentCartridge, and the reviewed example operator are enabled.'
 Write-Warning 'Press Ctrl+C in this terminal to stop the isolated ComfyUI process.'
-
-if ($OpenBrowser) {
-    Start-Process $url
-}
 
 $oldBytecode = $env:PYTHONDONTWRITEBYTECODE
 try {

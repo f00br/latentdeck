@@ -10,6 +10,7 @@ import torch
 
 from .adapter import process_xs_sequence
 from .decoder_compare import DecoderHook, ToolkitContractError, compare_decoder_hooks
+from .device_nodes import DEVICE_NODE_CLASS_MAPPINGS, DEVICE_NODE_DISPLAY_NAME_MAPPINGS
 from .io_nodes import IO_NODE_CLASS_MAPPINGS, IO_NODE_DISPLAY_NAME_MAPPINGS
 from .projector import preflight_projector_input, project_offline
 from .report_nodes import REPORT_NODE_CLASS_MAPPINGS, REPORT_NODE_DISPLAY_NAME_MAPPINGS
@@ -243,6 +244,7 @@ class LatentDeckToolkitOfflineProjector:
 NODE_CLASS_MAPPINGS = {
     "LatentDeckToolkitCompareDecoders": LatentDeckToolkitCompareDecoders,
     "LatentDeckToolkitOfflineProjector": LatentDeckToolkitOfflineProjector,
+    **DEVICE_NODE_CLASS_MAPPINGS,
     **IO_NODE_CLASS_MAPPINGS,
     **RESEARCH_NODE_CLASS_MAPPINGS,
     **VAE_NODE_CLASS_MAPPINGS,
@@ -252,6 +254,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "LatentDeckToolkitCompareDecoders": "LatentDeck Compare FAST / HQ Hooks",
     "LatentDeckToolkitOfflineProjector": "LatentDeck PCA Diagnostic (Offline CPU)",
+    **DEVICE_NODE_DISPLAY_NAME_MAPPINGS,
     **IO_NODE_DISPLAY_NAME_MAPPINGS,
     **RESEARCH_NODE_DISPLAY_NAME_MAPPINGS,
     **VAE_NODE_DISPLAY_NAME_MAPPINGS,

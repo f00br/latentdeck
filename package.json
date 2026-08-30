@@ -12,8 +12,8 @@
     "build": "pnpm --recursive --if-present build",
     "dev:deck": "pnpm --filter @latentdeck/app dev",
     "dev:player": "pnpm --filter @latentdeck/player dev",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
+    "format": "prettier --write \"apps/**/*.{ts,svelte,css}\" \"comfy/toolkit/src/**/*.js\"",
+    "format:check": "prettier --check \"apps/**/*.{ts,svelte,css}\" \"comfy/toolkit/src/**/*.js\"",
     "lint": "pnpm --recursive --if-present lint",
     "test": "pnpm --recursive --if-present test"
   },

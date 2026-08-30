@@ -1,5 +1,7 @@
 """LatentDeck Comfy Toolkit public Python surface."""
 
+from pathlib import Path
+
 from .adapter import (
     MAX_SEQUENCE_VALUES,
     MAX_TEMPORAL_SLOTS,
@@ -15,6 +17,13 @@ from .decoder_compare import (
     DecoderHook,
     ToolkitContractError,
     compare_decoder_hooks,
+)
+from .device_transfer import (
+    DEVICE_TRANSFER_VERSION,
+    MAX_CUDA_DEVICE_INDEX,
+    MAX_DEVICE_TRANSFER_BYTES,
+    DeviceTransferResult,
+    transfer_latent_device,
 )
 from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 from .operator_api import (
@@ -41,6 +50,7 @@ from .research_nodes import (
 )
 
 __version__ = "0.1.0"
+WEB_DIRECTORY = str(Path(__file__).with_name("web"))
 
 __all__ = [
     "MAX_SEQUENCE_VALUES",
@@ -50,10 +60,14 @@ __all__ = [
     "MAX_METRIC_CHUNK_VALUES",
     "MAX_OPERATOR_PROVENANCE_BYTES",
     "MAX_PROJECTOR_TOKENS",
+    "MAX_CUDA_DEVICE_INDEX",
+    "MAX_DEVICE_TRANSFER_BYTES",
     "NODE_CLASS_MAPPINGS",
     "NODE_DISPLAY_NAME_MAPPINGS",
     "DecoderComparison",
     "DecoderHook",
+    "DEVICE_TRANSFER_VERSION",
+    "DeviceTransferResult",
     "ExternalOperatorDescriptor",
     "InstalledOperator",
     "LatentDeckResearchOperatorHook",
@@ -62,6 +76,7 @@ __all__ = [
     "PROJECTOR_VERSION",
     "ProjectionResult",
     "TOOLKIT_ADAPTER_VERSION",
+    "WEB_DIRECTORY",
     "ToolkitContractError",
     "ToolkitOperatorResult",
     "TrustedOperatorRegistry",
@@ -73,5 +88,6 @@ __all__ = [
     "project_offline",
     "preflight_projector_input",
     "validate_external_descriptor",
+    "transfer_latent_device",
     "process_xs_sequence",
 ]
