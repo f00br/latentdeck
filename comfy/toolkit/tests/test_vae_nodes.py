@@ -16,8 +16,9 @@ class FakeVae:
         return latent[:, :3].movedim(1, -1).float().contiguous()
 
     def encode(self, image: torch.Tensor) -> torch.Tensor:
-        visual = image.movedim(-1, 1)
-        return visual.repeat(1, 8, 1, 1, 1).half().contiguous()
+        assert image.ndim == 4
+        visual = image.movedim(-1, 1).repeat(1, 8, 1, 1)[:, :24]
+        return visual.movedim(0, 1).unsqueeze(0).half().contiguous()
 
 
 def latent() -> dict[str, torch.Tensor]:

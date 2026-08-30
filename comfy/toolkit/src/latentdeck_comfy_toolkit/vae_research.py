@@ -155,6 +155,163 @@ def _audio_disposition(audio: tuple[object, ...]) -> str:
     return "ignored_visual_decode" if audio else "source_absent"
 
 
+def _comfy_h3_encode_image(image: torch.Tensor) -> tuple[torch.Tensor, str]:
+    """Present one decoded H3 clip through Comfy's public video IMAGE shape.
+
+    Native H3 decode can return ``[1,F,H,W,C]`` while ``VAE.encode`` expects a
+    single video as ``[F,H,W,C]``.  Passing the five-dimensional buffer to the
+    generic Comfy crop helper makes it interpret the frame axis as a spatial
+    axis.  Removing only the known singleton clip batch is reversible and does
+    not crop, resize, re-order, or re-encode any pixels.
+    """
+
+    if image.ndim == 4:
+        return image.contiguous(), "already_comfy_video_image"
+    if image.ndim == 5 and image.shape[0] == 1:
+        return image[0].contiguous(), "remove_singleton_video_batch"
+    raise ToolkitContractError(
+        "vae.decoded_video_batch_incompatible",
+        "HQ_PROJECTOR decode must return [F,H,W,C] or one [1,F,H,W,C] clip",
+    )
+
+
+def _normalize_h3_encoded(
+    value: object,
+    *,
+    expected_shape: tuple[int, ...],
+    decoded_frames: int,
+) -> tuple[torch.Tensor, str, list[int]]:
+    """Restore only exact, reversible H3 batch/time wrappers.
+
+    The accepted destination is always the caller's exact ``[1,24,T,H,W]``
+    geometry.  A host may return that tensor directly, omit its known singleton
+    batch, or expose an exact frame-batch/time transpose.  Every accepted case
+    is a reshape/transpose with identical element count and exact channel,
+    temporal, and spatial axes; no geometry inference is allowed.
+    """
+
+    if not isinstance(value, torch.Tensor):
+        raise ToolkitContractError(
+            "vae.encoded_h3_type_incompatible",
+            "HQ_PROJECTOR native encode must return a torch.Tensor",
+        )
+    actual_shape = tuple(value.shape)
+    normalized: torch.Tensor | None = None
+    mode = ""
+    if actual_shape == expected_shape:
+        normalized = value
+        mode = "already_h3_bcthw"
+    elif value.ndim == 4:
+        squeezed_batch_shape = expected_shape[1:]
+        flattened_time_shape = (
+            expected_shape[2],
+            expected_shape[1],
+            expected_shape[3],
+            expected_shape[4],
+        )
+        if actual_shape == squeezed_batch_shape == flattened_time_shape:
+            raise ToolkitContractError(
+                "vae.encoded_h3_shape_ambiguous",
+                "native encode omitted an axis but channel and time are both 24; "
+                "the H3 layout cannot be restored without guessing",
+            )
+        if actual_shape == squeezed_batch_shape:
+            normalized = value.unsqueeze(0)
+            mode = "restore_singleton_batch"
+        elif actual_shape == flattened_time_shape:
+            normalized = value.movedim(0, 1).unsqueeze(0)
+            mode = "restore_flattened_time_batch"
+    elif (
+        value.ndim == 5
+        and actual_shape
+        == (
+            expected_shape[2],
+            expected_shape[1],
+            1,
+            expected_shape[3],
+            expected_shape[4],
+        )
+        and actual_shape[0] == decoded_frames
+    ):
+        normalized = value[:, :, 0].movedim(0, 1).unsqueeze(0)
+        mode = "restore_singleton_slot_frame_batch"
+    if normalized is None or tuple(normalized.shape) != expected_shape:
+        raise ToolkitContractError(
+            "vae.encoded_h3_shape_incompatible",
+            f"native encode returned {list(actual_shape)}; expected {list(expected_shape)} "
+            "with only an exact reversible batch/time wrapper permitted",
+        )
+    # Reuse the public H3 tensor validator after the explicit shape bridge so
+    # dtype, layout, device, bounds, and finite-value checks stay identical to
+    # every other Toolkit operator.
+    checked = visual_latent(normalized.contiguous(), "native encoded H3 latent").visual
+    return checked, mode, list(actual_shape)
+
+
+def _validate_projected_repack(
+    projected: object,
+    *,
+    expected_visual: torch.Tensor,
+    expected_audio: tuple[object, ...],
+) -> None:
+    """Read a rebuilt host carrier back before it crosses a node boundary."""
+
+    try:
+        readback = visual_latent(projected, "projected latent readback")
+    except ToolkitContractError as error:
+        raise ToolkitContractError(
+            "vae.projected_repack_invalid",
+            "host LATENT carrier did not preserve the projected H3 stream layout",
+        ) from error
+    if tuple(readback.visual.shape) != tuple(expected_visual.shape):
+        raise ToolkitContractError(
+            "vae.projected_repack_invalid",
+            "host LATENT carrier changed the projected H3 visual shape",
+        )
+    if readback.visual is not expected_visual:
+        raise ToolkitContractError(
+            "vae.projected_repack_invalid",
+            "host LATENT carrier did not retain the exact projected H3 visual stream",
+        )
+    if len(readback.audio) != len(expected_audio):
+        raise ToolkitContractError(
+            "vae.projected_repack_invalid",
+            "host LATENT carrier changed the projected H3 stream count",
+        )
+    if expected_audio and readback.audio[0] is not expected_audio[0]:
+        raise ToolkitContractError(
+            "vae.projected_repack_invalid",
+            "host LATENT carrier did not preserve the exact H3 audio stream",
+        )
+
+
+def _restore_projector_runtime_dtype(
+    encoded: torch.Tensor,
+    *,
+    runtime_reference: torch.Tensor,
+) -> tuple[torch.Tensor, str, str, bool]:
+    """Return the explicit projector output in the caller's runtime dtype."""
+
+    raw_dtype = str(encoded.dtype).removeprefix("torch.")
+    output_dtype = str(runtime_reference.dtype).removeprefix("torch.")
+    if encoded.dtype == runtime_reference.dtype:
+        # Preserve the exact tensor object on the already-compatible path.
+        return encoded, raw_dtype, output_dtype, False
+    supported = {torch.float16, torch.float32}
+    if encoded.dtype not in supported or runtime_reference.dtype not in supported:
+        raise ToolkitContractError(
+            "vae.encoded_h3_dtype_incompatible",
+            "HQ_PROJECTOR supports only an explicit F16/F32 output dtype conversion",
+        )
+    converted = encoded.to(dtype=runtime_reference.dtype)
+    if tuple(converted.shape) != tuple(encoded.shape) or converted.device != encoded.device:
+        raise ToolkitContractError(
+            "vae.encoded_h3_dtype_incompatible",
+            "HQ_PROJECTOR dtype conversion changed tensor geometry or device",
+        )
+    return converted, raw_dtype, output_dtype, True
+
+
 @torch.inference_mode()
 def decode_h3_vae(
     latent: object,
@@ -246,27 +403,37 @@ def project_h3_native(
     identity.validate(required_role="HQ_PROJECTOR")
     surface = visual_latent(latent)
     raw_image = _decode_raw(surface.visual, native_vae, "HQ_PROJECTOR")
+    encoder_image, encode_bridge = _comfy_h3_encode_image(raw_image)
     encode = _vae_method(native_vae, "encode")
     try:
-        encoded = encode(raw_image.detach().clone(memory_format=torch.contiguous_format))
+        encoded = encode(encoder_image.detach().clone(memory_format=torch.contiguous_format))
     except ToolkitContractError:
         raise
     except Exception as error:
         raise ToolkitContractError(
             "vae.encode_failed", "HQ_PROJECTOR Comfy VAE encode failed"
         ) from error
-    projected_surface = visual_latent(encoded, "projected latent")
-    projected_visual = projected_surface.visual.contiguous()
-    exact_geometry = tuple(projected_visual.shape) == tuple(surface.visual.shape)
-    keep_audio = exact_geometry and bool(surface.audio)
-    projected = surface.repack(projected_visual, keep_audio=keep_audio)
-    audio_policy = (
-        "copied_exact_temporal_geometry"
-        if keep_audio
-        else "source_absent"
-        if not surface.audio
-        else "omitted_projector_geometry_changed"
+    projected_visual, encoded_normalization, encoded_raw_shape = _normalize_h3_encoded(
+        encoded,
+        expected_shape=tuple(surface.visual.shape),
+        decoded_frames=int(encoder_image.shape[0]),
     )
+    (
+        projected_visual,
+        encoded_raw_dtype,
+        output_dtype,
+        explicit_output_dtype_conversion,
+    ) = _restore_projector_runtime_dtype(
+        projected_visual,
+        runtime_reference=surface.visual,
+    )
+    projected = surface.repack(projected_visual, keep_audio=bool(surface.audio))
+    _validate_projected_repack(
+        projected,
+        expected_visual=projected_visual,
+        expected_audio=surface.audio,
+    )
+    audio_policy = "copied_exact_temporal_geometry" if surface.audio else "source_absent"
     provenance: dict[str, Any] = {
         "schema_version": VAE_RESEARCH_VERSION,
         "operation": "H3_NATIVE_DECODE_ENCODE_PROJECTOR",
@@ -274,11 +441,21 @@ def project_h3_native(
         "vae": identity.as_dict(),
         "input_shape": list(surface.visual.shape),
         "decoded_shape": list(raw_image.shape),
+        "encode_input_shape": list(encoder_image.shape),
+        "encode_bridge": encode_bridge,
+        "encoded_raw_shape": encoded_raw_shape,
+        "encoded_normalization": encoded_normalization,
+        "encoded_raw_dtype": encoded_raw_dtype,
+        "output_dtype": output_dtype,
+        "explicit_output_dtype_conversion": explicit_output_dtype_conversion,
+        "hidden_output_dtype_conversion": False,
         "output_shape": list(projected_visual.shape),
         "audio_policy": audio_policy,
         "hidden_resize": False,
+        "hidden_crop": False,
         "hidden_reencode": False,
         "explicit_native_reencode": True,
+        "repack_readback_validated": True,
     }
     json.dumps(provenance, allow_nan=False, separators=(",", ":"))
     if isinstance(projected, Mapping):
@@ -292,6 +469,14 @@ def project_h3_native(
                     "controls": {
                         "vae": identity.as_dict(),
                         "audio_policy": audio_policy,
+                        "encoded_raw_dtype": encoded_raw_dtype,
+                        "output_dtype": output_dtype,
+                        "explicit_output_dtype_conversion": (explicit_output_dtype_conversion),
+                        "hidden_output_dtype_conversion": False,
+                        "hidden_resize": False,
+                        "hidden_crop": False,
+                        "hidden_reencode": False,
+                        "explicit_native_reencode": True,
                     },
                 },
                 "audio_policy": audio_policy,

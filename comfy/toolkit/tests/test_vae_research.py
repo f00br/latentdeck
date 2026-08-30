@@ -37,9 +37,14 @@ class FakeVae:
 
     def encode(self, image: torch.Tensor) -> torch.Tensor:
         self.encoded_inputs.append(image.clone())
+        # Comfy's public video IMAGE convention presents a single clip as
+        # [frames,height,width,channels].  Its VAE wrapper restores the
+        # singleton video batch before calling the native H3 encoder.
+        assert image.ndim == 4
         visual = image.movedim(-1, 1)
         repeat = (24 + visual.shape[1] - 1) // visual.shape[1]
-        return visual.repeat(1, repeat, 1, 1, 1)[:, :24].mul(self.encode_scale).half().contiguous()
+        encoded = visual.repeat(1, repeat, 1, 1)[:, :24]
+        return encoded.movedim(0, 1).unsqueeze(0).mul(self.encode_scale).half().contiguous()
 
 
 def identity(role: str, sha: str) -> H3VaeIdentity:
@@ -100,6 +105,7 @@ def test_native_projector_is_explicit_decode_encode_and_preserves_exact_timing_a
 
     assert len(native.decoded_inputs) == len(native.encoded_inputs) == 1
     assert torch.equal(native.decoded_inputs[0], video)
+    assert native.encoded_inputs[0].shape == (2, 3, 4, 3)
     projected_samples = result.latent["samples"]
     projected_video, projected_audio = projected_samples.unbind()
     assert projected_video.shape == video.shape
@@ -108,6 +114,142 @@ def test_native_projector_is_explicit_decode_encode_and_preserves_exact_timing_a
     assert result.provenance["operation"] == "H3_NATIVE_DECODE_ENCODE_PROJECTOR"
     assert result.provenance["audio_policy"] == "copied_exact_temporal_geometry"
     assert result.provenance["hidden_resize"] is False
+    assert result.provenance["hidden_crop"] is False
+    assert result.provenance["hidden_reencode"] is False
+    assert result.provenance["explicit_native_reencode"] is True
+    assert result.provenance["encode_bridge"] == "remove_singleton_video_batch"
+    assert result.provenance["encoded_normalization"] == "already_h3_bcthw"
+    assert result.provenance["encoded_raw_dtype"] == "float16"
+    assert result.provenance["output_dtype"] == "float16"
+    assert result.provenance["explicit_output_dtype_conversion"] is False
+    assert result.provenance["hidden_output_dtype_conversion"] is False
+
+
+def test_native_projector_explicitly_restores_the_exact_f16_runtime_dtype() -> None:
+    latent, video, _audio = av_latent()
+
+    class Float32NativeVae(FakeVae):
+        def encode(self, image: torch.Tensor) -> torch.Tensor:
+            return super().encode(image).float()
+
+    result = project_h3_native(
+        latent,
+        Float32NativeVae(decode_scale=1.0),
+        identity("HQ_PROJECTOR", "f"),
+    )
+
+    projected, _ = result.latent["samples"].unbind()
+    assert projected.shape == video.shape
+    assert projected.dtype == video.dtype == torch.float16
+    assert result.provenance["encoded_raw_dtype"] == "float32"
+    assert result.provenance["output_dtype"] == "float16"
+    assert result.provenance["explicit_output_dtype_conversion"] is True
+    assert result.provenance["hidden_output_dtype_conversion"] is False
+    controls = result.latent["latentdeck"]["operation_history"][-1]["controls"]
+    assert controls["encoded_raw_dtype"] == "float32"
+    assert controls["output_dtype"] == "float16"
+    assert controls["explicit_output_dtype_conversion"] is True
+    assert controls["hidden_output_dtype_conversion"] is False
+    assert controls["hidden_resize"] is False
+    assert controls["hidden_crop"] is False
+    assert controls["hidden_reencode"] is False
+    assert controls["explicit_native_reencode"] is True
+
+
+def test_native_projector_does_not_downcast_an_f32_runtime_input() -> None:
+    latent, video, audio = av_latent()
+    latent["samples"] = NestedSamples((video.float(), audio))
+
+    class Float32NativeVae(FakeVae):
+        def encode(self, image: torch.Tensor) -> torch.Tensor:
+            return super().encode(image).float()
+
+    result = project_h3_native(
+        latent,
+        Float32NativeVae(decode_scale=1.0),
+        identity("HQ_PROJECTOR", "0"),
+    )
+
+    projected, _ = result.latent["samples"].unbind()
+    assert projected.dtype == torch.float32
+    assert result.provenance["encoded_raw_dtype"] == "float32"
+    assert result.provenance["output_dtype"] == "float32"
+    assert result.provenance["explicit_output_dtype_conversion"] is False
+
+
+def test_native_projector_restores_only_an_exact_reversible_h3_batch_axis() -> None:
+    latent, video, _audio = av_latent()
+
+    class SqueezedBatchVae(FakeVae):
+        def encode(self, image: torch.Tensor) -> torch.Tensor:
+            return super().encode(image)[0]
+
+    result = project_h3_native(
+        latent,
+        SqueezedBatchVae(decode_scale=1.0),
+        identity("HQ_PROJECTOR", "b"),
+    )
+
+    projected, _ = result.latent["samples"].unbind()
+    assert projected.shape == video.shape
+    assert result.provenance["encoded_normalization"] == "restore_singleton_batch"
+
+
+def test_native_projector_restores_an_exact_flattened_latent_time_batch() -> None:
+    latent, video, _audio = av_latent()
+
+    class FlattenedTimeVae(FakeVae):
+        def encode(self, image: torch.Tensor) -> torch.Tensor:
+            encoded = super().encode(image)
+            return encoded[0].movedim(0, 1)
+
+    result = project_h3_native(
+        latent,
+        FlattenedTimeVae(decode_scale=1.0),
+        identity("HQ_PROJECTOR", "e"),
+    )
+
+    projected, _ = result.latent["samples"].unbind()
+    assert projected.shape == video.shape
+    assert result.provenance["encoded_normalization"] == "restore_flattened_time_batch"
+
+
+def test_native_projector_rejects_non_reversible_native_encode_geometry() -> None:
+    latent, _video, _audio = av_latent()
+
+    class WrongTemporalVae(FakeVae):
+        def encode(self, image: torch.Tensor) -> torch.Tensor:
+            return super().encode(image)[:, :, :-1]
+
+    with pytest.raises(ToolkitContractError) as incompatible:
+        project_h3_native(
+            latent,
+            WrongTemporalVae(decode_scale=1.0),
+            identity("HQ_PROJECTOR", "c"),
+        )
+
+    assert incompatible.value.code == "vae.encoded_h3_shape_incompatible"
+    assert "expected [1, 24, 2, 3, 4]" in incompatible.value.detail
+
+
+def test_native_projector_validates_nested_repack_by_reading_streams_back() -> None:
+    latent, _video, _audio = av_latent()
+
+    class BrokenNestedSamples(NestedSamples):
+        def with_streams(self, streams: tuple[torch.Tensor, ...]) -> NestedSamples:
+            # Models a superficially successful host carrier that silently
+            # strips the video batch axis.
+            return NestedSamples((streams[0][0], *streams[1:]))
+
+    latent["samples"] = BrokenNestedSamples(latent["samples"].unbind())
+    with pytest.raises(ToolkitContractError) as invalid_repack:
+        project_h3_native(
+            latent,
+            FakeVae(decode_scale=1.0),
+            identity("HQ_PROJECTOR", "d"),
+        )
+
+    assert invalid_repack.value.code == "vae.projected_repack_invalid"
 
 
 def test_projection_comparison_decodes_raw_and_projected_through_the_same_two_vaes() -> None:
