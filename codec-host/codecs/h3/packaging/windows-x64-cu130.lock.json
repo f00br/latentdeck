@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "platform": "windows-x86_64",
+  "uv_version": "0.11.8",
+  "python_runtime": {
+    "version": "3.13.14",
+    "archive_filename": "python-3.13.14-embed-amd64.zip",
+    "source_url": "https://www.python.org/ftp/python/3.13.14/python-3.13.14-embed-amd64.zip",
+    "sha256": "90b4e5b9898b72d744650524bff92377c367f44bd5fbd09e3148656c080ad907",
+    "license_expression": "PSF-2.0",
+    "license_path": "LICENSE.txt",
+    "prune_entries": [
+      "ctypes/macholib/fetch_macholib.bat"
+    ]
+  },
+  "dependencies": [
+    {
+      "name": "colorama",
+      "version": "0.4.6",
+      "source_url": "https://pypi.org/project/colorama/0.4.6/",
+      "license_expression": "BSD-3-Clause",
+      "content_sha256": "a08b1163a362d457167f8b79e0df101dce4e228c39bb11f3e42b024e6e7c433b"
+    },
+    {
+      "name": "filelock",
+      "version": "3.32.4",
+      "source_url": "https://pypi.org/project/filelock/3.32.4/",
+      "license_expression": "MIT",
+      "content_sha256": "a8addbcb621be7cfe3ea3d6d975f4fd3604b1f4abec9878edf8abd96d7882b14"
+    },
+    {
+      "name": "fsspec",
+      "version": "2026.7.0",
+      "source_url": "https://pypi.org/project/fsspec/2026.7.0/",
+      "license_expression": "BSD-3-Clause",
+      "content_sha256": "30cca594f5806e2c163123fb779be28fe262d0217c2695166d65e15716eef64d"
+    },
+    {
+      "name": "Jinja2",
+      "version": "3.1.6",
+      "source_url": "https://pypi.org/project/Jinja2/3.1.6/",
+      "license_expression": "BSD-3-Clause",
+      "content_sha256": "c84018284228f1ab67447307418f3f39499b5643561c04c64e93071cd99e2cf5"
+    },
+    {
+      "name": "MarkupSafe",
+      "version": "3.0.3",
+      "source_url": "https://pypi.org/project/MarkupSafe/3.0.3/",
+      "license_expression": "BSD-3-Clause",
+      "content_sha256": "2364bbbf2e5b72f31329926d136e0d5ea37b8fa47ea2e0f4ef769d963cc1f8b5"
+    },
+    {
+      "name": "mpmath",
+      "version": "1.3.0",
+      "source_url": "https://pypi.org/project/mpmath/1.3.0/",
+      "license_expression": "BSD-3-Clause",
+      "content_sha256": "36fa921132b6ce1ed5432266ed553205091def5d65adeb492b8ce4ab05dbde70"
+    },
+    {
+      "name": "msgpack",
+      "version": "1.2.2",
+      "source_url": "https://pypi.org/project/msgpack/1.2.2/",
+      "license_expression": "Apache-2.0",
+      "content_sha256": "86ad3f4f0af3cc5c488d1a0111a3079c6752be334e42c434b20d0caa3bd8e8b9"
+    },
+    {
+      "name": "networkx",
+      "version": "3.6.1",
+      "source_url": "https://pypi.org/project/networkx/3.6.1/",
+      "license_expression": "BSD-3-Clause",
+      "content_sha256": "a2199a7f50178ad93a4e44fc1f7427b56230d9fc576c3caf8d94594b93a0647d"
+    },
+    {
+      "name": "numpy",
+      "version": "2.5.2",
+      "source_url": "https://pypi.org/project/numpy/2.5.2/",
+      "license_expression": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
+      "content_sha256": "c8d7243599f1091c3ce697a84ca608bf807cc7565b592e01bec2541e3c2a3bfa"
+    },
+    {
+      "name": "safetensors",
+      "version": "0.8.0",
+      "source_url": "https://pypi.org/project/safetensors/0.8.0/",
+      "license_expression": "Apache-2.0",
+      "content_sha256": "9f17c2a3ee03a8926a4218391fa8895df79e5a8ca8d4c37142d0ba35920078a5"
+    },
+    {
+      "name": "setuptools",
+      "version": "84.0.0",
+      "source_url": "https://pypi.org/project/setuptools/84.0.0/",
+      "license_expression": "MIT",
+      "content_sha256": "b21d00bccb8dfde644f089a47cefb68041a65ba7bd24c53a46c1c0b60575f2ff"
+    },
+    {
+      "name": "sympy",
+      "version": "1.14.0",
+      "source_url": "https://pypi.org/project/sympy/1.14.0/",
+      "license_expression": "BSD-3-Clause",
+      "content_sha256": "b27af39e256acaf076f7e84c449695d3c8ff9356fdf67e2b7451dd2bb6d3fb7e"
+    },
+    {
+      "name": "torch",
+      "version": "2.13.0+cu130",
+      "source_url": "https://download.pytorch.org/whl/cu130/torch/",
+      "license_expression": "Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND MIT",
+      "content_sha256": "66d8b79cb4119944b02d041c39262690727c1dab088efe3dd180722d134a8ba2"
+    },
+    {
+      "name": "tqdm",
+      "version": "4.70.0",
+      "source_url": "https://pypi.org/project/tqdm/4.70.0/",
+      "license_expression": "MPL-2.0 AND MIT",
+      "content_sha256": "076fbd6cc503c65eb20c0fc14993a880c2435dbe3db7c794b4f9422d6668ab08"
+    },
+    {
+      "name": "typing_extensions",
+      "version": "4.16.0",
+      "source_url": "https://pypi.org/project/typing-extensions/4.16.0/",
+      "license_expression": "PSF-2.0",
+      "content_sha256": "a7ebb20fb1ee57e955b7132d3bd51c71ff498d386453f17b3515527eb02ea8cd"
+    }
+  ],
+  "local_projects": [
+    {
+      "name": "latentdeck-codec-host",
+      "version": "0.1.0",
+      "source_url": "https://latentdeck.org/",
+      "license_expression": "Apache-2.0"
+    },
+    {
+      "name": "latentdeck-operator-d2",
+      "version": "0.1.0",
+      "source_url": "https://latentdeck.org/",
+      "license_expression": "Apache-2.0"
+    },
+    {
+      "name": "latentdeck-operator-q4",
+      "version": "0.1.0",
+      "source_url": "https://latentdeck.org/",
+      "license_expression": "Apache-2.0"
+    },
+    {
+      "name": "latentdeck-rgb-ring",
+      "version": "0.1.0",
+      "source_url": "https://latentdeck.org/",
+      "license_expression": "Apache-2.0"
+    },
+    {
+      "name": "latentdeck-codec-h3",
+      "version": "0.1.0",
+      "source_url": "https://latentdeck.org/",
+      "license_expression": "Apache-2.0"
+    }
+  ],
+  "prune": {
+    "path_segments": [
+      "tests",
+      "__pycache__",
+      "sboms"
+    ],
+    "relative_paths": [
+      "bin",
+      "share/man",
+      ".lock",
+      "distutils-precedence.pth",
+      "setuptools/cli-32.exe",
+      "setuptools/cli-64.exe",
+      "setuptools/cli-arm64.exe",
+      "setuptools/cli.exe",
+      "setuptools/gui-32.exe",
+      "setuptools/gui-64.exe",
+      "setuptools/gui-arm64.exe",
+      "setuptools/gui.exe",
+      "torch/include",
+      "torch/share",
+      "numpy/_core/include",
+      "networkx/generators/atlas.dat.gz",
+      "tqdm/completion.sh"
+    ]
+  }
+}

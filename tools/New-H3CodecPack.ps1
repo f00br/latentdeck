@@ -10,6 +10,12 @@ param(
     [string]$NoticeSource,
 
     [Parameter(Mandatory)]
+    [string]$DependencyInventoryPath,
+
+    [Parameter(Mandatory)]
+    [string]$SbomPath,
+
+    [Parameter(Mandatory)]
     [string]$DecoderAssetContractPath,
 
     [string]$PackVersion = '0.1.0',
@@ -43,9 +49,11 @@ Assert-ChildPath -ParentPath $artifactsRoot -CandidatePath $outputRoot -AllowPar
 $runtimeRoot = (Resolve-Path -LiteralPath $RuntimeSource).Path
 $packageRoot = (Resolve-Path -LiteralPath $PackageSource).Path
 $noticePath = (Resolve-Path -LiteralPath $NoticeSource).Path
+$inventoryPath = (Resolve-Path -LiteralPath $DependencyInventoryPath).Path
+$sbomPath = (Resolve-Path -LiteralPath $SbomPath).Path
 $assetContractPath = (Resolve-Path -LiteralPath $DecoderAssetContractPath).Path
 
-foreach ($inputPath in @($noticePath, $assetContractPath)) {
+foreach ($inputPath in @($noticePath, $inventoryPath, $sbomPath, $assetContractPath)) {
     $item = Get-Item -LiteralPath $inputPath -Force
     if ($item.PSIsContainer -or
         ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -131,11 +139,21 @@ try {
         (Join-Path $packRoot 'THIRD_PARTY_NOTICES.md'),
         $false
     )
+    [System.IO.File]::Copy(
+        $inventoryPath,
+        (Join-Path $packRoot 'DEPENDENCY_INVENTORY.json'),
+        $false
+    )
+    [System.IO.File]::Copy(
+        $sbomPath,
+        (Join-Path $packRoot 'SBOM.cdx.json'),
+        $false
+    )
 
     $payloadFiles = @(Get-ChildItem -LiteralPath $packRoot -File -Force -Recurse | Sort-Object {
         Convert-ToPortableRelativePath -RootPath $packRoot -Path $_.FullName
     })
-    if ($payloadFiles.Count -eq 0 -or $payloadFiles.Count -gt 4096) {
+    if ($payloadFiles.Count -eq 0 -or $payloadFiles.Count -gt 32768) {
         throw "Codec Pack payload has an invalid file count: $($payloadFiles.Count)"
     }
 
@@ -231,6 +249,15 @@ try {
         }
         contains_runtime = $true
         contains_adapter = $true
+        dependency_inventory = [ordered]@{
+            path = 'DEPENDENCY_INVENTORY.json'
+            sha256 = (Get-FileHash -LiteralPath $inventoryPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+        sbom = [ordered]@{
+            format = 'CycloneDX-1.5'
+            path = 'SBOM.cdx.json'
+            sha256 = (Get-FileHash -LiteralPath $sbomPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
         external_decoder_selection_required = $true
         archive_digest_purpose = 'transport_integrity_only'
         publisher_signature = 'not_present_local_rc'

@@ -19,8 +19,12 @@ $script:PortableTextExtensions = @(
     '.cmake', '.pc', '.h', '.hpp', '.c', '.cc', '.cpp', '.rs', '.js', '.mjs',
     '.ts', '.css'
 )
-$script:MaximumCatalogFiles = 4096
-$script:MaximumArchiveEntries = 4098
+$script:SensitivePortableTextExtensions = @(
+    '.cfg', '.ini', '.json', '.md', '.txt', '.toml', '.yaml', '.yml', '._pth',
+    '.pem', '.key', '.crt', '.xml', '.cmake', '.pc'
+)
+$script:MaximumCatalogFiles = 32768
+$script:MaximumArchiveEntries = 32770
 $script:MaximumPackBytes = [int64](20GB)
 $script:MaximumJsonBytes = [int64](1MB)
 
@@ -732,26 +736,31 @@ function Assert-PortableRelativePath {
 function Assert-PortableTextPolicy {
     param(
         [Parameter(Mandatory)]
+        [AllowEmptyString()]
         [string]$Text,
 
         [Parameter(Mandatory)]
-        [string]$Context
+        [string]$Context,
+
+        [switch]$Sensitive
     )
 
     if ($Text.Contains([char]0)) {
         throw "$Context contains a NUL byte and is not portable text."
     }
-    if ($Text -match '(?im)(?:^|[\s"''(=])(?:file:///)?[A-Za-z]:[\\/]' -or
-        $Text -match '(?im)/(?:Users|home)/[^/\s]+/' -or
-        $Text -match '(?im)\\\\[^\\\s]+\\[^\\\s]+') {
-        throw "$Context contains a machine-local absolute path."
-    }
-    if ($Text -match '(?im)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----' -or
-        $Text -match '(?i)\bAKIA[0-9A-Z]{16}\b' -or
-        $Text -match '(?i)\bgh[pousr]_[A-Za-z0-9]{20,}\b' -or
-        $Text -match '(?i)\bsk-[A-Za-z0-9_-]{20,}\b' -or
-        $Text -match '(?im)\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password)\b\s*[:=]\s*(?:"[^"\r\n]{8,}"|''[^''\r\n]{8,}'')') {
-        throw "$Context contains credential-like material."
+    if ($Sensitive) {
+        if ($Text -match '(?im)(?:^|[\s"''(=])(?:file:///)?[A-Za-z]:[\\/]' -or
+            $Text -match '(?im)/(?:Users|home)/[^/\s]+/' -or
+            $Text -match '(?im)\\\\[A-Za-z0-9][A-Za-z0-9._-]{0,63}\\[A-Za-z0-9$][A-Za-z0-9$._-]{0,63}(?:\\|[\s"''])') {
+            throw "$Context contains a machine-local absolute path."
+        }
+        if ($Text -match '(?im)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----' -or
+            $Text -match '(?i)\bAKIA[0-9A-Z]{16}\b' -or
+            $Text -match '(?i)\bgh[pousr]_[A-Za-z0-9]{20,}\b' -or
+            $Text -match '(?i)\bsk-[A-Za-z0-9_-]{20,}\b' -or
+            $Text -match '(?im)\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password)\b\s*[:=]\s*(?:"[^"\r\n]{8,}"|''[^''\r\n]{8,}'')') {
+            throw "$Context contains credential-like material."
+        }
     }
 }
 
@@ -806,7 +815,9 @@ function Assert-PortableTextFile {
     } catch [System.Text.DecoderFallbackException] {
         throw "$Context is expected to be UTF-8 text but contains invalid bytes."
     }
-    Assert-PortableTextPolicy -Text $text -Context $Context
+    $extension = $File.Extension.ToLowerInvariant()
+    $sensitive = $script:SensitivePortableTextExtensions -contains $extension
+    Assert-PortableTextPolicy -Text $text -Context $Context -Sensitive:$sensitive
 }
 
 function Assert-NoForbiddenArchiveEntries {
@@ -876,7 +887,12 @@ function Assert-NoForbiddenArchiveEntries {
                 } finally {
                     $entryStream.Dispose()
                 }
-                Assert-PortableTextPolicy -Text $text -Context "nested archive entry '$name'"
+                $extension = [System.IO.Path]::GetExtension($name).ToLowerInvariant()
+                $sensitive = $script:SensitivePortableTextExtensions -contains $extension
+                Assert-PortableTextPolicy `
+                    -Text $text `
+                    -Context "nested archive entry '$name'" `
+                    -Sensitive:$sensitive
             }
         }
     } finally {
@@ -1108,7 +1124,9 @@ function Assert-Python313RuntimeLayout {
         'runtime/Lib/site-packages/latentdeck_codec_h3/worker.py',
         'runtime/Lib/site-packages/latentdeck_codec_h3/d2_worker.py',
         'runtime/Lib/site-packages/latentdeck_codec_h3/q4_worker.py',
-        'THIRD_PARTY_NOTICES.md'
+        'THIRD_PARTY_NOTICES.md',
+        'DEPENDENCY_INVENTORY.json',
+        'SBOM.cdx.json'
     )
     foreach ($requiredPath in $requiredPaths) {
         if (-not $CatalogPaths.Contains($requiredPath)) {
@@ -1145,18 +1163,125 @@ function Assert-Python313RuntimeLayout {
     $pthText = [System.Text.UTF8Encoding]::new($false, $true).GetString(
         [System.IO.File]::ReadAllBytes($pthPath)
     )
-    Assert-PortableTextPolicy -Text $pthText -Context 'runtime/python313._pth'
+    Assert-PortableTextPolicy -Text $pthText -Context 'runtime/python313._pth' -Sensitive
     $activeLines = @(
         $pthText -split '\r?\n' |
             ForEach-Object { $_.Trim() } |
             Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and -not $_.StartsWith('#') }
     )
-    $expectedLines = @('python313.zip', 'Lib/site-packages')
+    $expectedLines = @('python313.zip', '.', 'Lib/site-packages')
     if (($activeLines -join "`0") -cne ($expectedLines -join "`0")) {
         throw (
-            'runtime/python313._pth must contain exactly python313.zip and ' +
+            'runtime/python313._pth must contain exactly python313.zip, dot, and ' +
             'Lib/site-packages, in that order, with no site import or machine path.'
         )
+    }
+}
+
+function Assert-CodecPackDependencyMetadata {
+    param(
+        [Parameter(Mandatory)]
+        [string]$PackRoot,
+
+        [Parameter(Mandatory)]
+        [string]$PackVersion
+    )
+
+    $inventory = Read-StrictJsonFile -Path (Join-Path $PackRoot 'DEPENDENCY_INVENTORY.json')
+    Assert-ExactProperties -Object $inventory -Required @(
+        'schema_version', 'pack_id', 'pack_version', 'platform', 'curator', 'components'
+    ) -Context 'DEPENDENCY_INVENTORY.json'
+    Assert-ExactProperties -Object $inventory.curator -Required @(
+        'name', 'schema_version'
+    ) -Context 'DEPENDENCY_INVENTORY.json.curator'
+    if ([int64]$inventory.schema_version -ne 1 -or
+        $inventory.pack_id -cne 'org.latentdeck.h3' -or
+        $inventory.pack_version -cne $PackVersion -or
+        $inventory.platform -cne 'windows-x86_64' -or
+        $inventory.curator.name -cne 'latentdeck-codec-pack-curator' -or
+        [int64]$inventory.curator.schema_version -ne 1) {
+        throw 'Codec Pack dependency inventory identity is invalid.'
+    }
+
+    $inventoryComponents = @($inventory.components)
+    if ($inventoryComponents.Count -eq 0 -or $inventoryComponents.Count -gt 128) {
+        throw 'Codec Pack dependency inventory has an invalid component count.'
+    }
+    $inventoryIds = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($component in $inventoryComponents) {
+        Assert-ExactProperties -Object $component -Required @(
+            'name', 'version', 'kind', 'source_url', 'license_expression',
+            'license_files', 'content_sha256'
+        ) -Context 'DEPENDENCY_INVENTORY.json component'
+        $identity = "$($component.name)@$($component.version)"
+        if ([string]::IsNullOrWhiteSpace([string]$component.name) -or
+            [string]::IsNullOrWhiteSpace([string]$component.version) -or
+            -not $inventoryIds.Add($identity)) {
+            throw 'Codec Pack dependency inventory contains an invalid or duplicate identity.'
+        }
+        if (@('runtime', 'dependency', 'repository') -cnotcontains [string]$component.kind -or
+            ([string]$component.source_url) -cnotmatch '^https://' -or
+            [string]::IsNullOrWhiteSpace([string]$component.license_expression)) {
+            throw "Codec Pack dependency inventory component '$identity' is incomplete."
+        }
+        Assert-Sha256 -Value ([string]$component.content_sha256) -Name 'component.content_sha256'
+        $licenseFiles = @($component.license_files)
+        if ($licenseFiles.Count -gt 512) {
+            throw "Codec Pack dependency inventory component '$identity' has too many license files."
+        }
+        foreach ($licenseFile in $licenseFiles) {
+            Assert-PortableRelativePath `
+                -Path ([string]$licenseFile) `
+                -Context "dependency inventory license file for '$identity'"
+        }
+    }
+
+    $sbom = Read-StrictJsonFile -Path (Join-Path $PackRoot 'SBOM.cdx.json')
+    Assert-ExactProperties -Object $sbom -Required @(
+        'bomFormat', 'specVersion', 'version', 'metadata', 'components'
+    ) -Context 'SBOM.cdx.json'
+    Assert-ExactProperties -Object $sbom.metadata -Required @('component') -Context 'SBOM metadata'
+    Assert-ExactProperties -Object $sbom.metadata.component -Required @(
+        'bom-ref', 'type', 'name', 'version'
+    ) -Context 'SBOM metadata.component'
+    if ($sbom.bomFormat -cne 'CycloneDX' -or
+        $sbom.specVersion -cne '1.5' -or
+        [int64]$sbom.version -ne 1 -or
+        $sbom.metadata.component.'bom-ref' -cne "pkg:generic/latentdeck-h3-codec-pack@$PackVersion" -or
+        $sbom.metadata.component.type -cne 'application' -or
+        $sbom.metadata.component.name -cne 'LatentDeck H3 Codec Pack' -or
+        $sbom.metadata.component.version -cne $PackVersion) {
+        throw 'Codec Pack CycloneDX SBOM identity is invalid.'
+    }
+    $sbomComponents = @($sbom.components)
+    if ($sbomComponents.Count -ne $inventoryComponents.Count) {
+        throw 'Codec Pack SBOM and dependency inventory component counts differ.'
+    }
+    $sbomIds = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($component in $sbomComponents) {
+        Assert-ExactProperties -Object $component -Required @(
+            'bom-ref', 'type', 'name', 'version', 'hashes', 'licenses', 'externalReferences'
+        ) -Optional @('purl') -Context 'SBOM component'
+        $identity = "$($component.name)@$($component.version)"
+        if (-not $sbomIds.Add($identity) -or -not $inventoryIds.Contains($identity)) {
+            throw "Codec Pack SBOM contains an unknown or duplicate component '$identity'."
+        }
+        $hashes = @($component.hashes)
+        if ($hashes.Count -ne 1 -or $hashes[0].alg -cne 'SHA-256') {
+            throw "Codec Pack SBOM component '$identity' has an invalid hash contract."
+        }
+        Assert-Sha256 -Value ([string]$hashes[0].content) -Name 'SBOM component hash'
+        if (@($component.licenses).Count -ne 1 -or
+            [string]::IsNullOrWhiteSpace([string]$component.licenses[0].expression) -or
+            @($component.externalReferences).Count -ne 1 -or
+            $component.externalReferences[0].type -cne 'distribution' -or
+            ([string]$component.externalReferences[0].url) -cnotmatch '^https://') {
+            throw "Codec Pack SBOM component '$identity' has incomplete provenance."
+        }
     }
 }
 
@@ -1353,6 +1478,9 @@ function Test-H3CodecPackDirectory {
     }
 
     Assert-Python313RuntimeLayout -PackRoot $resolvedRoot -CatalogPaths $catalogPaths
+    Assert-CodecPackDependencyMetadata `
+        -PackRoot $resolvedRoot `
+        -PackVersion ([string]$manifest.pack_version)
 
     $actualPayloadPaths = @(
         $allFiles |

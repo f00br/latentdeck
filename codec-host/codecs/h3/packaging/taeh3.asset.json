@@ -1,0 +1,18 @@
+{
+  "accepted_variants": [
+    {
+      "byte_length": 22709752,
+      "license_label": "MIT",
+      "license_url": "https://github.com/madebyollin/taehv/blob/e743234f/LICENSE",
+      "sha256": "4fd022bfcab08772fe0536b17ea1a3bbb5625be11e397868d1c5d891863d4c13",
+      "source_url": "https://huggingface.co/madebyollin/taehv/resolve/main/taeh3.safetensors",
+      "variant_id": "madebyollin-taeh3-e743234f"
+    }
+  ],
+  "asset_id": "taeh3",
+  "display_name": "TAEH3 decoder weight",
+  "format": "safetensors",
+  "kind": "decoder_weight",
+  "required": true,
+  "selection": "explicit_file"
+}

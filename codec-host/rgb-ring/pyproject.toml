@@ -14,3 +14,9 @@ build-backend = "maturin"
 manifest-path = "../../crates/gpu-python/Cargo.toml"
 python-source = "src"
 module-name = "latentdeck_rgb_ring._native"
+exclude = [
+    "src/latentdeck_rgb_ring/__pycache__/**",
+    "latentdeck_rgb_ring/__pycache__/**",
+    "src/latentdeck_rgb_ring/*.pdb",
+    "latentdeck_rgb_ring/*.pdb",
+]

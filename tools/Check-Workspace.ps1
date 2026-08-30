@@ -47,8 +47,17 @@ try {
             --reinstall-package latentdeck-operator-q4 `
             --reinstall-package latentdeck-rgb-ring
     } 'Python lock/install'
-    Invoke-Checked { uv run --no-sync ruff check pyproject.toml codec-host comfy operators sdk/python } 'Python lint'
+    Invoke-Checked {
+        uv run --no-sync ruff check `
+            pyproject.toml codec-host comfy operators sdk/python `
+            tools/codec_pack_curator.py tools/tests/test_codec_pack_curator.py
+    } 'Python lint'
     Invoke-Checked { uv run --no-sync pytest } 'Python tests'
+    Invoke-Checked {
+        uv run --no-sync pytest -q tools/tests/test_codec_pack_curator.py
+    } 'Codec Pack curator tests'
+    Invoke-Checked { pwsh -NoProfile -File tools/Test-LinkedDevCodecPack.ps1 } 'Linked development Codec Pack contract'
+    Invoke-Checked { pwsh -NoProfile -File tools/Test-ReleasePackaging.ps1 } 'Release packaging contract'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-DiagnosticBundle.ps1 } 'Diagnostic bundle contract'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-PublicTree.ps1 } 'Public-tree audit'
     Invoke-Checked { git diff --check } 'Working-tree whitespace'

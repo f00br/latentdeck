@@ -8,29 +8,32 @@ integrity-catalogued pack from explicitly prepared inputs, install versions
 side by side, and remove exactly one version.
 
 The pack is a trusted runtime and adapter distribution. It is not a cartridge
-and it is not a model distribution. The packaging tools perform no downloads.
+and it is not a model distribution. The release builder is offline by default;
+network access is available only through its explicit `-AllowNetwork` switch.
 
 ## Required inputs
 
-Prepare four inputs outside the source tree:
+The reproducible release builder takes two explicit inputs:
 
-1. A reviewed portable CPython 3.13 Windows x64 runtime directory. Its root
-   must contain `python.exe`, `python313.dll`, `python313._pth`, and the bounded
-   standard-library archive `python313.zip`. The active `python313._pth` lines
-   must be exactly `python313.zip` and `Lib/site-packages`, in that order.
-2. A prepared `site-packages` directory. Its contents are merged below the
-   runtime's `Lib/site-packages` directory and must include
-   `latentdeck_codec_h3` plus every runtime dependency. The adapter must expose
-   `worker.py`, `d2_worker.py`, and `q4_worker.py` as independent entrypoints.
-3. A complete license/third-party notice file for the exact runtime and package
-   bytes being distributed.
-4. A decoder-asset contract JSON file containing metadata only.
+1. The official CPython 3.13.14 Windows x64 embed archive, retaining the pinned
+   filename `python-3.13.14-embed-amd64.zip`. Its SHA-256 is verified against
+   `codec-host/codecs/h3/packaging/windows-x64-cu130.lock.json` before use.
+2. A decoder-asset contract JSON file containing metadata only. The reviewed
+   default is `codec-host/codecs/h3/packaging/taeh3.asset.json`.
+
+The builder derives everything else from the locked repository: the exact
+Windows dependency closure, five local wheels, curated CPython runtime,
+third-party notices, dependency inventory, and CycloneDX 1.5 SBOM. It never
+discovers a ComfyUI, generator, model directory, or weight. The active
+`python313._pth` lines are exactly `python313.zip`, `.`, and
+`Lib/site-packages`, in that order. The dot is required for native CPython
+stdlib modules such as `_ctypes.pyd`; it does not enable system site packages.
 
 The decoder-asset contract has this shape:
 
 ```json
 {
-  "asset_id": "org.latentdeck.taeh3",
+  "asset_id": "taeh3",
   "display_name": "TAEH3 decoder weight",
   "kind": "decoder_weight",
   "required": true,
@@ -53,7 +56,13 @@ Replace every illustrative value with measured upstream facts. Do not put a
 local file path in the contract. The selected decoder weight remains external
 and is chosen explicitly in the application after installation.
 
-The builder statically validates PE32+ x86-64 headers and CPython 3.13 version
+The curator verifies every original wheel `RECORD`, exact locked distribution
+versions and post-curation content digests, bundled license evidence, and file
+ownership. It removes installer receipts, build-machine SBOMs, launcher stubs,
+caches/tests, and the one pinned non-runtime CPython helper
+`ctypes/macholib/fetch_macholib.bat`, then rewrites `RECORD` deterministically.
+
+The packager statically validates PE32+ x86-64 headers and CPython 3.13 version
 resources, rejects reparse points, caches, repository metadata, unbounded
 trees, uncatalogued files, private-path/credential-like text, environment
 files, and known model/latent/media payload types. Nested archives are rejected
@@ -74,21 +83,26 @@ that an unsigned scan is a publisher attestation.
 
 ## Build a pack
 
-Use variables that resolve to the four prepared inputs:
+The command is offline unless `-AllowNetwork` is supplied. All required wheels
+must therefore already be present in the uv cache for the normal release path:
 
 ```powershell
-pwsh -NoProfile -File tools/New-H3CodecPack.ps1 `
-  -RuntimeSource $runtimeSource `
-  -PackageSource $packageSource `
-  -NoticeSource $noticeSource `
-  -DecoderAssetContractPath $decoderContract `
-  -PackVersion 0.1.0
+pwsh -NoProfile -File tools/Build-H3CodecPack.ps1 `
+  -PythonEmbedArchive $pythonEmbedArchive `
+  -PackVersion 0.1.0 `
+  -RequireCuda
 ```
 
-The output is staged below `artifacts/codec-pack/0.1.0`. The version directory
-contains a ZIP archive, `SHA256SUMS.txt`, and a path-free package receipt. The
-builder refuses overwrite and validates a second extraction before publishing
-the local artifact directory.
+Pass `-DecoderAssetContractPath $decoderContract` only to use another reviewed
+metadata contract. The builder runs locked export, exact target installation,
+wheel build, curation, archive validation, isolated CUDA/import smoke, isolated
+install, post-install smoke, and exact-version uninstall before atomically
+publishing below `artifacts/codec-pack/0.1.0`. It refuses overwrite.
+
+The version directory contains the ZIP, `SHA256SUMS.txt`, path-free package and
+distributable proof receipts, plus separate archive and installed-runtime smoke
+receipts. The adjacent checksum is transport evidence, not a publisher trust
+anchor.
 
 Inside the archive, the version-scoped pack contains:
 
@@ -96,6 +110,8 @@ Inside the archive, the version-scoped pack contains:
 codec-pack.json
 integrity.json
 THIRD_PARTY_NOTICES.md
+DEPENDENCY_INVENTORY.json
+SBOM.cdx.json
 runtime/
   python.exe
   python313.dll
@@ -108,6 +124,37 @@ Every payload file is bound by byte length and SHA-256 in `integrity.json`.
 `codec-pack.json` binds that catalog, the exact Player/D2/Q4 module entrypoints,
 Windows x64 compatibility, app range `>=0.1.0,<0.2.0`, Worker Protocol 1, LC
 Spec 0.1, H3 Profile 0.1, and external decoder metadata.
+
+`tools/New-H3CodecPack.ps1` remains the low-level packager for already curated
+inputs. It requires runtime, site-packages, notices, dependency inventory,
+SBOM, and decoder contract paths. Use `Build-H3CodecPack.ps1` for a release
+candidate so curation and the install/smoke proof cannot be skipped.
+
+## Private linked runtime testing
+
+Before assembling or installing a distributable pack, a known local Python/CUDA
+laboratory can be linked read-only into an isolated app-data root:
+
+```powershell
+pwsh -NoProfile -File tools/Start-PrivateH3TestEnvironment.ps1 `
+  -PythonRuntimeRoot $pythonRuntimeRoot `
+  -PythonSitePackages $pythonSitePackages `
+  -Mode PrepareOnly
+```
+
+The helper creates a fresh ignored directory below `artifacts/`, builds a
+non-distributable linked pack, and imports the Player, D2, and Q4 modules with
+the linked runtime. `-Mode LatentDeck` or `-Mode LatentPlayer` starts the chosen
+Tauri development application with isolated `LOCALAPPDATA` and `PROGRAMDATA`
+values, so discovery never depends on or replaces an installed Codec Pack.
+Input runtime/package trees are read only. The helper refuses an existing or
+out-of-`artifacts` environment root and never installs, downloads, or modifies
+the source laboratory. Its import probe and every worker entrypoint use
+Python's `-B` switch so linked package trees never receive bytecode caches.
+
+`tools/Test-LinkedDevCodecPack.ps1` is the public synthetic contract test. It
+requires all three entrypoint files, exact manifest argument arrays, and worker
+package precedence ahead of the linked laboratory packages.
 
 ## Install
 
@@ -215,7 +262,22 @@ and uses a locally installed CPython 3.13 executable/DLL for static identity
 checks. It proves independent application installer configuration, the Spout
 release feature, strict JSON typing, pack integrity checks, overwrite refusal,
 out-of-discovery staging, two-version side-by-side install, exact-version
-uninstall, and prohibited-payload rejection.
+uninstall, prohibited-payload rejection, dependency metadata validation, and
+deterministic archive output for identical inputs. Curator unit tests run
+separately:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tools/tests/test_codec_pack_curator.py
+```
+
+To repeat the isolated import/CUDA proof for an already expanded or installed
+pack:
+
+```powershell
+pwsh -NoProfile -File tools/Test-H3CodecPackRuntime.ps1 `
+  -PackRoot $installedPackRoot `
+  -RequireCuda
+```
 
 This local contract test does not execute or prove that a supplied
 Python/PyTorch/CUDA runtime starts on another machine. Before release

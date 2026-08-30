@@ -118,6 +118,81 @@ function Resolve-TestPython313 {
     )
 }
 
+function Write-SyntheticDependencyMetadata {
+    param(
+        [Parameter(Mandatory)]
+        [string]$InventoryPath,
+
+        [Parameter(Mandatory)]
+        [string]$SbomPath,
+
+        [Parameter(Mandatory)]
+        [string]$PackVersion
+    )
+
+    $components = @(
+        [ordered]@{
+            name = 'CPython'
+            version = '3.13.14'
+            kind = 'runtime'
+            source_url = 'https://www.python.org/'
+            license_expression = 'PSF-2.0'
+            license_files = @('runtime/LICENSE.txt')
+            content_sha256 = ('a' * 64)
+        },
+        [ordered]@{
+            name = 'latentdeck-codec-h3'
+            version = '0.1.0'
+            kind = 'repository'
+            source_url = 'https://latentdeck.org/'
+            license_expression = 'Apache-2.0'
+            license_files = @()
+            content_sha256 = ('b' * 64)
+        }
+    )
+    Write-Utf8Text -Path $InventoryPath -Content (([ordered]@{
+        schema_version = 1
+        pack_id = 'org.latentdeck.h3'
+        pack_version = $PackVersion
+        platform = 'windows-x86_64'
+        curator = [ordered]@{
+            name = 'latentdeck-codec-pack-curator'
+            schema_version = 1
+        }
+        components = $components
+    } | ConvertTo-Json -Depth 16) + "`n")
+
+    $sbomComponents = @(
+        foreach ($component in $components) {
+            [ordered]@{
+                'bom-ref' = "pkg:generic/$($component.name.ToLowerInvariant())@$($component.version)"
+                type = if ($component.kind -ceq 'runtime') { 'application' } else { 'library' }
+                name = $component.name
+                version = $component.version
+                hashes = @([ordered]@{ alg = 'SHA-256'; content = $component.content_sha256 })
+                licenses = @([ordered]@{ expression = $component.license_expression })
+                externalReferences = @(
+                    [ordered]@{ type = 'distribution'; url = $component.source_url }
+                )
+            }
+        }
+    )
+    Write-Utf8Text -Path $SbomPath -Content (([ordered]@{
+        bomFormat = 'CycloneDX'
+        specVersion = '1.5'
+        version = 1
+        metadata = [ordered]@{
+            component = [ordered]@{
+                'bom-ref' = "pkg:generic/latentdeck-h3-codec-pack@$PackVersion"
+                type = 'application'
+                name = 'LatentDeck H3 Codec Pack'
+                version = $PackVersion
+            }
+        }
+        components = $sbomComponents
+    } | ConvertTo-Json -Depth 16) + "`n")
+}
+
 try {
     [System.IO.Directory]::CreateDirectory($testRoot) | Out-Null
 
@@ -162,6 +237,8 @@ try {
     $runtimeSource = Join-Path $testRoot 'runtime-source'
     $packageSource = Join-Path $testRoot 'package-source'
     $noticeSource = Join-Path $testRoot 'NOTICE.md'
+    $inventorySource = Join-Path $testRoot 'DEPENDENCY_INVENTORY.json'
+    $sbomSource = Join-Path $testRoot 'SBOM.cdx.json'
     $assetContract = Join-Path $testRoot 'decoder-asset.json'
     [System.IO.Directory]::CreateDirectory($runtimeSource) | Out-Null
     [System.IO.Directory]::CreateDirectory(
@@ -178,7 +255,7 @@ try {
     [System.IO.File]::Copy($python313Dll, (Join-Path $runtimeSource 'python313.dll'), $false)
     Write-Utf8Text `
         -Path (Join-Path $runtimeSource 'python313._pth') `
-        -Content "python313.zip`nLib/site-packages`n"
+        -Content "python313.zip`n.`nLib/site-packages`n"
     $stdlibZipPath = Join-Path $runtimeSource 'python313.zip'
     $zipStream = [System.IO.FileStream]::new(
         $stdlibZipPath,
@@ -247,14 +324,37 @@ try {
         } | ConvertTo-Json -Depth 16)
 
     $outputRoot = Join-Path $testRoot 'codec-artifacts'
+    Write-SyntheticDependencyMetadata `
+        -InventoryPath $inventorySource `
+        -SbomPath $sbomSource `
+        -PackVersion '0.1.0'
     $archive010 = & (Join-Path $PSScriptRoot 'New-H3CodecPack.ps1') `
         -RuntimeSource $runtimeSource `
         -PackageSource $packageSource `
         -NoticeSource $noticeSource `
+        -DependencyInventoryPath $inventorySource `
+        -SbomPath $sbomSource `
         -DecoderAssetContractPath $assetContract `
         -PackVersion '0.1.0' `
         -OutputDirectory $outputRoot
     $hash010 = (Get-FileHash -LiteralPath $archive010 -Algorithm SHA256).Hash.ToLowerInvariant()
+
+    $reproOutputRoot = Join-Path $testRoot 'codec-artifacts-repro'
+    $archive010Repro = & (Join-Path $PSScriptRoot 'New-H3CodecPack.ps1') `
+        -RuntimeSource $runtimeSource `
+        -PackageSource $packageSource `
+        -NoticeSource $noticeSource `
+        -DependencyInventoryPath $inventorySource `
+        -SbomPath $sbomSource `
+        -DecoderAssetContractPath $assetContract `
+        -PackVersion '0.1.0' `
+        -OutputDirectory $reproOutputRoot
+    $hash010Repro = (
+        Get-FileHash -LiteralPath $archive010Repro -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ($hash010Repro -cne $hash010) {
+        throw 'Identical Codec Pack inputs did not produce an identical archive SHA-256.'
+    }
 
     $installRoot = Join-Path $testRoot 'installed'
     & (Join-Path $PSScriptRoot 'Install-H3CodecPack.ps1') `
@@ -268,10 +368,16 @@ try {
             -InstallRoot $installRoot | Out-Null
     }
 
+    Write-SyntheticDependencyMetadata `
+        -InventoryPath $inventorySource `
+        -SbomPath $sbomSource `
+        -PackVersion '0.1.1'
     $archive011 = & (Join-Path $PSScriptRoot 'New-H3CodecPack.ps1') `
         -RuntimeSource $runtimeSource `
         -PackageSource $packageSource `
         -NoticeSource $noticeSource `
+        -DependencyInventoryPath $inventorySource `
+        -SbomPath $sbomSource `
         -DecoderAssetContractPath $assetContract `
         -PackVersion '0.1.1' `
         -OutputDirectory $outputRoot
@@ -304,11 +410,15 @@ try {
         @{ Name = '.env'; Bytes = [System.Text.Encoding]::UTF8.GetBytes('TOKEN=private') },
         @{ Name = 'nested.zip'; Bytes = [byte[]](1, 2, 3) },
         @{
-            Name = 'embedded_secret.py'
+            Name = 'embedded_secret.json'
             Bytes = [System.Text.Encoding]::UTF8.GetBytes('api_key = "1234567890abcdef"')
         },
         @{ Name = 'oversized.py'; Bytes = [byte[]]::new((4MB) + 1) }
     )) {
+        Write-SyntheticDependencyMetadata `
+            -InventoryPath $inventorySource `
+            -SbomPath $sbomSource `
+            -PackVersion '0.1.2'
         $forbiddenPath = Join-Path $packageSource $forbiddenFixture.Name
         [System.IO.File]::WriteAllBytes($forbiddenPath, $forbiddenFixture.Bytes)
         Assert-Throws -Context "Codec Pack builder must reject $($forbiddenFixture.Name)" -Action {
@@ -316,6 +426,8 @@ try {
                 -RuntimeSource $runtimeSource `
                 -PackageSource $packageSource `
                 -NoticeSource $noticeSource `
+                -DependencyInventoryPath $inventorySource `
+                -SbomPath $sbomSource `
                 -DecoderAssetContractPath $assetContract `
                 -PackVersion '0.1.2' `
                 -OutputDirectory $outputRoot | Out-Null
@@ -358,6 +470,8 @@ try {
                 -RuntimeSource $runtimeSource `
                 -PackageSource $packageSource `
                 -NoticeSource $noticeSource `
+                -DependencyInventoryPath $inventorySource `
+                -SbomPath $sbomSource `
                 -DecoderAssetContractPath $assetContract `
                 -PackVersion '0.1.2' `
                 -OutputDirectory $outputRoot | Out-Null
