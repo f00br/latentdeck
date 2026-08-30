@@ -19,7 +19,14 @@ def _parser() -> argparse.ArgumentParser:
         description="Convert existing raw H3 Safetensors files into validated LC cartridges.",
     )
     parser.add_argument("inputs", nargs="+", type=Path)
-    parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument(
+        "-o",
+        "--output-dir",
+        "--output-directory",
+        dest="output_dir",
+        required=True,
+        type=Path,
+    )
     parser.add_argument("--recursive", action="store_true")
     return parser
 
@@ -51,7 +58,6 @@ def convert_main(argv: Sequence[str] | None = None) -> int:
 
     arguments = _parser().parse_args(argv)
     output_dir = arguments.output_dir.resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
     try:
         plan = _conversion_plan(arguments.inputs, output_dir, recursive=arguments.recursive)
     except ValueError as error:
@@ -93,6 +99,20 @@ def convert_main(argv: Sequence[str] | None = None) -> int:
             print()
             return 2
         seen_outputs[key] = source
+    existing_outputs = [output.resolve() for _, output in plan if output.exists()]
+    if existing_outputs:
+        json.dump(
+            {
+                "status": "error",
+                "code": "output_exists",
+                "detail": "conversion never overwrites an existing LC output",
+                "outputs": [str(output) for output in existing_outputs],
+            },
+            sys.stdout,
+            indent=2,
+        )
+        print()
+        return 2
     items: list[dict[str, object]] = []
     failed = 0
     for source, output in plan:

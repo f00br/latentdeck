@@ -54,7 +54,7 @@ def test_converter_packs_one_existing_raw_h3_file_without_modifying_it(
     original = _synthetic_video_payload()
     source.write_bytes(original)
 
-    status = convert_main([str(source), "--output-dir", str(output_dir)])
+    status = convert_main([str(source), "-o", str(output_dir)])
 
     report = json.loads(capsys.readouterr().out)
     output = output_dir / "old-h3.lc"
@@ -82,7 +82,7 @@ def test_converter_recurses_only_when_explicit_and_preserves_relative_names(
     output_dir = tmp_path / "converted"
 
     status = convert_main(
-        [str(source_dir), "--recursive", "--output-dir", str(output_dir)]
+        [str(source_dir), "--recursive", "--output-directory", str(output_dir)]
     )
 
     report = json.loads(capsys.readouterr().out)
@@ -139,6 +139,28 @@ def test_converter_preserves_existing_h3_av_streams_and_reports_the_profile(
         "audio",
     }
     assert inspection["manifest"]["audio"]["policy"] == "preserved_source"
+
+
+def test_converter_preflights_existing_outputs_before_batch_writes(
+    tmp_path: Path, capsys
+) -> None:
+    from latentdeck_cartridge.converter import convert_main
+
+    first = tmp_path / "first.safetensors"
+    second = tmp_path / "second.safetensors"
+    first.write_bytes(_synthetic_video_payload())
+    second.write_bytes(_synthetic_video_payload())
+    output_dir = tmp_path / "converted"
+    output_dir.mkdir()
+    (output_dir / "second.lc").write_bytes(b"owned-by-user")
+
+    status = convert_main([str(first), str(second), "-o", str(output_dir)])
+
+    report = json.loads(capsys.readouterr().out)
+    assert status == 2
+    assert report["code"] == "output_exists"
+    assert not (output_dir / "first.lc").exists()
+    assert (output_dir / "second.lc").read_bytes() == b"owned-by-user"
 
 
 def test_converter_rejects_an_empty_directory_instead_of_reporting_false_success(
