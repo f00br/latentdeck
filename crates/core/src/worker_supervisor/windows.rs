@@ -64,6 +64,7 @@ use super::{ValidatedWorkerLaunch, WorkerExit, WorkerSupervisorError, encode_boo
 const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
 const FORCED_TERMINATION_EXIT_CODE: u32 = 1;
 const WORKER_ENVIRONMENT_KEYS: [&str; 4] = ["SystemRoot", "SystemDrive", "TEMP", "TMP"];
+const WORKER_FIXED_ENVIRONMENT: [(&str, &str); 1] = [("PYTHONDONTWRITEBYTECODE", "1")];
 
 /// A spawned worker that has not completed its authenticated hello yet.
 pub struct PendingWorker {
@@ -166,6 +167,8 @@ fn configure_worker_environment(command: &mut ProcessCommand) -> Result<(), Work
     // environment block, while Python and native runtimes need a writable
     // temporary directory. Copy only those four values, rejecting an
     // incomplete host environment rather than silently restoring inheritance.
+    // Bytecode writes are disabled independently of a Python pack's own `-B`
+    // argument so an integrity-checked installed runtime remains immutable.
     for key in WORKER_ENVIRONMENT_KEYS {
         let value = env::var_os(key)
             .filter(|value| !value.is_empty())
@@ -174,6 +177,9 @@ fn configure_worker_environment(command: &mut ProcessCommand) -> Result<(), Work
                     "required Windows runtime variable {key} is missing"
                 )))
             })?;
+        command.env(key, value);
+    }
+    for (key, value) in WORKER_FIXED_ENVIRONMENT {
         command.env(key, value);
     }
     Ok(())
@@ -1178,7 +1184,10 @@ mod tests {
             assert!(
                 WORKER_ENVIRONMENT_KEYS
                     .iter()
-                    .any(|allowed| key.eq_ignore_ascii_case(allowed)),
+                    .any(|allowed| key.eq_ignore_ascii_case(allowed))
+                    || WORKER_FIXED_ENVIRONMENT
+                        .iter()
+                        .any(|(allowed, _)| key.eq_ignore_ascii_case(allowed)),
                 "unexpected inherited worker environment variable: {key}"
             );
             assert!(
@@ -1190,6 +1199,13 @@ mod tests {
             assert!(
                 std::env::var_os(key).is_some(),
                 "required worker environment variable is missing: {key}"
+            );
+        }
+        for (key, expected) in WORKER_FIXED_ENVIRONMENT {
+            assert_eq!(
+                std::env::var_os(key).as_deref(),
+                Some(std::ffi::OsStr::new(expected)),
+                "fixed worker environment variable differs: {key}"
             );
         }
         assert!(std::env::var_os("PATH").is_none());

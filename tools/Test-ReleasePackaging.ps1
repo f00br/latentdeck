@@ -361,6 +361,28 @@ try {
         -ArchivePath $archive010 `
         -TrustedArchiveSha256 $hash010 `
         -InstallRoot $installRoot | Out-Null
+    $installedManifest010 = Get-Content -Raw -LiteralPath (
+        Join-Path $installRoot 'org.latentdeck.h3/0.1.0/codec-pack.json'
+    ) | ConvertFrom-Json -Depth 20
+    $workerArgumentContracts = @(
+        [pscustomobject]@{
+            Actual = @($installedManifest010.worker.arguments)
+            Expected = @('-I', '-s', '-B', '-m', 'latentdeck_codec_h3.worker')
+        }
+        [pscustomobject]@{
+            Actual = @($installedManifest010.worker.d2_arguments)
+            Expected = @('-I', '-s', '-B', '-m', 'latentdeck_codec_h3.d2_worker')
+        }
+        [pscustomobject]@{
+            Actual = @($installedManifest010.worker.q4_arguments)
+            Expected = @('-I', '-s', '-B', '-m', 'latentdeck_codec_h3.q4_worker')
+        }
+    )
+    foreach ($contract in $workerArgumentContracts) {
+        if (($contract.Actual -join "`0") -cne ($contract.Expected -join "`0")) {
+            throw 'Physical H3 worker entrypoints must disable bytecode writes with -B.'
+        }
+    }
     Assert-Throws -Context 'install must refuse an existing version' -Action {
         & (Join-Path $PSScriptRoot 'Install-H3CodecPack.ps1') `
             -ArchivePath $archive010 `

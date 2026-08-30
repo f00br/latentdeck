@@ -1352,9 +1352,9 @@ function Test-H3CodecPackDirectory {
         throw 'Codec Pack worker launch path is not the approved isolated runtime path.'
     }
 
-    $expectedPlayerArguments = @('-I', '-s', '-m', 'latentdeck_codec_h3.worker')
-    $expectedD2Arguments = @('-I', '-s', '-m', 'latentdeck_codec_h3.d2_worker')
-    $expectedQ4Arguments = @('-I', '-s', '-m', 'latentdeck_codec_h3.q4_worker')
+    $expectedPlayerArguments = @('-I', '-s', '-B', '-m', 'latentdeck_codec_h3.worker')
+    $expectedD2Arguments = @('-I', '-s', '-B', '-m', 'latentdeck_codec_h3.d2_worker')
+    $expectedQ4Arguments = @('-I', '-s', '-B', '-m', 'latentdeck_codec_h3.q4_worker')
     if ((@($manifest.worker.arguments) -join "`0") -cne ($expectedPlayerArguments -join "`0") -or
         (@($manifest.worker.d2_arguments) -join "`0") -cne ($expectedD2Arguments -join "`0") -or
         (@($manifest.worker.q4_arguments) -join "`0") -cne ($expectedQ4Arguments -join "`0")) {

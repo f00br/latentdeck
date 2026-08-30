@@ -53,9 +53,12 @@ The worker command is derived only from a fully integrity-checked
 shell or PATH lookup, using only the bounded arguments and working directory
 from the validated pack manifest. The child environment is cleared before
 spawn; only `SystemRoot`, `SystemDrive`, `TEMP`, and `TMP` are copied for the
-Windows and temporary-file runtime contract. In particular, `PATH`, Python and
-CUDA configuration, user-profile variables, and parent credentials are not
-inherited. A self-contained Codec Pack must not depend on them.
+Windows and temporary-file runtime contract. Core additionally fixes
+`PYTHONDONTWRITEBYTECODE=1`; it is not inherited from the parent and prevents a
+Python worker from mutating an integrity-checked Codec Pack. In particular,
+`PATH`, other Python and CUDA configuration, user-profile variables, and parent
+credentials are not inherited. A self-contained Codec Pack must not depend on
+them.
 
 Core generates a separate 32-byte cryptographic authentication token. A single
 bounded bootstrap record containing protocol version, session UUID, pipe name,

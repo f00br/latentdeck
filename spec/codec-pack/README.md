@@ -54,9 +54,9 @@ entrypoints are explicit and are never inferred from one another:
 {
   "worker": {
     "executable": "runtime/python.exe",
-    "arguments": ["-s", "-m", "latentdeck_codec_h3.worker"],
-    "d2_arguments": ["-s", "-m", "latentdeck_codec_h3.d2_worker"],
-    "q4_arguments": ["-s", "-m", "latentdeck_codec_h3.q4_worker"],
+    "arguments": ["-I", "-s", "-B", "-m", "latentdeck_codec_h3.worker"],
+    "d2_arguments": ["-I", "-s", "-B", "-m", "latentdeck_codec_h3.d2_worker"],
+    "q4_arguments": ["-I", "-s", "-B", "-m", "latentdeck_codec_h3.q4_worker"],
     "working_directory": "runtime",
     "probe_timeout_ms": 120000
   }

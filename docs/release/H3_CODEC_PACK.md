@@ -125,6 +125,11 @@ Every payload file is bound by byte length and SHA-256 in `integrity.json`.
 Windows x64 compatibility, app range `>=0.1.0,<0.2.0`, Worker Protocol 1, LC
 Spec 0.1, H3 Profile 0.1, and external decoder metadata.
 
+All three Python entrypoints use `-B`, and Core independently fixes
+`PYTHONDONTWRITEBYTECODE=1` for every worker process. A successful playback or
+synthesis session therefore cannot create `__pycache__` files inside the
+integrity-checked installed pack.
+
 `tools/New-H3CodecPack.ps1` remains the low-level packager for already curated
 inputs. It requires runtime, site-packages, notices, dependency inventory,
 SBOM, and decoder contract paths. Use `Build-H3CodecPack.ps1` for a release
