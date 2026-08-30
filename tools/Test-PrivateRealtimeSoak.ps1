@@ -193,12 +193,15 @@ function Write-AtomicJson {
 function Get-FileIdentity {
     param(
         [Parameter(Mandatory)]
-        [string]$Path
+        [string]$Path,
+
+        [switch]$AllowEmpty
     )
 
     $item = Get-Item -LiteralPath $Path -Force
-    if ($item.PSIsContainer -or $item.Length -le 0) {
-        throw "Evidence input must be a non-empty regular file: $Path"
+    if ($item.PSIsContainer -or (-not $AllowEmpty -and $item.Length -le 0)) {
+        $requirement = if ($AllowEmpty) { 'regular file' } else { 'non-empty regular file' }
+        throw "Evidence input must be a ${requirement}: $Path"
     }
     $hash = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     return [ordered]@{
@@ -536,7 +539,7 @@ function Get-PhysicalPackInventory {
         }
         $filePath = Resolve-BoundPackFile -PackRoot $PackRoot -RelativePath $relative `
             -Label 'cataloged codec-pack file' -AllowEmpty
-        $identity = Get-FileIdentity -Path $filePath
+        $identity = Get-FileIdentity -Path $filePath -AllowEmpty
         if ($identity.sha256 -cne [string]$entry.sha256 -or
             $identity.byte_length -ne [long]$entry.byte_length) {
             throw 'Codec-pack file differs from its integrity catalog.'
