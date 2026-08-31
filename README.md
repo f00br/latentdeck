@@ -3,23 +3,25 @@
 > LatentDeck treats saved generative latents as playable and synthesizable media
 > signals.
 
-LatentDeck is an open ecosystem under active local development around the codec-neutral **Latent
-Cartridge** (`.lc`) format: record a latent representation, play it, synthesize
+LatentDeck is an open ecosystem around the codec-neutral **Latent Cartridge**
+(`.lc`) format: record or convert a latent representation, play it, synthesize
 it with other cartridges in real time, and resample the post-operator latent
 state into a new cartridge.
 
 ## Repository status
 
-The source implementation for the local unsigned `0.1.0` release candidate is
-complete on `main`. It currently contains:
+The `0.1.0` implementation is in owner-UAT closeout on `main`. The current
+walkthrough is broadly positive; new work is limited to reported minor or
+cosmetic findings, the ComfyUI all-nodes presentation canvas, and final release
+gates. The repository contains:
 
-- the accepted 0.1 product and architecture plan;
 - public-repository boundaries and agent instructions;
 - pinned Cargo, pnpm, uv, Tauri, Svelte, and Python workspaces;
-- buildable LatentDeck and LatentPlayer smoke shells;
+- complete LatentDeck and LatentPlayer applications;
 - normative LC 0.1 and H3 0.1 specifications;
 - a deterministic Rust cartridge SDK and command-line tool;
-- the native Python SDK binding and raw H3 `latentdeck-pack` authoring command;
+- the native Python SDK binding, raw H3 `latentdeck-pack` authoring command,
+  and `latentdeck-convert` batch converter for existing H3 AV Safetensors;
 - the independent `Save Latent Cartridge (.lc)` ComfyUI recorder;
 - the clean-room LatentDeck Comfy Toolkit research nodes and explicit-install
   external Operator API;
@@ -32,10 +34,12 @@ complete on `main`. It currently contains:
   generation;
 - a policy for local-only, non-binding interface references.
 
-The local RC is intentionally unsigned and does not bundle a Codec Pack,
-decoder, model weight, or cartridge. Real four-source Q4 corpus acceptance,
-30-minute performance soaks, clean-machine installer/Codec Pack lifecycle, and
-code signing remain external gates. See the
+The owner-UAT binary baseline is a clean, unsigned local RC built from commit
+`2f00a4b`. It does not bundle a Codec Pack, decoder, model weight, or cartridge.
+Strict four-source Q4 acceptance, the owner-approved six-minute D2/Q4 stability
+suite, application playback, portrait and landscape presentation, and Spout2
+were verified locally. Clean-machine installer/Codec Pack lifecycle, signing,
+and owner-authorized publication remain external gates. See the
 [0.1.0 acceptance status](docs/release/ACCEPTANCE_STATUS.md). There is no
 published release or supported bundled model in this repository.
 
@@ -69,25 +73,25 @@ MiniMax H3 is the first intended codec profile. It is not the definition of
 
 ## Start here
 
-- [Approved 0.1 implementation plan](docs/main-plan-v01.md)
-- [Product and architecture rationale](latentdeck_0.1-plan.md)
+- [Current UAT and release handoff](docs/release/continue.md)
+- [Master-user test guide](docs/release/MASTER_USER_TEST.md)
+- [0.1.0 acceptance status](docs/release/ACCEPTANCE_STATUS.md)
+- [Project concept](docs/CONCEPT.md)
 - [Latent Cartridge Specification 0.1](spec/latent-cartridge/README.md)
 - [LC Manifest JSON Schema 0.1](spec/latent-cartridge/manifest.schema.json)
 - [MiniMax H3 Codec Profile 0.1](spec/codec-h3/README.md)
 - [Codec Pack installation contract 0.1](spec/codec-pack/README.md)
 - [Worker Protocol 1](spec/worker-protocol/README.md)
 - [Deck Signal Contract 0.1](spec/deck-api/README.md)
-- [Python Cartridge SDK and raw H3 packer](sdk/python/README.md)
+- [Python Cartridge SDK, raw H3 packer, and converter](sdk/python/README.md)
 - [ComfyUI-LatentCartridge recorder](comfy/latent-cartridge/README.md)
 - [LatentDeck Comfy Toolkit](comfy/toolkit/README.md)
 - [Explicit-install Operator API 0.1](spec/operator-api/README.md)
 - [Agent runway](AGENTS.md)
-- [Bootstrap handoff](docs/repository/BOOTSTRAP_HANDOFF.md)
 - [Repository layout](docs/repository/REPOSITORY_LAYOUT.md)
 - [Public repository boundary](docs/repository/REPOSITORY_BOUNDARY.md)
 - [Public release checklist](docs/repository/PUBLIC_RELEASE_CHECKLIST.md)
 - [Local Windows release engineering](docs/release/README.md)
-- [0.1.0 acceptance status](docs/release/ACCEPTANCE_STATUS.md)
 - [Diagnostics and sanitized support bundles](docs/repository/DIAGNOSTICS.md)
 - [Pinned toolchains](docs/repository/TOOLCHAINS.md)
 - [Interface reference policy](docs/assets/concepts/README.md)

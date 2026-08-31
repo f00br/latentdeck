@@ -1,8 +1,8 @@
 # Public release checklist
 
-Checked items record durable evidence only. Completing repository bootstrap or
-this checklist does not authorize publication; the owner must still explicitly
-approve every action in the Publication authority section.
+Checked items record durable evidence only. Completing a local release candidate
+or this checklist does not authorize publication; the owner must still
+explicitly approve every action in the Publication authority section.
 
 ## Ownership and legal
 

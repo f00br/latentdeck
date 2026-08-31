@@ -3,10 +3,12 @@
 These runbooks define the local Windows `0.1.0` release-candidate path. They do
 not authorize publication, Git tags, remote changes, signing, or uploads.
 
+- [Current UAT and release handoff](continue.md)
+- [Master-user test guide](MASTER_USER_TEST.md)
+- [Verified and open 0.1.0 acceptance gates](ACCEPTANCE_STATUS.md)
 - [Windows application release candidate](WINDOWS_LOCAL_RC.md)
 - [H3 Codec Pack packaging and lifecycle](H3_CODEC_PACK.md)
 - [Isolated ComfyUI user-test environment](ISOLATED_COMFY_TEST_ENVIRONMENT.md)
-- [Verified and open 0.1.0 acceptance gates](ACCEPTANCE_STATUS.md)
 
 Application installers and Codec Packs are independent artifacts with
 independent install, update, and removal lifecycles. Every application RC set

@@ -1,11 +1,12 @@
 # Repository layout
 
-The scaffold follows the monorepo shape accepted by the 0.1 plan.
+The repository uses a component-separated monorepo layout. Specifications and
+stable contracts remain authoritative over replaceable implementations.
 
 | Path | Intended responsibility |
 | --- | --- |
-| `apps/latentdeck/` | Standalone LatentDeck application shell and UI. |
-| `apps/latentplayer/` | Standalone lightweight cartridge player. |
+| `apps/latentdeck/` | Standalone Library, LD-D2, and LD-Q4 application with embedded native output. |
+| `apps/latentplayer/` | Standalone lightweight cartridge player with embedded native output. |
 | `crates/core/` | Realtime coordination and stable signal contracts. |
 | `crates/cartridge/` | Codec-neutral `.lc` reader, writer, validator, hashing, and metadata. |
 | `crates/cartridge-python/` | PyO3 adapter over the single Rust Cartridge SDK implementation. |
@@ -25,6 +26,6 @@ The scaffold follows the monorepo shape accepted by the 0.1 plan.
 | `docs/` | Durable public documentation; local concept PNGs remain ignored. |
 | `tools/` | Repository maintenance and release-safety tools. |
 
-Cargo, pnpm, uv, Tauri, Svelte, and Python workspaces are now initialized with
-pinned manifests and lock files. Component specifications remain authoritative
-over these replaceable implementation shells.
+Cargo, pnpm, uv, Tauri, Svelte, and Python workspaces use pinned manifests and
+lock files. Application UI, workers, codec adapters, Deck implementations, and
+output integrations remain replaceable behind their documented contracts.

@@ -48,6 +48,11 @@ the Toolkit's `06_RAW_RECORD_INSPECT.json`: **Raw H3 Latent Import** validates
 the file, then this same official Recorder writes the `.lc`. Renaming a
 `.safetensors` file to `.lc` does not create a cartridge.
 
+For standalone or batch conversion without ComfyUI, use the Python SDK's
+[`latentdeck-convert`](../../sdk/python/README.md#raw-h3-command) command. It
+preserves the source payload bytes, writes the LC manifest and hashes, validates
+the result, and never modifies the source file.
+
 ## Development tests
 
 From the repository root:

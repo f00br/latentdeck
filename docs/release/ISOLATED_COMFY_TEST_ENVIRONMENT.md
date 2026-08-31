@@ -1,5 +1,8 @@
 # Isolated ComfyUI user-test environment
 
+For the owner-facing sequence and all-nodes visual acceptance, start with the
+[master-user test guide](MASTER_USER_TEST.md).
+
 This profile runs LatentDeck Comfy Toolkit and `ComfyUI-LatentCartridge`
 without installing anything into the source ComfyUI `custom_nodes` or embedded
 Python `site-packages` directories. It reuses the reviewed ComfyUI core,

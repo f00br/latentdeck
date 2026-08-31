@@ -8,7 +8,8 @@ cartridge.
 
 ## Clean-room provenance
 
-The approved LatentDeck 0.1 plan fixes the carrier-plus-three-donors topology,
+The documented LatentDeck 0.1 operator contract fixes the
+carrier-plus-three-donors topology,
 the names `LINEAR` and `XS5`, the H3 runtime tensor contract, and the requirement
 to offer bounded top-k and Sinkhorn routing. The math and control mapping in
 this package were written for that public contract. No private workflow,

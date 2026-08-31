@@ -30,6 +30,12 @@ Generating the mandatory SBOM also requires `uv 0.11.8` on `PATH`; this is the
 validated release-tool version and provides the locked CycloneDX 1.5 export
 used here.
 
+Keep the clean source/build root short, for example directly below a drive root.
+A deeply nested throwaway clone can exceed MSVC FileTracker path limits before
+Rust or application code runs. Repeating the same build from a short path is the
+correct diagnostic for that toolchain failure; it is not an application-runtime
+regression.
+
 Tauri produces Windows NSIS installers with `tauri build`. A current-user NSIS
 install does not require administrator privileges and installs below the
 current user's local application data directory. The configured WebView2 mode

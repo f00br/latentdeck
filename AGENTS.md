@@ -1,23 +1,21 @@
 # LatentDeck agent runway
 
-This repository is in active local `0.1.0` implementation. The approved
-implementation contract is `docs/main-plan-v01.md`; repository safeguards and
-component boundaries remain mandatory throughout development.
+This repository is in local `0.1.0` owner-UAT closeout. The current operational
+handoff is `docs/release/continue.md`, and verified versus open gates are tracked
+in `docs/release/ACCEPTANCE_STATUS.md`. Repository safeguards, specifications,
+and component boundaries remain mandatory through release.
 
 ## Required reading order
 
 Before changing anything:
 
 1. Read this file completely.
-2. Read `docs/main-plan-v01.md` completely. It is the approved implementation
-   and release-candidate contract.
-3. Read `latentdeck_0.1-plan.md` completely for the underlying product and
-   architecture rationale.
-4. Read `README.md`.
-5. Read `docs/repository/BOOTSTRAP_HANDOFF.md`.
-6. Read `docs/repository/REPOSITORY_BOUNDARY.md`.
-7. Read the relevant component directory and specification before editing it.
-8. Run `git status --short` and `pwsh -NoProfile -File tools/Test-PublicTree.ps1`.
+2. Read `README.md`.
+3. Read `docs/release/continue.md`.
+4. Read `docs/release/ACCEPTANCE_STATUS.md`.
+5. Read `docs/repository/REPOSITORY_BOUNDARY.md`.
+6. Read the relevant component directory and specification before editing it.
+7. Run `git status --short` and `pwsh -NoProfile -File tools/Test-PublicTree.ps1`.
 
 If the current user instruction conflicts with an older document, the current
 instruction wins. Record a deliberate decision instead of silently rewriting
@@ -26,13 +24,13 @@ the baseline.
 ## Scope discipline
 
 - Implement only the task explicitly assigned in the current session.
-- Do not infer new scope beyond the approved 0.1 implementation contract and
-  the current user instruction.
+- Do not infer new scope beyond the documented 0.1 contracts, current UAT
+  closeout, and the current user instruction.
 - Do not create a new roadmap, Technical Design Document, dependency graph, or
   stack migration unless requested.
 - Do not treat the concept images as pixel-perfect UI requirements. They are
   visual references, not executable specifications.
-- Keep the product boundaries from the plan: Cartridge Standard, LatentDeck,
+- Keep the product boundaries: Cartridge Standard, LatentDeck,
   LatentPlayer, Comfy Toolkit, Comfy recorder, codec adapters, SDKs, and APIs
   remain separable.
 - Preserve the stable-center rule: cartridges and the realtime signal contract
@@ -75,8 +73,11 @@ this tree merely because they are useful for development.
   would publish.
 - Never use `git add -f` to bypass a payload safeguard without explicit review.
 - Preserve unrelated user work and do not rewrite history as a cleanup method.
+- `docs/CONCEPT.md` and `docs/latent_concept.md` may contain owner-authored work;
+  do not edit, stage, delete, or reformat them unless the owner assigns that
+  exact documentation task.
 
-## Engineering contracts inherited from the plan
+## Engineering contracts
 
 - `.lc` is codec-neutral, data-only, strictly validated, and never executes
   embedded code.
@@ -94,8 +95,8 @@ this tree merely because they are useful for development.
 
 ## Change quality
 
-- Keep changes narrow, modular, deterministic where the plan requires it, and
-  easy to remove or replace.
+- Keep changes narrow, modular, deterministic where the contract requires it,
+  and easy to remove or replace.
 - Add tests at the same boundary as changed behavior.
 - Distinguish `verified`, `inferred`, and `proposed` in research and benchmark
   documentation.
