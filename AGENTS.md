@@ -15,7 +15,8 @@ Before changing anything:
 4. Read `docs/release/ACCEPTANCE_STATUS.md`.
 5. Read `docs/repository/REPOSITORY_BOUNDARY.md`.
 6. Read the relevant component directory and specification before editing it.
-7. Run `git status --short` and `pwsh -NoProfile -File tools/Test-PublicTree.ps1`.
+7. Run `git status --short`. If unrelated owner changes are present, preserve
+   them and plan to audit the exact staged candidate in a clean local clone.
 
 If the current user instruction conflicts with an older document, the current
 instruction wins. Record a deliberate decision instead of silently rewriting
@@ -63,19 +64,69 @@ this tree merely because they are useful for development.
 
 ## Git and publication safety
 
-- Do not create or change a remote, push, publish, tag a release, enable a
-  service, or upload an artifact without explicit owner authorization.
+- Do not create or change a GitHub or other external remote, push, publish, tag
+  a release, enable a service, or upload an artifact without explicit owner
+  authorization. The local build clone described below may have only its
+  automatic local `origin` pointing back to the primary checkout.
 - Do not choose or add a software license on the owner's behalf.
-- Before any commit, inspect the exact candidate set with
-  `git status --short` and run `tools/Test-PublicTree.ps1`.
+- Before any commit, inspect `git status --short`, the exact staged file list,
+  and `git diff --cached`. Run `git diff --cached --check`. Run
+  `tools/Test-PublicTree.ps1` in the primary checkout only when unrelated local
+  changes do not affect it; otherwise apply the staged diff to a clean local
+  clone and run the audit there without modifying the owner's files.
 - Before any future push, complete
   `docs/repository/PUBLIC_RELEASE_CHECKLIST.md` and inspect the archive that Git
   would publish.
 - Never use `git add -f` to bypass a payload safeguard without explicit review.
 - Preserve unrelated user work and do not rewrite history as a cleanup method.
-- `docs/CONCEPT.md` and `docs/latent_concept.md` may contain owner-authored work;
-  do not edit, stage, delete, or reformat them unless the owner assigns that
-  exact documentation task.
+- `docs/CONCEPT.md` and any owner-authored untracked concept documents may
+  contain unrelated work; do not edit, stage, delete, or reformat them unless
+  the owner assigns that exact documentation task.
+
+## Clean release-build workflow
+
+- Make and commit every accepted source change in the primary `main` checkout.
+  Never develop or fix code inside an earlier release-build clone.
+- After the owner accepts a source commit, create a fresh independent local
+  clone for the RC. Use a short Windows path such as
+  `X:\ldrc-<short-commit>`; deep paths can exceed MSVC FileTracker limits before
+  application code runs.
+- Create the clone from committed local source with
+  `git clone --no-hardlinks <primary-checkout> <short-build-path>`. The clone's
+  local `origin` is not authorization to add or use a GitHub remote. Refuse an
+  existing destination instead of mixing it with an older build tree.
+- The build clone must resolve to the exact full commit selected from `main`.
+  Before building, verify that `git branch --show-current` is exactly `main`,
+  `git rev-parse HEAD` is the selected full commit, `git status --short` is
+  empty, and `tools/Test-PublicTree.ps1` passes in that clone.
+- Run the aggregate final gate with
+  `pwsh -NoProfile -File tools/Check-Workspace.ps1` in the exact clean build
+  clone, then verify again that `git status --short` is empty. Targeted tests
+  alone are not sufficient for the source commit selected for an RC.
+- Build the applications from the clean short-path clone with
+  `tools/Build-ReleaseCandidate.ps1`. Do not build a release candidate from the
+  primary checkout when it contains unrelated or owner-authored working-tree
+  changes.
+- Accept an artifact set only when its receipt records the expected full commit,
+  branch `main`, `git_dirty=false`, the public snapshot identity, installer
+  hashes, SBOM, and third-party notices. Keep the complete artifact directory
+  together; never combine installers or metadata from different builds.
+- The builder writes below the build clone's ignored
+  `artifacts/release-candidate/<version>-windows-x64`. Preserve an accepted copy
+  in the primary checkout under the new ignored destination
+  `artifacts/release-candidate-final-<short-commit>/<version>-windows-x64`.
+  Copy the complete version directory only; refuse an existing destination and
+  never merge or overwrite a previous candidate.
+- If the accepted artifact directory is copied or moved out of the build clone,
+  remeasure every file listed in `SHA256SUMS.txt` at the destination and compare
+  it with the receipt. A successful filesystem copy is not integrity evidence.
+- Any accepted commit after an RC, including release-documentation changes,
+  makes that RC an older source snapshot. It may remain useful for comparison or
+  ongoing behavior UAT, but rebuild from a new clean clone before calling the
+  artifacts current or beginning publication review.
+- When a build exposes a real source defect, return to the primary checkout,
+  fix and commit it there, then create a new clean build clone. Do not patch the
+  generated artifact set or silently reuse the old clone.
 
 ## Engineering contracts
 
@@ -85,13 +136,14 @@ this tree merely because they are useful for development.
 - Runtime controls are independent from UI controls.
 - Realtime latent processing happens before decode; resampling records the
   post-operator latent state before decode.
-- No hidden conversion, resize, or re-encode is allowed for incompatible
-  cartridges in 0.1.
+- No hidden conversion, resize, crop, alignment, or re-encode is allowed for
+  incompatible cartridges in 0.1.
 - Audio metadata may exist in 0.1 cartridges, but audio playback and synthesis
   are out of scope for 0.1.
 - Model weights are external codec assets and are not vendored.
 - Inputs are untrusted media: validate schema, tensor layout, dtype, sizes,
-  hashes, compatibility, and memory limits before runtime allocation.
+  hashes, finite values, compatibility, and memory limits before runtime
+  allocation.
 
 ## Change quality
 
@@ -104,5 +156,6 @@ this tree merely because they are useful for development.
   conclusions, and never commit private or heavyweight raw evidence by default.
 - Link durable documentation from `README.md`; avoid machine-specific paths in
   public docs.
-- Finish by running the relevant targeted tests, the public-tree audit,
-  `git diff --check`, and a final `git status --short` review.
+- Finish by running the relevant targeted tests, the staged-candidate
+  public-tree audit, `git diff --cached --check`, exact staged review, and a
+  final `git status --short` review.
