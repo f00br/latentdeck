@@ -4,7 +4,6 @@ param(
 
     [string]$SpoutArchivePath,
 
-    [Parameter(Mandatory)]
     [string]$SbomPath
 )
 
@@ -12,7 +11,15 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $ProgressPreference = 'SilentlyContinue'
 
+if ($PSBoundParameters.ContainsKey('SbomPath')) {
+    throw (
+        'Prebuilt SBOM input is not accepted; the release builder generates it ' +
+        'from the current locked workspace.'
+    )
+}
+
 Import-Module (Join-Path $PSScriptRoot 'ReleaseSpoutMetadata.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'TauriReleaseContract.psm1') -Force
 
 $releaseVersion = '0.1.0'
 $targetTriple = 'x86_64-pc-windows-msvc'
@@ -60,7 +67,13 @@ function Assert-TauriReleaseConfig {
         [string]$ProductName,
 
         [Parameter(Mandatory)]
-        [string]$Identifier
+        [string]$Identifier,
+
+        [Parameter(Mandatory)]
+        [string]$CargoManifestPath,
+
+        [Parameter(Mandatory)]
+        [string]$PackageJsonPath
     )
 
     $config = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
@@ -85,6 +98,10 @@ function Assert-TauriReleaseConfig {
         $config.bundle.windows.nsis.installMode -cne 'currentUser') {
         throw "Tauri Windows update/install policy mismatch in $Path"
     }
+    Assert-TauriOfflineFrontendContract `
+        -ConfigPath $Path `
+        -CargoManifestPath $CargoManifestPath `
+        -PackageJsonPath $PackageJsonPath
     return $config
 }
 
@@ -100,6 +117,40 @@ function Invoke-Checked {
     & $Command
     if ($LASTEXITCODE -ne 0) {
         throw "$Description failed with exit code $LASTEXITCODE."
+    }
+}
+
+function Assert-ReleaseLocksUnchanged {
+    param(
+        [Parameter(Mandatory)]
+        [string]$CargoLockPath,
+
+        [Parameter(Mandatory)]
+        [string]$CargoLockSha256,
+
+        [Parameter(Mandatory)]
+        [string]$PnpmLockPath,
+
+        [Parameter(Mandatory)]
+        [string]$PnpmLockSha256,
+
+        [Parameter(Mandatory)]
+        [string]$UvLockPath,
+
+        [Parameter(Mandatory)]
+        [string]$UvLockSha256,
+
+        [Parameter(Mandatory)]
+        [string]$Context
+    )
+
+    if ((Get-FileHash -LiteralPath $CargoLockPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+            $CargoLockSha256 -or
+        (Get-FileHash -LiteralPath $PnpmLockPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+            $PnpmLockSha256 -or
+        (Get-FileHash -LiteralPath $UvLockPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+            $UvLockSha256) {
+        throw "A release lock file changed $Context."
     }
 }
 
@@ -521,7 +572,6 @@ if (Test-Path -LiteralPath $finalDirectory) {
 Invoke-Checked `
     -Description 'Pre-build public-tree audit' `
     -Command { & pwsh -NoProfile -File (Join-Path $repoRoot 'tools/Test-PublicTree.ps1') }
-$sbomInput = Assert-CycloneDxSbom -Path $SbomPath
 $noticeInput = Test-Spout2ThirdPartyNotice `
     -Path (Join-Path $repoRoot 'THIRD_PARTY_NOTICES.md')
 $sourceSnapshotBefore = Get-ReleaseSourceSnapshot -RepositoryRoot $repoRoot
@@ -545,21 +595,27 @@ $deckRoot = Join-Path $repoRoot 'apps/latentdeck'
 $playerRoot = Join-Path $repoRoot 'apps/latentplayer'
 $cargoLockPath = Join-Path $repoRoot 'Cargo.lock'
 $pnpmLockPath = Join-Path $repoRoot 'pnpm-lock.yaml'
-foreach ($lockPath in @($cargoLockPath, $pnpmLockPath)) {
+$uvLockPath = Join-Path $repoRoot 'uv.lock'
+foreach ($lockPath in @($cargoLockPath, $pnpmLockPath, $uvLockPath)) {
     if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) {
         throw "Required release lock file is missing: $lockPath"
     }
 }
 $cargoLockHash = (Get-FileHash -LiteralPath $cargoLockPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $pnpmLockHash = (Get-FileHash -LiteralPath $pnpmLockPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$uvLockHash = (Get-FileHash -LiteralPath $uvLockPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $deckConfig = Assert-TauriReleaseConfig `
     -Path (Join-Path $deckRoot 'src-tauri/tauri.conf.json') `
     -ProductName 'LatentDeck App' `
-    -Identifier 'studio.latentdeck.deck'
+    -Identifier 'studio.latentdeck.deck' `
+    -CargoManifestPath (Join-Path $deckRoot 'src-tauri/Cargo.toml') `
+    -PackageJsonPath (Join-Path $deckRoot 'package.json')
 $playerConfig = Assert-TauriReleaseConfig `
     -Path (Join-Path $playerRoot 'src-tauri/tauri.conf.json') `
     -ProductName 'LatentPlayer' `
-    -Identifier 'studio.latentdeck.player'
+    -Identifier 'studio.latentdeck.player' `
+    -CargoManifestPath (Join-Path $playerRoot 'src-tauri/Cargo.toml') `
+    -PackageJsonPath (Join-Path $playerRoot 'package.json')
 if ($deckConfig.identifier -ceq $playerConfig.identifier) {
     throw 'LatentDeck and LatentPlayer must keep independent Windows identities.'
 }
@@ -622,6 +678,22 @@ try {
         -Description 'Frozen workspace dependency install' `
         -Command { & $pnpm --dir $repoRoot install --frozen-lockfile }
 
+    $generatedSbomPath = Join-Path $buildRoot "latentdeck-$releaseVersion-sbom.cdx.json"
+    Invoke-Checked `
+        -Description 'Fresh locked workspace SBOM generation' `
+        -Command {
+            & (Join-Path $PSScriptRoot 'New-Sbom.ps1') -OutputPath $generatedSbomPath
+        }
+    $sbomInput = Assert-CycloneDxSbom -Path $generatedSbomPath
+    Assert-ReleaseLocksUnchanged `
+        -CargoLockPath $cargoLockPath `
+        -CargoLockSha256 $cargoLockHash `
+        -PnpmLockPath $pnpmLockPath `
+        -PnpmLockSha256 $pnpmLockHash `
+        -UvLockPath $uvLockPath `
+        -UvLockSha256 $uvLockHash `
+        -Context 'during fresh SBOM generation'
+
     $tauriVersion = (& $pnpm --dir $deckRoot exec tauri --version).Trim()
     if ($LASTEXITCODE -ne 0 -or $tauriVersion -cne 'tauri-cli 2.11.4') {
         throw "Expected tauri-cli 2.11.4, found $tauriVersion"
@@ -664,12 +736,22 @@ try {
         -Description 'LatentPlayer unsigned NSIS build' `
         -Command { & $pnpm --dir $playerRoot @tauriArguments }
 
-    if ((Get-FileHash -LiteralPath $cargoLockPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
-            $cargoLockHash -or
-        (Get-FileHash -LiteralPath $pnpmLockPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
-            $pnpmLockHash) {
-        throw 'A release lock file changed during the frozen/locked build.'
-    }
+    $releaseBinaryRoot = Join-Path $env:CARGO_TARGET_DIR "$targetTriple/release"
+    Assert-TauriEmbeddedFrontendBinary `
+        -BinaryPath (Join-Path $releaseBinaryRoot 'latentdeck-app.exe') `
+        -FrontendDistPath (Join-Path $deckRoot 'dist')
+    Assert-TauriEmbeddedFrontendBinary `
+        -BinaryPath (Join-Path $releaseBinaryRoot 'latentplayer-app.exe') `
+        -FrontendDistPath (Join-Path $playerRoot 'dist')
+
+    Assert-ReleaseLocksUnchanged `
+        -CargoLockPath $cargoLockPath `
+        -CargoLockSha256 $cargoLockHash `
+        -PnpmLockPath $pnpmLockPath `
+        -PnpmLockSha256 $pnpmLockHash `
+        -UvLockPath $uvLockPath `
+        -UvLockSha256 $uvLockHash `
+        -Context 'during the frozen/locked build'
     Invoke-Checked `
         -Description 'Post-build public-tree audit' `
         -Command { & pwsh -NoProfile -File (Join-Path $repoRoot 'tools/Test-PublicTree.ps1') }
@@ -736,7 +818,7 @@ try {
     if ($stagedSbom.Sha256 -cne $sbomInput.Sha256 -or
         $stagedSbom.ByteLength -ne $sbomInput.ByteLength -or
         $stagedSbom.ComponentCount -ne $sbomInput.ComponentCount) {
-        throw 'Staged SBOM does not match the explicitly supplied SBOM.'
+        throw 'Staged SBOM does not match the freshly generated locked-workspace SBOM.'
     }
     $sbomReceipt = [ordered]@{
         file_name = "metadata/$sbomFileName"
@@ -745,6 +827,11 @@ try {
         format = 'CycloneDX'
         spec_version = '1.5'
         component_count = $stagedSbom.ComponentCount
+        generated_from_locks = [ordered]@{
+            cargo_lock_sha256 = $cargoLockHash
+            pnpm_lock_sha256 = $pnpmLockHash
+            uv_lock_sha256 = $uvLockHash
+        }
     }
 
     $noticeFileName = 'THIRD_PARTY_NOTICES.md'
@@ -800,6 +887,7 @@ try {
         locks = [ordered]@{
             cargo_lock_sha256 = $cargoLockHash
             pnpm_lock_sha256 = $pnpmLockHash
+            uv_lock_sha256 = $uvLockHash
         }
         spout2 = [ordered]@{
             tag = $spoutTag
@@ -832,8 +920,9 @@ try {
     [System.IO.File]::WriteAllText(
         (Join-Path $outputStage 'BUILD-COMMANDS.txt'),
         (@(
-            'pwsh -NoProfile -File tools/Build-ReleaseCandidate.ps1 -SbomPath <validated CycloneDX input> [-SpoutArchivePath <optional exact pinned archive>]'
+            'pwsh -NoProfile -File tools/Build-ReleaseCandidate.ps1 [-SpoutArchivePath <optional exact pinned archive>]'
             'pnpm --dir . install --frozen-lockfile'
+            'pwsh -NoProfile -File tools/New-Sbom.ps1 -OutputPath <unique private release staging path>'
             'pwsh -NoProfile -File tools/Prepare-Spout2.ps1'
             'Build helper: exclusive verify/extract pinned Spout2 archive to private ignored staging and set LATENTDECK_SPOUT2_SOURCE_ROOT'
             'pnpm --dir apps/latentdeck exec tauri build --ci --target x86_64-pc-windows-msvc --bundles nsis --features spout-sdk --no-sign -- --locked'
@@ -881,6 +970,14 @@ try {
     if ($finalStagedNoticeHash -cne $noticeReceipt.sha256) {
         throw 'Staged third-party notices changed before finalization.'
     }
+    Assert-ReleaseLocksUnchanged `
+        -CargoLockPath $cargoLockPath `
+        -CargoLockSha256 $cargoLockHash `
+        -PnpmLockPath $pnpmLockPath `
+        -PnpmLockSha256 $pnpmLockHash `
+        -UvLockPath $uvLockPath `
+        -UvLockSha256 $uvLockHash `
+        -Context 'before release-candidate finalization'
 
     [System.IO.Directory]::CreateDirectory($outputRoot) | Out-Null
     if (Test-Path -LiteralPath $finalDirectory) {

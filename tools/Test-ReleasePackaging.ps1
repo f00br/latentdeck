@@ -6,6 +6,7 @@ Set-StrictMode -Version Latest
 
 Import-Module (Join-Path $PSScriptRoot 'CodecPackPackaging.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'ReleaseSpoutMetadata.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'TauriReleaseContract.psm1') -Force
 
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $artifactsRoot = Join-Path $repoRoot 'artifacts'
@@ -89,6 +90,29 @@ function Assert-Throws {
     }
     if (-not $threw) {
         throw "Expected failure did not occur: $Context"
+    }
+}
+
+function Assert-NativeFailureContains {
+    param(
+        [Parameter(Mandatory)]
+        [scriptblock]$Command,
+
+        [Parameter(Mandatory)]
+        [string]$ExpectedText,
+
+        [Parameter(Mandatory)]
+        [string]$Context
+    )
+
+    $output = & $Command 2>&1 | Out-String
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -eq 0 -or
+        $output.IndexOf($ExpectedText, [System.StringComparison]::Ordinal) -lt 0) {
+        throw (
+            "$Context did not fail with the required diagnostic. " +
+            "Exit=$exitCode Output=$output"
+        )
     }
 }
 
@@ -202,6 +226,15 @@ try {
     $generatedBom = Get-Content -Raw -LiteralPath $generatedReleaseSbom |
         ConvertFrom-Json -Depth 100
     Assert-Spout2CycloneDxComponent -Components @($generatedBom.components) | Out-Null
+    $prebuiltSbomOutput = Join-Path $testRoot 'prebuilt-sbom-release-output'
+    Assert-NativeFailureContains `
+        -Context 'application release builder must reject every prebuilt SBOM input' `
+        -ExpectedText 'Prebuilt SBOM input is not accepted; the release builder generates it from the current locked workspace.' `
+        -Command {
+            & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'Build-ReleaseCandidate.ps1') `
+                -OutputDirectory $prebuiltSbomOutput `
+                -SbomPath $generatedReleaseSbom
+        }
 
     $spoutComponent = New-Spout2CycloneDxComponent
     $badSpoutComponent = $spoutComponent | ConvertTo-Json -Depth 16 | ConvertFrom-Json -Depth 16
@@ -277,12 +310,14 @@ try {
         @{
             Config = 'apps/latentdeck/src-tauri/tauri.conf.json'
             Cargo = 'apps/latentdeck/src-tauri/Cargo.toml'
+            Package = 'apps/latentdeck/package.json'
             Product = 'LatentDeck App'
             Identifier = 'studio.latentdeck.deck'
         },
         @{
             Config = 'apps/latentplayer/src-tauri/tauri.conf.json'
             Cargo = 'apps/latentplayer/src-tauri/Cargo.toml'
+            Package = 'apps/latentplayer/package.json'
             Product = 'LatentPlayer'
             Identifier = 'studio.latentdeck.player'
         }
@@ -303,6 +338,43 @@ try {
         if ($cargo -cnotmatch '(?m)^spout-sdk\s*=') {
             throw "Spout release feature is absent for $($app.Product)."
         }
+        Assert-TauriOfflineFrontendContract `
+            -ConfigPath $configPath `
+            -CargoManifestPath (Join-Path $repoRoot $app.Cargo) `
+            -PackageJsonPath (Join-Path $repoRoot $app.Package)
+    }
+
+    $tauriFixtureRoot = Join-Path $testRoot 'tauri-frontend-contract'
+    $tauriFixtureDist = Join-Path $tauriFixtureRoot 'dist'
+    $tauriFixtureAssets = Join-Path $tauriFixtureDist 'assets'
+    [System.IO.Directory]::CreateDirectory($tauriFixtureAssets) | Out-Null
+    Write-Utf8Text `
+        -Path (Join-Path $tauriFixtureDist 'index.html') `
+        -Content @'
+<script type="module" src="/assets/index-fixture.js"></script>
+<link rel="stylesheet" href="/assets/index-fixture.css">
+'@
+    Write-Utf8Text `
+        -Path (Join-Path $tauriFixtureAssets 'index-fixture.js') `
+        -Content "document.body.dataset.releaseFixture = 'ready';`n"
+    Write-Utf8Text `
+        -Path (Join-Path $tauriFixtureAssets 'index-fixture.css') `
+        -Content "body { color: white; }`n"
+    $tauriFixtureBinary = Join-Path $tauriFixtureRoot 'fixture.exe'
+    Write-Utf8Text `
+        -Path $tauriFixtureBinary `
+        -Content "MZ synthetic /index.html /assets/index-fixture.js /assets/index-fixture.css`n"
+    Assert-TauriEmbeddedFrontendBinary `
+        -BinaryPath $tauriFixtureBinary `
+        -FrontendDistPath $tauriFixtureDist
+    $tauriStaleBinary = Join-Path $tauriFixtureRoot 'stale-fixture.exe'
+    Write-Utf8Text `
+        -Path $tauriStaleBinary `
+        -Content "MZ synthetic /index.html /assets/index-old.js /assets/index-fixture.css`n"
+    Assert-Throws -Context 'release binary must embed the current Vite asset names' -Action {
+        Assert-TauriEmbeddedFrontendBinary `
+            -BinaryPath $tauriStaleBinary `
+            -FrontendDistPath $tauriFixtureDist
     }
 
     $runtimeSource = Join-Path $testRoot 'runtime-source'
@@ -674,7 +746,7 @@ try {
     }
 
     Write-Host 'RELEASE PACKAGING CONTRACT: PASS' -ForegroundColor Green
-    Write-Host 'Verified: independent NSIS config, pinned Spout2 SBOM/license/notice delivery, Spout release feature, strict JSON types, CPython x64 identity, out-of-discovery staging, integrity, side-by-side install, exact-version uninstall, payload rejection.'
+    Write-Host 'Verified: independent NSIS config, fresh lock-bound application SBOM/no prebuilt reuse, offline embedded Tauri frontend/custom-protocol contract, pinned Spout2 SBOM/license/notice delivery, Spout release feature, strict JSON types, CPython x64 identity, out-of-discovery staging, integrity, side-by-side install, exact-version uninstall, payload rejection.'
 } finally {
     if (Test-Path -LiteralPath $testRoot) {
         Remove-Item -LiteralPath $testRoot -Recurse -Force

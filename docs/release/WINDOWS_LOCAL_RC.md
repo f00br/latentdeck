@@ -51,35 +51,23 @@ and extracts it into a fresh private build directory for the two Tauri builds.
 From the repository root:
 
 ```powershell
-$sbomPath = 'artifacts/release/latentdeck-0.1.0-sbom.cdx.json'
-pwsh -NoProfile -File tools/Build-ReleaseCandidate.ps1 `
-  -SbomPath $sbomPath
+pwsh -NoProfile -File tools/Build-ReleaseCandidate.ps1
 ```
 
-On a fresh clone, populate the pinned Node dependency tree before asking pnpm
-for its license inventory, then generate the public-safe SBOM:
-
-```powershell
-$nodeRoot = pwsh -NoProfile -File tools/Get-PinnedNode.ps1
-$env:PATH = "$nodeRoot;$env:PATH"
-pnpm --dir . install --frozen-lockfile
-pwsh -NoProfile -File tools/New-Sbom.ps1
-```
-
-Do this before the RC build when the SBOM does not already exist. The builder
-requires an explicit input, validates strict UTF-8, CycloneDX 1.5, the
-`LatentDeck` component version `0.1.0`, a bounded non-empty component list, and
-the absence of machine-local paths or file URIs. It also requires exactly one
-upstream `Spout2` component with tag, commit, pinned archive SHA-256, native C++
-integration provenance, and the `BSD-2-Clause` license. Cargo metadata alone is
-not sufficient because Spout2 is compiled from separately prepared native
-source rather than a Cargo package.
+The builder performs the frozen pnpm install and generates the public-safe SBOM
+inside its unique private staging directory. A prebuilt `-SbomPath` is rejected
+so an older, schema-valid inventory cannot be reused accidentally. The fresh
+SBOM is validated as strict UTF-8 CycloneDX 1.5 with the `LatentDeck` component
+version `0.1.0`, a bounded non-empty component list, no machine-local paths or
+file URIs, and exactly one upstream `Spout2` component with tag, commit, pinned
+archive SHA-256, native C++ integration provenance, and the `BSD-2-Clause`
+license. Cargo metadata alone is not sufficient because Spout2 is compiled from
+separately prepared native source rather than a Cargo package.
 
 To use an already downloaded Spout2 archive:
 
 ```powershell
 pwsh -NoProfile -File tools/Build-ReleaseCandidate.ps1 `
-  -SbomPath $sbomPath `
   -SpoutArchivePath $spoutArchive
 ```
 
@@ -93,13 +81,15 @@ The helper passes the following release properties to each Tauri build:
 
 The frozen pnpm install is anchored to the repository root even when this
 script is invoked by absolute path from another directory. The builder records
-Node, pnpm, Tauri CLI, verbose rustc/Cargo facts, both lock-file hashes, the
-Spout2 tag/commit/archive pin, Git commit/branch/dirty state, and a deterministic
-hash of the public source candidate. It fails if either lock file or that
-source snapshot changes during the build. `Test-PublicTree.ps1` must pass both
-before the snapshot and after compilation. A dirty local candidate is recorded
-honestly; rebuild from the final clean commit before treating an artifact as a
-durable publication candidate.
+Node, pnpm, Tauri CLI, verbose rustc/Cargo facts, hashes of `Cargo.lock`,
+`pnpm-lock.yaml`, and `uv.lock`, the Spout2 tag/commit/archive pin, Git
+commit/branch/dirty state, and a deterministic hash of the public source
+candidate. The SBOM records the same three lock hashes. The builder rechecks
+them after SBOM generation, after both Tauri builds, and immediately before
+atomic finalization; it also fails if the source snapshot changes.
+`Test-PublicTree.ps1` must pass both before the snapshot and after compilation.
+A dirty local candidate is recorded honestly; rebuild from the final clean
+commit before treating an artifact as a durable publication candidate.
 
 Cargo build products are placed in temporary directories below the ignored
 `artifacts` root. The final set is staged as
@@ -128,8 +118,9 @@ DOS/PE signature, expected NSIS PE32 bootstrapper fields, and minimum sizes,
 assigns canonical unsigned names, records byte lengths and SHA-256 values, and
 then measures the staged files again. The mandatory SBOM
 is copied under `metadata`, with its byte length, component count, and SHA-256
-recorded in `release-candidate.json`; its digest is also included in
-`SHA256SUMS.txt`. The reviewed Spout2 notice and full BSD-2-Clause text are
+recorded in `release-candidate.json` together with the three lock hashes from
+which it was generated; its digest is also included in `SHA256SUMS.txt`. The
+reviewed Spout2 notice and full BSD-2-Clause text are
 copied to `metadata/THIRD_PARTY_NOTICES.md`; its byte length and SHA-256 are
 bound by the schema-3 RC receipt and the same checksum list. Neither receipt
 hashes itself, so there is no recursive hash contract. The builder refuses an
@@ -180,7 +171,8 @@ Codec Pack has its own version-scoped removal command.
 Run the following on a disposable, clean Windows 11 x64 machine with NVIDIA
 hardware and without ComfyUI:
 
-1. Verify both installer, SBOM, and `THIRD_PARTY_NOTICES.md` hashes against
+1. Verify both installer hashes plus the SBOM and
+   `THIRD_PARTY_NOTICES.md` hashes against
    `SHA256SUMS.txt`; keep the complete set together during testing.
 2. Install LatentPlayer only; verify launch, missing-codec UI, and uninstall.
 3. Install LatentDeck only; verify launch, missing-codec UI, and uninstall.
