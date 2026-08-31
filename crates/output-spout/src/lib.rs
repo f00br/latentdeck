@@ -744,9 +744,13 @@ mod tests {
         assert_send::<SpoutSender>();
     }
 
+    fn native_bridge_source() -> String {
+        include_str!("../native/spout_bridge.cpp").replace("\r\n", "\n")
+    }
+
     #[test]
     fn native_bridge_has_only_the_wrapped_texture_send_path() {
-        let source = include_str!("../native/spout_bridge.cpp");
+        let source = native_bridge_source();
         assert!(source.contains("SendDX11Resource"));
         assert!(source.contains("GetD3D11On12device"));
         assert!(source.contains("CreateWrappedResource"));
@@ -760,7 +764,7 @@ mod tests {
     #[test]
     fn shader_resource_state_matches_the_pinned_wgpu_dx12_mapping() {
         assert_eq!(Dx12ResourceState::ShaderResource as u32, 0xc0);
-        let source = include_str!("../native/spout_bridge.cpp");
+        let source = native_bridge_source();
         assert!(source.contains(
             "D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |\n    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE"
         ));
