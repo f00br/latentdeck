@@ -4,36 +4,35 @@ This is the current release-status record. It separates verified local behavior,
 active owner UAT, and publication gates. It does not authorize a remote, push,
 tag, upload, signing action, or public release.
 
-Status on 2026-08-31: the complete `0.1.0` product surface is in owner-UAT
+Status on 2026-09-01: the complete `0.1.0` product surface is in owner-UAT
 closeout. The owner reports that the current experience is generally working
-well. Four post-baseline release findings now have a local source candidate;
-affected owner-UAT and a fresh clean RC remain open.
+well. The four primary findings are present in a clean local RC; one final
+changed-draft `Load + Play` UX correction and its fresh clean RC remain open.
 
-## Current owner-UAT binary baseline
+## Previous owner-UAT binary baseline
 
-The current unsigned local application RC was built from clean commit
-`2f00a4bc220c9274027513ce898794f597794f61` on `main`.
+The previous unsigned local application RC was built from clean commit
+`2aa5c304e8d147e42820333f93b42be4181bb7b7` on `main`.
 
 | Artifact | SHA-256 |
 | --- | --- |
-| `LatentDeck-0.1.0-windows-x64-unsigned-setup.exe` | `a265e7214411b0b61bae8ed3120143ce77ae955e82b605051ed0d50f3862254c` |
-| `LatentPlayer-0.1.0-windows-x64-unsigned-setup.exe` | `bfbcc420a3375105d5929cce5a6312fb933f77b2eeb36cccf1f8d09f8716aa67` |
-| `latentdeck-0.1.0-sbom.cdx.json` | `ac0061390ce7bd74c0bc895c7a6b73f9a80c5b08abb0b5254c8347c2daa34ec4` |
+| `LatentDeck-0.1.0-windows-x64-unsigned-setup.exe` | `b1e6f1a0ad8bc14df2a856dcecae9584b8fd8e9de8b3a7ae445b0754af83f78f` |
+| `LatentPlayer-0.1.0-windows-x64-unsigned-setup.exe` | `51b73d6165a3708a159edc958d0d6686ead2d60ebba3051618203c31889241c0` |
+| `latentdeck-0.1.0-sbom.cdx.json` | `7c6ab2a1451ed0e0f094e16cb0f55604f6366f1614719d6d711079e02358305c` |
 | `THIRD_PARTY_NOTICES.md` | `f99db3adcf79512f4ee8f753b168919a42e475fc46aefe70ef3751db48232991` |
 
-The schema-3 receipt records `git_dirty=false`, 459 files in the public source
+The schema-3 receipt records `git_dirty=false`, 478 files in the public source
 snapshot, pinned Node 24.20.0, pnpm 11.24.0, Tauri CLI 2.11.4, Rust 1.93.1,
 Spout2 2.007.017 at commit `f49e2f469f8cb25f559a6eaa61a3f5b8173fc100`,
-and a CycloneDX 1.5 SBOM with 740 components.
+and a CycloneDX 1.5 SBOM with 741 components.
 
-The documentation handoff was written after this binary set. The existing RC
-remains the current behavior baseline for owner UAT, but any accepted source
-change requires a fresh clean RC before publication review.
+The documentation handoff was written after this binary set. This RC remains
+the previous behavior baseline for owner UAT, but any accepted source change
+requires a fresh clean RC before publication review.
 
-### Post-baseline source candidate (owner acceptance open)
+### Current post-baseline source candidate (owner acceptance open)
 
-The source commit containing this status adds the following behavior after
-`2f00a4b`; none of it is represented by the artifact hashes above:
+The `2aa5c30` binary contains the four primary fixes listed below:
 
 - D2 Live Capture survives expected automatic source-loop reset barriers and
   remains bounded by explicit Stop and the existing validated spool limits.
@@ -50,6 +49,12 @@ The source commit containing this status adds the following behavior after
   per-item metadata/errors, sequential progress, stop-after-current, and direct
   open of a completed cartridge. Conversion is bound to the preflight payload
   SHA-256; a subsequently changed source fails without writing its destination.
+
+The source commit containing this status adds the final contextual action not
+represented by the artifact hashes above: when a next-load slot differs from
+its currently playing identity, D2 and Q4 expose `Load + Play`, which applies
+the complete compatible draft and starts the requested slot. Matching
+identities retain ordinary transport-only `Play`/`Pause` behavior.
 
 Focused Rust, Python, and frontend contract tests cover these boundaries. The
 accepted CUDA, Spout, fullscreen, and six-minute stability suites were not

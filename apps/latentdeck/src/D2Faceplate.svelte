@@ -90,8 +90,10 @@
   } from "./deck-source-truth";
   import {
     createExclusiveOperationGate,
+    playDraftAwareSlot,
     replaceDraftSource,
     retainDraftSourceOptions,
+    transportForDraftLoad,
   } from "./source-replacement";
   import {
     canSetDeckFullscreen,
@@ -969,7 +971,7 @@
     }
   }
 
-  async function openDeck(): Promise<void> {
+  async function openDeck(playSlot: D2Slot | null = null): Promise<void> {
     if (presetBusy || captureBusy || !captureUi.load) return;
     if (backend.state !== "ready") {
       hostState = "error";
@@ -1003,7 +1005,7 @@
     }
     await runHostAction(async () => {
       const pendingLoops = presetLoopDraft?.loops;
-      const transport =
+      const retainedTransport =
         pendingLoops === undefined
           ? status.loaded
             ? status.transport
@@ -1015,6 +1017,11 @@
               playingA: false,
               playingB: false,
             };
+      const transport = transportForDraftLoad(
+        retainedTransport,
+        playSlot,
+        setSlotPlaying,
+      );
       const request = buildD2OpenRequest(
         sourceA as CartridgeView,
         sourceB as CartridgeView,
@@ -1117,9 +1124,48 @@
   }
 
   async function togglePlaying(slot: D2Slot): Promise<void> {
-    const playing =
-      slot === "A" ? status.transport.playingA : status.transport.playingB;
-    await setTransport(setSlotPlaying(status.transport, slot, !playing));
+    const loadedSource =
+      slot === "A" ? status.sources?.sourceA : status.sources?.sourceB;
+    const draftArchiveSha256 = slot === "A" ? sourceAHash : sourceBHash;
+    await playDraftAwareSlot({
+      loadedArchiveSha256: loadedSource?.archiveSha256 ?? "",
+      draftArchiveSha256,
+      loadDraftAndPlay: () => openDeck(slot),
+      toggleCurrent: async () => {
+        const playing =
+          slot === "A"
+            ? status.transport.playingA
+            : status.transport.playingB;
+        await setTransport(setSlotPlaying(status.transport, slot, !playing));
+      },
+    });
+  }
+
+  function slotDraftRequiresLoad(slot: D2Slot): boolean {
+    const loadedSource =
+      slot === "A" ? status.sources?.sourceA : status.sources?.sourceB;
+    const draftArchiveSha256 = slot === "A" ? sourceAHash : sourceBHash;
+    return (
+      status.loaded &&
+      loadedSource !== undefined &&
+      loadedSource.archiveSha256 !== draftArchiveSha256
+    );
+  }
+
+  function draftLoadBlocked(): boolean {
+    return (
+      hostBusy ||
+      sourceReplaceBusy ||
+      captureBusy ||
+      !captureUi.load ||
+      !viewportReady ||
+      backend.state !== "ready" ||
+      bankBusy ||
+      sourceA === undefined ||
+      sourceB === undefined ||
+      !selectedSourcesCompatible ||
+      controlsValidation !== null
+    );
   }
 
   async function toggleLoop(slot: D2Slot, event: Event): Promise<void> {
@@ -1793,7 +1839,8 @@
         role="status"
       >
         NEXT LOAD DRAFT differs from CURRENTLY PLAYING. Runtime playback is
-        unchanged until Load A + B succeeds.
+        unchanged until Load A + B or Load + Play succeeds. Either action
+        applies the complete A + B draft.
       </p>{/if}
     <section class="source-module source-a" aria-labelledby="source-a-title">
       <header>
@@ -1885,12 +1932,16 @@
         <button
           type="button"
           onclick={() => void togglePlaying("A")}
-          disabled={!status.loaded ||
-            hostBusy ||
-            captureBusy ||
-            !captureUi.transport}
+          disabled={slotDraftRequiresLoad("A")
+            ? draftLoadBlocked()
+            : !status.loaded ||
+              hostBusy ||
+              captureBusy ||
+              !captureUi.transport}
         >
-          {!status.loaded
+          {slotDraftRequiresLoad("A")
+            ? "Load + Play A"
+            : !status.loaded
             ? "Play A"
             : status.transport.playingA
               ? "Pause A"
@@ -2343,12 +2394,16 @@
         <button
           type="button"
           onclick={() => void togglePlaying("B")}
-          disabled={!status.loaded ||
-            hostBusy ||
-            captureBusy ||
-            !captureUi.transport}
+          disabled={slotDraftRequiresLoad("B")
+            ? draftLoadBlocked()
+            : !status.loaded ||
+              hostBusy ||
+              captureBusy ||
+              !captureUi.transport}
         >
-          {!status.loaded
+          {slotDraftRequiresLoad("B")
+            ? "Load + Play B"
+            : !status.loaded
             ? "Play B"
             : status.transport.playingB
               ? "Pause B"

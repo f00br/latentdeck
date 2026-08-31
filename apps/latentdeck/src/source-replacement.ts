@@ -38,6 +38,38 @@ export function retainDraftSourceOptions<
   return [...retained.values()];
 }
 
+export interface DraftAwareSlotPlayOptions {
+  loadedArchiveSha256: string;
+  draftArchiveSha256: string;
+  loadDraftAndPlay: () => Promise<void>;
+  toggleCurrent: () => Promise<void>;
+}
+
+export async function playDraftAwareSlot(
+  options: DraftAwareSlotPlayOptions,
+): Promise<"loaded_draft" | "toggled_current"> {
+  if (options.loadedArchiveSha256 !== options.draftArchiveSha256) {
+    await options.loadDraftAndPlay();
+    return "loaded_draft";
+  }
+  await options.toggleCurrent();
+  return "toggled_current";
+}
+
+export function transportForDraftLoad<TTransport, TSlot>(
+  retainedTransport: TTransport,
+  playSlot: TSlot | null,
+  setPlaying: (
+    transport: TTransport,
+    slot: TSlot,
+    playing: boolean,
+  ) => TTransport,
+): TTransport {
+  return playSlot === null
+    ? retainedTransport
+    : setPlaying(retainedTransport, playSlot, true);
+}
+
 export interface ExclusiveOperationGate {
   run(operation: () => Promise<void>): Promise<"completed" | "ignored">;
 }

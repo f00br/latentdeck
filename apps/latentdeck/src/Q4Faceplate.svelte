@@ -110,8 +110,10 @@
   } from "./deck-source-truth";
   import {
     createExclusiveOperationGate,
+    playDraftAwareSlot,
     replaceDraftSource,
     retainDraftSourceOptions,
+    transportForDraftLoad,
   } from "./source-replacement";
   import {
     canSetDeckFullscreen,
@@ -951,7 +953,7 @@
     }
   }
 
-  async function openDeck(): Promise<void> {
+  async function openDeck(playSlot: Q4Slot | null = null): Promise<void> {
     if (presetBusy || captureBusy || !captureUi.load) return;
     if (!viewportReady) {
       hostState = "error";
@@ -1000,7 +1002,7 @@
     }
     await runHostAction(async () => {
       const pendingLoops = presetLoopDraft?.loops;
-      const transport =
+      const retainedTransport =
         pendingLoops === undefined
           ? status.loaded
             ? status.transport
@@ -1016,6 +1018,11 @@
               playingC: false,
               playingD: false,
             };
+      const transport = transportForDraftLoad(
+        retainedTransport,
+        playSlot,
+        setQ4SlotPlaying,
+      );
       const request = buildQ4OpenRequest(
         [
           sourceA as CartridgeView,
@@ -1140,8 +1147,18 @@
   }
 
   async function togglePlay(slot: Q4Slot): Promise<void> {
-    const playing = status.transport[`playing${slot}`];
-    await setTransport(setQ4SlotPlaying(status.transport, slot, !playing));
+    const loadedSource = loadedSourceBySlot(status.sources, slot);
+    await playDraftAwareSlot({
+      loadedArchiveSha256: loadedSource?.archiveSha256 ?? "",
+      draftArchiveSha256: sourceHashBySlot[slot],
+      loadDraftAndPlay: () => openDeck(slot),
+      toggleCurrent: async () => {
+        const playing = status.transport[`playing${slot}`];
+        await setTransport(
+          setQ4SlotPlaying(status.transport, slot, !playing),
+        );
+      },
+    });
   }
 
   async function toggleLoop(slot: Q4Slot, event: Event): Promise<void> {
@@ -2031,7 +2048,8 @@
         role="status"
       >
         NEXT LOAD DRAFT differs from CURRENTLY PLAYING. Runtime playback is
-        unchanged until Load Q4 succeeds.
+        unchanged until Load Q4 or Load + Play succeeds. Either action applies
+        the complete four-slot draft.
       </p>{/if}
     {#each Q4_SLOTS as slot (slot)}
       {@const source = sourceViewBySlot[slot]}
@@ -2056,6 +2074,9 @@
               sourceHashBySlot[slot],
               source,
             )))}
+      {@const draftRequiresLoad =
+        loadedSource !== undefined &&
+        loadedSource.archiveSha256 !== sourceHashBySlot[slot]}
       <article class:carrier={rolesDraft.carrier === slot} class="slot-module">
         <header>
           <span>{slot}</span>
@@ -2175,11 +2196,17 @@
           <button
             type="button"
             onclick={() => void togglePlay(slot)}
-            disabled={!status.loaded ||
-              hostBusy ||
-              captureBusy ||
-              !captureUi.transport}
-            >{status.transport[`playing${slot}`] ? "Pause" : "Play"}</button
+            disabled={draftRequiresLoad
+              ? loadGateReason !== null
+              : !status.loaded ||
+                hostBusy ||
+                captureBusy ||
+                !captureUi.transport}
+            >{draftRequiresLoad
+              ? `Load + Play ${slot}`
+              : status.transport[`playing${slot}`]
+                ? "Pause"
+                : "Play"}</button
           >
           <label
             ><input

@@ -4,10 +4,8 @@ This is the only current handoff for the repository.
 
 ## Last completed state
 
-- The application behavior used by the current owner test is clean commit
-  `2f00a4bc220c9274027513ce898794f597794f61` on `main`.
-- Its ignored local artifact set is
-  `artifacts/release-candidate-final-2f00a4b/0.1.0-windows-x64`. The receipt says
+- The previous owner-UAT application build is clean commit
+  `2aa5c304e8d147e42820333f93b42be4181bb7b7` on `main`. Its receipt says
   `git_dirty=false`; installer and SBOM hashes are recorded in
   [ACCEPTANCE_STATUS.md](ACCEPTANCE_STATUS.md).
 - Owner UAT is active. The owner reports that the product is generally working
@@ -22,8 +20,8 @@ This is the only current handoff for the repository.
 - Standalone conversion of an existing 16:9 H3 AV Safetensors source into a
   validated `.lc` passed while preserving payload bytes and geometry.
 
-The current `main` source candidate after that binary baseline addresses four
-new owner-reported 0.1 release findings:
+The previous owner-UAT build addresses four owner-reported 0.1 release
+findings:
 
 - D2 Live Capture now continues across expected automatic source-loop reset
   barriers instead of finishing at the first loop; arbitrary resets still
@@ -46,23 +44,29 @@ new owner-reported 0.1 release findings:
   preflight, so a changed source fails without producing an `.lc`. The console
   converter remains the developer interface.
 
-These changes have focused synthetic and native Windows encoder coverage, but
-they are not present in the `2f00a4b` RC and are not owner-accepted yet. Do not
-record the four findings as closed until the affected slices in
-[MASTER_USER_TEST.md](MASTER_USER_TEST.md) pass in a fresh application build.
+The current source candidate adds one final UX correction:
 
-The documentation cleanup containing this handoff is newer than the binary
-baseline. Any source change after `2f00a4b`, including an accepted UAT fix,
-requires a fresh clean RC before publication review.
+- A changed next-load slot now exposes `Load + Play` in both Decks. It applies
+  the complete compatible draft and starts the requested slot; ordinary
+  `Play`/`Pause` remains transport-only when draft and runtime identities match.
+
+The four primary changes above were built from clean commit `2aa5c30`. That
+owner-UAT candidate exposed the final changed-draft Play ambiguity addressed by
+the contextual action above. Do not record the affected source-insertion slice
+as closed until it passes in a fresh application build.
+
+The source candidate containing this handoff is newer than that binary
+baseline. Any source change after `2aa5c30`, including this UAT fix, requires a
+fresh clean RC before publication review.
 
 ## Next action
 
 1. Build a fresh local application candidate from the clean commit containing
-   the four fixes above; the `2f00a4b` artifacts remain an older comparison
-   baseline.
-2. Repeat only the affected owner-UAT slices: D2 multi-loop capture, decoded
-   MP4 in both Decks, Library auto-refresh, explicit captured-source insertion,
-   and LatentPlayer Prepare/conversion.
+   the contextual `Load + Play` fix; the `2aa5c30` artifacts remain an older
+   comparison baseline.
+2. Repeat the final affected owner-UAT slice: choose a newly captured cartridge
+   in a running D2/Q4 slot, press the contextual `Load + Play`, and verify that
+   the selected source loads and starts without reloading the application.
 3. If an affected slice regresses, fix it narrowly in the primary `main`
    checkout, rerun targeted tests, audit the staged candidate in a clean local
    clone, and commit locally. Do not push.
@@ -83,7 +87,7 @@ and the separate gallery item are the remaining direct acceptance surfaces.
 
 ## Open threads
 
-- owner acceptance of the four post-`2f00a4b` source fixes;
+- owner acceptance of the final changed-draft `Load + Play` workflow;
 - the ComfyUI all-nodes gallery and visual proof;
 - a fresh clean RC after the final accepted source commit;
 - clean-machine lifecycle, private security contact, signing, and explicit

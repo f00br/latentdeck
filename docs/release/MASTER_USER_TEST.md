@@ -196,9 +196,12 @@ Then test the `Prepare` workspace without a decoder or GPU requirement:
 6. Create a Live Capture while changing controls and let a short looping source
    cross at least three automatic loop boundaries. It must remain active until
    manual Stop, then validate and appear in Library without `.partial` residue.
-7. Use the finished capture in A, then B, without reloading the application.
-   Each explicit action may perform one bounded worker restart; the other source
-   draft, controls, seed, loop/play intent, and compatible geometry must remain.
+7. Select the finished capture as A's next-load draft. The A button must become
+   `Load + Play A`; press it and confirm the complete compatible A+B draft loads
+   and A starts without reloading the application. Repeat in B with either the
+   contextual action or `Use capture in B`. Each explicit action may perform one
+   bounded worker restart; the other source draft, controls, seed, loop/play
+   intent, and compatible geometry must remain.
 8. Repeat the main playback and resample path with the other aspect-ratio set.
 
 ## LD-Q4
@@ -212,9 +215,12 @@ Then test the `Prepare` workspace without a decoder or GPU requirement:
    macro. The three donor weights must remain understandable and predictable.
 5. Compare TOPK and Sinkhorn and repeat the same seed/settings after Restart.
    The replay should be deterministic.
-6. Create both Snapshot and Live Capture results. Use a finished capture in
-   each required A/B/C/D slot without reloading the application; other sources,
-   controls, roles, seed, and transport intent must remain.
+6. Create both Snapshot and Live Capture results. Select a finished capture as
+   a next-load draft and confirm that slot becomes `Load + Play`; press it and
+   verify that the complete compatible Q4 draft loads and the requested slot
+   starts without reloading the application. Repeat the insertion path in each
+   required A/B/C/D slot, using either the contextual action or `Use capture in
+   …`; other sources, controls, roles, seed, and transport intent must remain.
 7. Repeat once with a compatible portrait set and once with a compatible
    landscape set.
 
@@ -246,8 +252,10 @@ Repeat once in each Deck while no capture is active:
 3. Confirm the preset restores collection, exact cartridge identities, routing,
    controls, seed, and loop choices as a **draft**. The currently playing Deck
    must not change yet.
-4. In D2 press `Load A + B`; in Q4 press `Load Q4`. Only this explicit apply
-   action should replace the playing sources and activate the loaded preset.
+4. In D2 press `Load A + B`; in Q4 press `Load Q4`. The contextual `Load + Play`
+   shown on a changed slot is an equivalent explicit apply action that also
+   starts that slot. Only an explicit apply action should replace the playing
+   sources and activate the loaded preset.
 5. If a saved cartridge is unavailable, the UI must warn about the missing
    identity and must never substitute another cartridge silently.
 

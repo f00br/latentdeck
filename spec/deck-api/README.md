@@ -115,12 +115,16 @@ newer view. Refresh preserves the currently playing identities and an explicit
 next-load draft.
 
 Changing a source picker edits only the next-load draft. A newly captured
-cartridge enters a running Deck only through an explicit `Use capture in …` or
-normal Load action. The host resolves immutable identities and validates the
-complete candidate launch configuration before stopping the current worker. A
-successful bounded replacement retains the other source choices, controls,
-roles, seed, loop/play intent, and any active decoded-video recorder; causal
-operator state restarts at the source-replacement boundary.
+cartridge enters a running Deck only through an explicit `Use capture in …`,
+normal Load, or contextual `Load + Play` action. When a slot draft differs from
+its currently playing identity, that slot's transport button becomes `Load +
+Play`; it applies the complete multi-slot draft and starts the requested slot.
+When both identities match, the button remains normal `Play`/`Pause` transport
+and does not replace the worker. The host resolves immutable identities and
+validates the complete candidate launch configuration before stopping the
+current worker. A successful bounded replacement retains the other source
+choices, controls, roles, seed, loop/play intent, and any active decoded-video
+recorder; causal operator state restarts at the source-replacement boundary.
 
 The public 0.1 performance target is `448×800` at 24 fps. Each Deck/operator
 mode is certified only after its own final receipt passes. Other validated
