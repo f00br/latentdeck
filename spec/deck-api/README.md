@@ -103,6 +103,50 @@ functional/performance certification stays pending until a geometry-specific
 receipt exists. A Deck must expose that distinction and must not downscale,
 drop a donor, or change an algorithm to claim the benchmark.
 
+## Embedded output surface ownership
+
+The video area shown inside a Deck is part of that Deck's faceplate layout,
+but the native renderer is a capability supplied by the LatentDeck host. This
+is an intentional split rather than a D2/Q4 implementation detail:
+
+- the Deck owns an empty layout anchor, its visible/inactive state, and the
+  user's fullscreen intent;
+- the shared Deck-facing API carries revisioned CSS bounds and visibility to
+  the host;
+- the host reads the authoritative window scale and client extent, validates
+  and converts the request to physical parent-client coordinates, and owns the
+  child HWND, wgpu surface, frame sequencing, fullscreen transition, and Spout
+  publication;
+- the Deck never receives a raw HWND, DX12 device, decoded RGB copy, or an
+  unrestricted native-window creation capability.
+
+The reference frontend capability is `DeckEmbeddedOutputHost`; the reference
+native implementation is `latentdeck_native_output::NativeOutput::new_embedded`.
+LD-D2 and LD-Q4 currently adapt their typed command namespaces to that same
+capability. Command prefixes and faceplate CSS are replaceable adapters, not
+separate presentation contracts.
+
+Bounds use a host-issued session epoch plus client revisions that are mapped to
+host-monotonic applied revisions. Stale epochs or revisions are rejected, and
+one client revision may be retried only with exactly the same geometry. A
+hidden or zero-area anchor suspends the local surface instead of inventing
+geometry, and a visible request is acknowledged only after host validation,
+native placement, and a final state check succeed. A Deck must not enable
+loading or fullscreen presentation until its first visible viewport request is
+acknowledged.
+
+The faceplate layout must also keep that acknowledged video area usable while
+the operator controls are being edited. A long scrolling control surface must
+not create a deadlock where `Load` is reachable only after the required video
+anchor has left the client area. The bundled D2 and Q4 references use a sticky
+program monitor; a split-pane custom Deck may satisfy the same requirement.
+
+This 0.1 source tree proves the contract with the two bundled Decks. Loading an
+arbitrary third-party Deck package is a separate installation and trust
+boundary; when exposed by a future Deck SDK, it must wrap this host capability
+rather than ask community Decks to copy Win32/wgpu code or create their own
+top-level output windows.
+
 ## Requirements for a custom Deck
 
 A custom Deck targeting the 0.1 contract must:
@@ -114,7 +158,9 @@ A custom Deck targeting the 0.1 contract must:
 4. keep transport and latent math independent from faceplate state;
 5. process the intrinsic latent grid without hidden conversion;
 6. use shared aspect-fit presentation when it owns a native output surface;
-7. treat explicit conversion as a separate provenance-bearing authoring
+7. bind its faceplate video anchor through the shared embedded-output host
+   capability instead of creating a second program window;
+8. treat explicit conversion as a separate provenance-bearing authoring
    operation.
 
 Input count, carrier/donor order, controls, bypass state, determinism, and

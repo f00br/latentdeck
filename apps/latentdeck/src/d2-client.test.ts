@@ -26,6 +26,8 @@ describe("typed LD-D2 host client", () => {
       transportSet: "deck_d2_transport_set",
       seedSet: "deck_d2_seed_set",
       restart: "deck_d2_restart",
+      viewportSessionBegin: "deck_d2_viewport_session_begin",
+      viewportSetBounds: "deck_d2_viewport_set_bounds",
       fullscreenStatusGet: "deck_d2_fullscreen_status_get",
       fullscreenSet: "deck_d2_fullscreen_set",
       captureSnapshot: "deck_d2_capture_snapshot",
@@ -64,6 +66,18 @@ describe("typed LD-D2 host client", () => {
     await client.transportSet(DEFAULT_D2_TRANSPORT);
     await client.seedSet(9);
     await client.restart();
+    await client.viewportSessionBegin();
+    const viewport = {
+      epoch: 3,
+      revision: 7,
+      xCss: 10,
+      yCss: 20,
+      widthCss: 640,
+      heightCss: 360,
+      scaleFactor: 1.5,
+      visible: true,
+    };
+    await client.viewportSetBounds(viewport);
     await client.fullscreenStatusGet();
     await client.fullscreenSet(true);
     await client.captureSnapshot();
@@ -89,6 +103,11 @@ describe("typed LD-D2 host client", () => {
       },
       { command: "deck_d2_seed_set", args: { seed: 9 } },
       { command: "deck_d2_restart", args: {} },
+      { command: "deck_d2_viewport_session_begin", args: {} },
+      {
+        command: "deck_d2_viewport_set_bounds",
+        args: { bounds: viewport },
+      },
       { command: "deck_d2_fullscreen_status_get", args: {} },
       { command: "deck_d2_fullscreen_set", args: { enabled: true } },
       { command: "deck_d2_capture_snapshot", args: {} },

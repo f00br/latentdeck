@@ -6,18 +6,17 @@
 mod native_output;
 
 #[test]
-fn player_adapter_reexports_the_shared_runtime_contract() {
+fn player_adapter_uses_the_shared_runtime_contract() {
+    use latentdeck_native_output::{NativeOutputError, PresentOutcome};
+
     fn assert_send<T: Send>() {}
 
     assert_send::<native_output::NativeOutput>();
     assert_eq!(
-        native_output::NativeOutputError::FrameRejected.code(),
+        NativeOutputError::FrameRejected.code(),
         "output.frame_rejected"
     );
-    assert_ne!(
-        native_output::PresentOutcome::SkippedTimeout,
-        native_output::PresentOutcome::Presented
-    );
+    assert_ne!(PresentOutcome::SkippedTimeout, PresentOutcome::Presented);
     assert_ne!(
         native_output::ResizeOutcome::Suspended,
         native_output::ResizeOutcome::Configured

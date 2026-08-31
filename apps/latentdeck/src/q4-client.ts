@@ -15,6 +15,10 @@ import type {
   Q4TransportAck,
 } from "./q4-model";
 import type { SpoutConfigure, SpoutStatus } from "./output-model";
+import type {
+  DeckEmbeddedOutputHost,
+  EmbeddedViewportSession,
+} from "./embedded-viewport";
 
 export type StopQ4Listener = () => void;
 
@@ -26,7 +30,7 @@ export interface Q4HostAdapter {
   ): Promise<StopQ4Listener>;
 }
 
-export interface Q4Client {
+export interface Q4Client extends DeckEmbeddedOutputHost {
   backendStatusGet(): Promise<Q4BackendView>;
   backendRediscover(): Promise<Q4BackendView>;
   selectDecoder(): Promise<Q4BackendView>;
@@ -36,8 +40,6 @@ export interface Q4Client {
   transportSet(transport: Q4Transport): Promise<Q4TransportAck>;
   seedSet(seed: number): Promise<Q4SeedAck>;
   restart(): Promise<Q4Status>;
-  fullscreenStatusGet(): Promise<boolean | null>;
-  fullscreenSet(enabled: boolean): Promise<boolean>;
   captureSnapshot(): Promise<Q4CaptureView | null>;
   captureLiveStart(): Promise<Q4CaptureView | null>;
   captureLiveStop(): Promise<Q4CaptureView>;
@@ -63,6 +65,8 @@ export const Q4_COMMANDS = Object.freeze({
   transportSet: "deck_q4_transport_set",
   seedSet: "deck_q4_seed_set",
   restart: "deck_q4_restart",
+  viewportSessionBegin: "deck_q4_viewport_session_begin",
+  viewportSetBounds: "deck_q4_viewport_set_bounds",
   fullscreenStatusGet: "deck_q4_fullscreen_status_get",
   fullscreenSet: "deck_q4_fullscreen_set",
   captureSnapshot: "deck_q4_capture_snapshot",
@@ -105,6 +109,13 @@ export function createQ4Client(host: Q4HostAdapter = tauriHost): Q4Client {
       host.invoke<Q4TransportAck>(Q4_COMMANDS.transportSet, { transport }),
     seedSet: (seed) => host.invoke<Q4SeedAck>(Q4_COMMANDS.seedSet, { seed }),
     restart: () => host.invoke<Q4Status>(Q4_COMMANDS.restart, {}),
+    viewportSessionBegin: () =>
+      host.invoke<EmbeddedViewportSession>(
+        Q4_COMMANDS.viewportSessionBegin,
+        {},
+      ),
+    viewportSetBounds: (bounds) =>
+      host.invoke<void>(Q4_COMMANDS.viewportSetBounds, { bounds }),
     fullscreenStatusGet: () =>
       host.invoke<boolean | null>(Q4_COMMANDS.fullscreenStatusGet, {}),
     fullscreenSet: (enabled) =>

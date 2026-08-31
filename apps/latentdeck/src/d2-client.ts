@@ -13,6 +13,10 @@ import type {
   D2CaptureView,
 } from "./d2-model";
 import type { SpoutConfigure, SpoutStatus } from "./output-model";
+import type {
+  DeckEmbeddedOutputHost,
+  EmbeddedViewportSession,
+} from "./embedded-viewport";
 
 export type StopD2Listener = () => void;
 
@@ -24,7 +28,7 @@ export interface D2HostAdapter {
   ): Promise<StopD2Listener>;
 }
 
-export interface D2Client {
+export interface D2Client extends DeckEmbeddedOutputHost {
   backendStatusGet(): Promise<D2BackendView>;
   backendRediscover(): Promise<D2BackendView>;
   selectDecoder(): Promise<D2BackendView>;
@@ -33,8 +37,6 @@ export interface D2Client {
   transportSet(transport: D2Transport): Promise<D2TransportAck>;
   seedSet(seed: number): Promise<D2SeedAck>;
   restart(): Promise<D2Status>;
-  fullscreenStatusGet(): Promise<boolean | null>;
-  fullscreenSet(enabled: boolean): Promise<boolean>;
   captureSnapshot(): Promise<D2CaptureView | null>;
   captureLiveStart(): Promise<D2CaptureView | null>;
   captureLiveStop(): Promise<D2CaptureView>;
@@ -59,6 +61,8 @@ export const D2_COMMANDS = Object.freeze({
   transportSet: "deck_d2_transport_set",
   seedSet: "deck_d2_seed_set",
   restart: "deck_d2_restart",
+  viewportSessionBegin: "deck_d2_viewport_session_begin",
+  viewportSetBounds: "deck_d2_viewport_set_bounds",
   fullscreenStatusGet: "deck_d2_fullscreen_status_get",
   fullscreenSet: "deck_d2_fullscreen_set",
   captureSnapshot: "deck_d2_capture_snapshot",
@@ -99,6 +103,13 @@ export function createD2Client(host: D2HostAdapter = tauriHost): D2Client {
       host.invoke<D2TransportAck>(D2_COMMANDS.transportSet, { transport }),
     seedSet: (seed) => host.invoke<D2SeedAck>(D2_COMMANDS.seedSet, { seed }),
     restart: () => host.invoke<D2Status>(D2_COMMANDS.restart, {}),
+    viewportSessionBegin: () =>
+      host.invoke<EmbeddedViewportSession>(
+        D2_COMMANDS.viewportSessionBegin,
+        {},
+      ),
+    viewportSetBounds: (bounds) =>
+      host.invoke<void>(D2_COMMANDS.viewportSetBounds, { bounds }),
     fullscreenStatusGet: () =>
       host.invoke<boolean | null>(D2_COMMANDS.fullscreenStatusGet, {}),
     fullscreenSet: (enabled) =>

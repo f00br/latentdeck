@@ -60,6 +60,28 @@ export interface FullscreenStatus {
   active: boolean;
 }
 
+export interface NativeViewportSession {
+  epoch: number;
+}
+
+export interface NativeViewportBounds {
+  epoch: number;
+  revision: number;
+  xCss: number;
+  yCss: number;
+  widthCss: number;
+  heightCss: number;
+  scaleFactor: number;
+  visible: boolean;
+}
+
+export interface ViewportRectLike {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
 export interface PlayerView {
   revision: number;
   phase: PlayerPhase;
@@ -220,6 +242,86 @@ export function fullscreenActionLabel(
   status: FullscreenStatus | null,
 ): "Fullscreen" | "Exit fullscreen" {
   return status?.active === true ? "Exit fullscreen" : "Fullscreen";
+}
+
+export function buildNativeViewportBounds(
+  epoch: number,
+  revision: number,
+  rect: ViewportRectLike,
+  scaleFactor: number,
+  visible: boolean,
+): NativeViewportBounds | null {
+  const values = [rect.left, rect.top, rect.width, rect.height, scaleFactor];
+  if (
+    !Number.isSafeInteger(epoch) ||
+    epoch <= 0 ||
+    !Number.isSafeInteger(revision) ||
+    revision <= 0 ||
+    values.some((value) => !Number.isFinite(value)) ||
+    rect.left < 0 ||
+    rect.top < 0 ||
+    rect.width < 0 ||
+    rect.height < 0 ||
+    scaleFactor < 0.5 ||
+    scaleFactor > 8
+  ) {
+    return null;
+  }
+
+  return {
+    epoch,
+    revision,
+    xCss: rect.left,
+    yCss: rect.top,
+    widthCss: rect.width,
+    heightCss: rect.height,
+    scaleFactor,
+    visible: visible && rect.width >= 1 && rect.height >= 1,
+  };
+}
+
+export function hiddenNativeViewportBounds(
+  epoch: number,
+  revision: number,
+  scaleFactor: number,
+): NativeViewportBounds | null {
+  return buildNativeViewportBounds(
+    epoch,
+    revision,
+    { left: 0, top: 0, width: 0, height: 0 },
+    scaleFactor,
+    false,
+  );
+}
+
+export function nextNativeViewportRevision(current: number): number | null {
+  if (!Number.isSafeInteger(current) || current < 0) return null;
+  const next = current + 1;
+  return Number.isSafeInteger(next) ? next : null;
+}
+
+export function viewportRetryRequiresRemeasure(errorCode: string): boolean {
+  return errorCode === "output.viewport_scale_stale";
+}
+
+export function sameNativeViewportGeometry(
+  left: NativeViewportBounds | null,
+  right: NativeViewportBounds,
+): boolean {
+  if (
+    left === null ||
+    left.epoch !== right.epoch ||
+    left.visible !== right.visible
+  )
+    return false;
+  const epsilon = 0.01;
+  return (
+    Math.abs(left.xCss - right.xCss) < epsilon &&
+    Math.abs(left.yCss - right.yCss) < epsilon &&
+    Math.abs(left.widthCss - right.widthCss) < epsilon &&
+    Math.abs(left.heightCss - right.heightCss) < epsilon &&
+    Math.abs(left.scaleFactor - right.scaleFactor) < epsilon
+  );
 }
 
 export function acceptTrustedSnapshot(

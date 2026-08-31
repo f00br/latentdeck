@@ -7,6 +7,16 @@
     type StopQ4Listener,
   } from "./q4-client";
   import {
+    EMBEDDED_VIEWPORT_RETRY_DELAYS_MS,
+    buildEmbeddedViewportBounds,
+    embeddedViewportFullyInsideClient,
+    hiddenEmbeddedViewportBounds,
+    nextEmbeddedViewportRevision,
+    observeEmbeddedViewportReflow,
+    sameEmbeddedViewportGeometry,
+    type EmbeddedViewportBounds,
+  } from "./embedded-viewport";
+  import {
     DEFAULT_Q4_BACKEND,
     DEFAULT_Q4_CAPTURE,
     DEFAULT_Q4_CONTROLS,
@@ -67,6 +77,7 @@
     stagePresetLibraryLoad,
     transitionPresetLoopDraft,
     type DeckPreset,
+    type PresetCartridgeIdentity,
     type PresetLoopDraft,
     type Q4DeckPreset,
   } from "./preset-model";
@@ -74,6 +85,26 @@
     LatestValueDispatcher,
     sameControlSnapshot,
   } from "./realtime-controls";
+  import {
+    currentlyPlayingReadout,
+    createDeckSourceTruthState,
+    deckSourceResolutionRetryDelay,
+    deckSourceDraftDiffers,
+    describeCurrentlyPlayingSource,
+    markDeckSourceDraftEdited,
+    reconcileDeckSourceTruth,
+    resolvePlayingSourceView,
+    shouldShowNextLoadDraftReadout,
+    type DeckSourceTruthState,
+  } from "./deck-source-truth";
+  import {
+    canSetDeckFullscreen,
+    shouldExitFullscreenForHiddenDeck,
+  } from "./deck-fullscreen-policy";
+  import type { DeckFullscreenCoordinator } from "./deck-fullscreen-coordinator";
+
+  export let active = false;
+  export let fullscreenCoordinator: DeckFullscreenCoordinator;
 
   type HostState = "checking" | "ready" | "pending" | "error";
 
@@ -86,6 +117,14 @@
   let sourceBHash = "";
   let sourceCHash = "";
   let sourceDHash = "";
+  let sourceTruth: DeckSourceTruthState = createDeckSourceTruthState();
+  let loadedSourceViews: (CartridgeView | null)[] = [];
+  let loadedSourceResolutionKey = "";
+  let loadedSourceResolutionRequest = 0;
+  let loadedSourceResolutionRetryTimer: ReturnType<
+    typeof globalThis.setTimeout
+  > | null = null;
+  let loadedSourceResolutionRetryAttempt = 0;
   let seedDraft = "0";
   let hostState: HostState = "checking";
   let hostMessage = "Checking Q4 host contract…";
@@ -117,13 +156,41 @@
   let controlsDispatchRunning = false;
   let controlsDispatchPending = false;
   let fullscreenBusy = false;
+  let fullscreenStatusPending = false;
   let outputFullscreen: boolean | null = null;
+  let fullscreenAutoExitAttempted = false;
+  let faceplateRoot: HTMLElement | null = null;
+  let viewportAnchor: HTMLDivElement | null = null;
+  let viewportFrame: number | null = null;
+  let viewportDesired: EmbeddedViewportBounds | null = null;
+  let viewportApplied: EmbeddedViewportBounds | null = null;
+  let viewportQueued: EmbeddedViewportBounds | null = null;
+  let viewportSyncPending = false;
+  let viewportRetryTimer: ReturnType<typeof globalThis.setTimeout> | null =
+    null;
+  let viewportRetryAttempt = 0;
+  let viewportMounted = false;
+  let viewportEpoch: number | null = null;
+  let viewportClientRevision = 0;
+  let viewportError = "";
 
   let activeBank: CollectionView | undefined;
   let sourceA: CartridgeView | undefined;
   let sourceB: CartridgeView | undefined;
   let sourceC: CartridgeView | undefined;
   let sourceD: CartridgeView | undefined;
+  let sourceHashBySlot: Record<Q4Slot, string> = {
+    A: "",
+    B: "",
+    C: "",
+    D: "",
+  };
+  let sourceViewBySlot: Record<Q4Slot, CartridgeView | undefined> = {
+    A: undefined,
+    B: undefined,
+    C: undefined,
+    D: undefined,
+  };
   let sourceOptions: CartridgeView[] = [];
   let presentCount = 0;
   let captureActive = false;
@@ -152,13 +219,16 @@
   };
   let loadedDuplicateSources = findQ4DuplicateSources(loadedSourceSelection);
   let loadedDistinctSourceCount = 0;
+  let sourceDraftDiffers = false;
   let incompatibleSelectedSlots: Q4Slot[] = [];
   let selectedSourcesCompatible = false;
+  let loadGateReason: string | null = "Preparing Q4…";
   let controlsValidation: string | null = null;
   let triangleXMinimum = 0;
   let triangleXMaximum = 1;
   let triangleYMaximum = 1;
   let captureUi = deckCaptureUiPolicy(capture.mode, capture.state);
+  let viewportReady = false;
   let captureActions = deckCaptureActions(capture.mode, capture.state, {
     loaded: status.loaded,
     hostBusy,
@@ -201,7 +271,7 @@
   );
   $: sourceOptions = mergePresetSourceOptions(
     bankView.cartridges,
-    presetResolvedSources.filter(
+    [...presetResolvedSources, ...loadedSourceViews].filter(
       (source) =>
         source !== null &&
         [sourceAHash, sourceBHash, sourceCHash, sourceDHash].includes(
@@ -213,6 +283,13 @@
   $: sourceB = sourceFor(sourceBHash);
   $: sourceC = sourceFor(sourceCHash);
   $: sourceD = sourceFor(sourceDHash);
+  $: sourceHashBySlot = {
+    A: sourceAHash,
+    B: sourceBHash,
+    C: sourceCHash,
+    D: sourceDHash,
+  };
+  $: sourceViewBySlot = { A: sourceA, B: sourceB, C: sourceC, D: sourceD };
   $: sourceSelection = { sourceAHash, sourceBHash, sourceCHash, sourceDHash };
   $: duplicateSources = findQ4DuplicateSources(sourceSelection);
   $: distinctSourceCount = new Set(
@@ -224,7 +301,7 @@
   $: incompatibleSelectedSlots = Q4_SLOTS.filter(
     (slot) =>
       slot !== rolesDraft.carrier &&
-      (compatibilityReasons.get(sourceHash(slot))?.length ?? 0) > 0,
+      (compatibilityReasons.get(sourceHashBySlot[slot])?.length ?? 0) > 0,
   );
   $: selectedSourcesCompatible =
     compatibilityReady &&
@@ -243,6 +320,10 @@
   $: loadedDistinctSourceCount = new Set(
     Object.values(loadedSourceSelection).filter((hash) => hash !== ""),
   ).size;
+  $: sourceDraftDiffers = deckSourceDraftDiffers(
+    [sourceAHash, sourceBHash, sourceCHash, sourceDHash],
+    sourceTruth.loadedArchiveSha256s,
+  );
   $: presentCount = bankView.cartridges.filter(
     (cartridge) => cartridge.availability === "present",
   ).length;
@@ -279,12 +360,83 @@
     : 0;
   $: spoutControls = spoutControlsFor(spout, spoutBusy || hostBusy);
   $: spoutStateLabel = describeSpout(spout);
+  $: viewportReady =
+    active && viewportEpoch !== null && viewportApplied?.visible === true;
+  $: loadGateReason = hostBusy
+    ? "Q4 host is busy."
+    : captureBusy
+      ? "A capture operation is busy."
+      : !captureUi.load
+        ? "Finish or cancel the active capture before loading Q4."
+        : !viewportReady
+          ? "Embedded Q4 output is not ready. Keep this Deck visible."
+          : backend.state !== "ready"
+            ? (backend.detail ?? "Select a compatible TAEH3 decoder.")
+            : !allSourcesReady
+              ? "Assign a present cartridge to all four NEXT LOAD DRAFT slots."
+              : !compatibilityReady
+                ? "Signal compatibility is still being checked."
+                : incompatibleSelectedSlots.length > 0
+                  ? `Draft donor slots ${incompatibleSelectedSlots.join("/")} are incompatible with carrier ${rolesDraft.carrier}.`
+                  : controlsValidation;
+  $: {
+    const deckActive = active;
+    if (deckActive) fullscreenAutoExitAttempted = false;
+    if (
+      shouldExitFullscreenForHiddenDeck(
+        deckActive,
+        outputFullscreen,
+        fullscreenBusy || fullscreenStatusPending,
+      ) &&
+      !fullscreenAutoExitAttempted
+    ) {
+      fullscreenAutoExitAttempted = true;
+      void setFullscreenState(false);
+    } else if (!deckActive && outputFullscreen !== true) {
+      outputFullscreen = null;
+    }
+  }
+  $: if (viewportMounted) void syncViewportAfterSurfaceChange(active);
 
   onMount(() => {
     let disposed = false;
     const stops: StopQ4Listener[] = [];
     let spoutPoll: ReturnType<typeof setInterval> | undefined;
+    viewportMounted = true;
+    const viewportObserver = new ResizeObserver(scheduleViewportSync);
+    const intersectionObserver = new IntersectionObserver(scheduleViewportSync);
+    if (viewportAnchor !== null) {
+      viewportObserver.observe(viewportAnchor);
+      intersectionObserver.observe(viewportAnchor);
+    }
+    const disconnectViewportReflow =
+      faceplateRoot === null
+        ? undefined
+        : observeEmbeddedViewportReflow(faceplateRoot, scheduleViewportSync);
+    globalThis.addEventListener("resize", scheduleViewportSync);
+    globalThis.addEventListener("scroll", scheduleViewportSync, true);
+    globalThis.visualViewport?.addEventListener("resize", scheduleViewportSync);
+    globalThis.visualViewport?.addEventListener("scroll", scheduleViewportSync);
     void (async () => {
+      try {
+        const session = await q4Client.viewportSessionBegin();
+        if (!disposed) {
+          viewportEpoch = session.epoch;
+          viewportClientRevision = 0;
+          viewportDesired = null;
+          viewportApplied = null;
+          viewportQueued = null;
+          clearViewportRetry(true);
+          await tick();
+          if (!disposed) scheduleViewportSync();
+        }
+      } catch (error) {
+        if (!disposed) {
+          viewportError = describeCommandError(error);
+          markFailure(error);
+        }
+      }
+
       try {
         const listeners = await Promise.all([
           q4Client.onStatus((incoming) => !disposed && applyStatus(incoming)),
@@ -310,12 +462,50 @@
         await refreshCapture();
         await refreshSpout();
         if (!disposed) {
-          spoutPoll = setInterval(() => void refreshSpout(), 250);
+          spoutPoll = setInterval(() => {
+            void refreshSpout();
+          }, 250);
         }
       }
     })();
     return () => {
       disposed = true;
+      viewportMounted = false;
+      viewportObserver.disconnect();
+      intersectionObserver.disconnect();
+      disconnectViewportReflow?.();
+      globalThis.removeEventListener("resize", scheduleViewportSync);
+      globalThis.removeEventListener("scroll", scheduleViewportSync, true);
+      globalThis.visualViewport?.removeEventListener(
+        "resize",
+        scheduleViewportSync,
+      );
+      globalThis.visualViewport?.removeEventListener(
+        "scroll",
+        scheduleViewportSync,
+      );
+      if (viewportFrame !== null) {
+        globalThis.cancelAnimationFrame(viewportFrame);
+        viewportFrame = null;
+      }
+      clearViewportRetry();
+      clearLoadedSourceResolutionRetry();
+      viewportQueued = null;
+      const epoch = viewportEpoch;
+      const revision = nextEmbeddedViewportRevision(viewportClientRevision);
+      if (epoch !== null && revision !== null) {
+        const hidden = hiddenEmbeddedViewportBounds(
+          epoch,
+          revision,
+          globalThis.devicePixelRatio,
+        );
+        if (hidden !== null) {
+          viewportClientRevision = revision;
+          viewportDesired = hidden;
+          void q4Client.viewportSetBounds(hidden).catch(() => undefined);
+        }
+      }
+      viewportEpoch = null;
       if (spoutPoll !== undefined) clearInterval(spoutPoll);
       controlsDispatcher.dispose();
       for (const stop of stops) stop();
@@ -336,7 +526,14 @@
     return sourceOptions.find((cartridge) => cartridge.archiveSha256 === hash);
   }
 
-  function applySourceChoices(): void {
+  function applySourceChoices(explicitDraftChange = false): void {
+    if (
+      !explicitDraftChange &&
+      sourceTruth.loadedArchiveSha256s !== null &&
+      !sourceTruth.draftEditedAfterLoad
+    ) {
+      return;
+    }
     const choices = chooseQ4Sources(
       bankView.cartridges,
       { sourceAHash, sourceBHash, sourceCHash, sourceDHash },
@@ -354,6 +551,7 @@
     sourceBHash = choices.sourceBHash;
     sourceCHash = choices.sourceCHash;
     sourceDHash = choices.sourceDHash;
+    if (explicitDraftChange) markSourceDraftEdited();
   }
 
   async function refreshBank(): Promise<void> {
@@ -393,7 +591,7 @@
       });
       presetResolvedSources = [];
       discardPresetLoopDraft();
-      applySourceChoices();
+      applySourceChoices(true);
       await tick();
       await refreshSpatialCompatibility();
     } catch (error) {
@@ -499,6 +697,7 @@
       bankView = incoming;
       presetResolvedSources = globallyResolved;
       [sourceAHash, sourceBHash, sourceCHash, sourceDHash] = resolution.hashes;
+      markSourceDraftEdited();
       // Protect the complete loaded draft before yielding: worker status events
       // may arrive during compatibility preflight and must not overwrite it.
       controlsDirty = true;
@@ -531,7 +730,7 @@
 
   async function refreshSpatialCompatibility(): Promise<void> {
     const request = ++compatibilityRequest;
-    const referenceArchiveSha256 = sourceHash(rolesDraft.carrier);
+    const referenceArchiveSha256 = sourceHashBySlot[rolesDraft.carrier];
     const candidateArchiveSha256s = sourceOptions.map(
       (source) => source.archiveSha256,
     );
@@ -676,6 +875,13 @@
 
   async function openDeck(): Promise<void> {
     if (presetBusy || captureBusy || !captureUi.load) return;
+    if (!viewportReady) {
+      hostState = "error";
+      hostMessage =
+        "The embedded Q4 video area is not ready. Keep this Deck visible and resize the window if needed.";
+      scheduleViewportSync();
+      return;
+    }
     if (backend.state !== "ready") {
       hostState = "error";
       hostMessage =
@@ -714,7 +920,6 @@
       hostMessage = controlsValidation;
       return;
     }
-    outputFullscreen = null;
     await runHostAction(async () => {
       const pendingLoops = presetLoopDraft?.loops;
       const transport =
@@ -816,7 +1021,7 @@
   async function restart(): Promise<void> {
     if (!captureUi.transport || captureBusy) return;
     await runHostAction(async () => {
-      resetMessage = "Restart requested · waiting for causal reset barrier.";
+      resetMessage = "Restarting playback…";
       applyStatus(await q4Client.restart());
     });
   }
@@ -911,7 +1116,120 @@
     }
   }
 
+  function currentSourceDraft(): readonly [string, string, string, string] {
+    return [sourceAHash, sourceBHash, sourceCHash, sourceDHash];
+  }
+
+  function markSourceDraftEdited(): void {
+    sourceTruth = markDeckSourceDraftEdited(sourceTruth, currentSourceDraft());
+  }
+
+  function reconcileSourceTruth(incoming: Q4Status): void {
+    const loadedHashes =
+      incoming.loaded && incoming.sources !== null
+        ? ([
+            incoming.sources.sourceA.archiveSha256,
+            incoming.sources.sourceB.archiveSha256,
+            incoming.sources.sourceC.archiveSha256,
+            incoming.sources.sourceD.archiveSha256,
+          ] as const)
+        : null;
+    const reconciliation = reconcileDeckSourceTruth(
+      sourceTruth,
+      currentSourceDraft(),
+      loadedHashes,
+    );
+    sourceTruth = reconciliation.state;
+    [sourceAHash, sourceBHash, sourceCHash, sourceDHash] =
+      reconciliation.draftArchiveSha256s;
+    resolveLoadedSourceViews(incoming.loaded ? incoming.sources : null);
+    if (reconciliation.synchronized) {
+      void tick().then(() => refreshSpatialCompatibility());
+    }
+  }
+
+  function clearLoadedSourceResolutionRetry(resetAttempt = false): void {
+    if (loadedSourceResolutionRetryTimer !== null) {
+      globalThis.clearTimeout(loadedSourceResolutionRetryTimer);
+      loadedSourceResolutionRetryTimer = null;
+    }
+    if (resetAttempt) loadedSourceResolutionRetryAttempt = 0;
+  }
+
+  function resolveLoadedSourceViews(
+    sources: Q4LoadedSources | null,
+    retry = false,
+  ): void {
+    if (sources === null) {
+      clearLoadedSourceResolutionRetry(true);
+      loadedSourceResolutionKey = "";
+      loadedSourceResolutionRequest += 1;
+      loadedSourceViews = [];
+      return;
+    }
+    const identities: PresetCartridgeIdentity[] = [
+      sources.sourceA,
+      sources.sourceB,
+      sources.sourceC,
+      sources.sourceD,
+    ].map((source) => ({
+      cartridge_id: source.cartridgeId,
+      archive_sha256: source.archiveSha256,
+    }));
+    const key = JSON.stringify(identities);
+    const identityChanged = key !== loadedSourceResolutionKey;
+    if (!retry && !identityChanged) return;
+    if (identityChanged) clearLoadedSourceResolutionRetry(true);
+    loadedSourceResolutionKey = key;
+    const request = ++loadedSourceResolutionRequest;
+
+    if (identityChanged) {
+      loadedSourceViews = identities.map((identity) => {
+        const candidate = sourceOptions.find(
+          (source) =>
+            source.cartridgeId === identity.cartridge_id &&
+            source.archiveSha256 === identity.archive_sha256,
+        );
+        return candidate ?? null;
+      });
+    }
+    void invoke<(CartridgeView | null)[]>("library_resolve_preset_sources", {
+      identities,
+    })
+      .then((resolved) => {
+        if (
+          request !== loadedSourceResolutionRequest ||
+          key !== loadedSourceResolutionKey
+        )
+          return;
+        loadedSourceViews = resolved;
+        clearLoadedSourceResolutionRetry(true);
+        void tick().then(() => refreshSpatialCompatibility());
+      })
+      .catch(() => {
+        if (
+          request !== loadedSourceResolutionRequest ||
+          key !== loadedSourceResolutionKey
+        )
+          return;
+        // Runtime IDs/hashes remain authoritative even when the friendly
+        // Library lookup is unavailable. Retry only a bounded number of times.
+        const delay = deckSourceResolutionRetryDelay(
+          loadedSourceResolutionRetryAttempt,
+        );
+        if (delay === null) return;
+        loadedSourceResolutionRetryAttempt += 1;
+        clearLoadedSourceResolutionRetry();
+        loadedSourceResolutionRetryTimer = globalThis.setTimeout(() => {
+          loadedSourceResolutionRetryTimer = null;
+          if (key !== loadedSourceResolutionKey) return;
+          resolveLoadedSourceViews(sources, true);
+        }, delay);
+      });
+  }
+
   function applyStatus(incoming: Q4Status): void {
+    reconcileSourceTruth(incoming);
     status = {
       ...incoming,
       controls: copyQ4Controls(incoming.controls),
@@ -925,13 +1243,12 @@
       if (!seedDirty) seedDraft = String(incoming.seed);
       hostState = incoming.pendingReset ? "pending" : "ready";
       hostMessage = incoming.pendingReset
-        ? "Reset barrier pending."
-        : "Q4 worker acknowledged.";
+        ? "Restarting playback…"
+        : "Q4 ready.";
       if (!incoming.pendingReset) resetMessage = "";
     } else {
       hostState = "ready";
       hostMessage = "Q4 worker is not loaded.";
-      outputFullscreen = null;
     }
   }
 
@@ -954,7 +1271,7 @@
     capture = {
       ...capture,
       state: "error",
-      detail: `${incoming.code}: ${incoming.detail}`,
+      detail: incoming.detail,
     };
     applyError(incoming);
   }
@@ -968,7 +1285,7 @@
 
   function applyError(incoming: Q4ErrorEvent): void {
     hostState = "error";
-    hostMessage = `${incoming.code}: ${incoming.detail}`;
+    hostMessage = incoming.detail;
   }
 
   function markFailure(error: unknown): void {
@@ -993,16 +1310,6 @@
     }
   }
 
-  function sourceBySlot(slot: Q4Slot): CartridgeView | undefined {
-    return { A: sourceA, B: sourceB, C: sourceC, D: sourceD }[slot];
-  }
-
-  function sourceHash(slot: Q4Slot): string {
-    return { A: sourceAHash, B: sourceBHash, C: sourceCHash, D: sourceDHash }[
-      slot
-    ];
-  }
-
   async function setSourceHash(slot: Q4Slot, value: string): Promise<void> {
     if (presetBusy) return;
     discardPresetLoopDraft();
@@ -1010,6 +1317,7 @@
     if (slot === "B") sourceBHash = value;
     if (slot === "C") sourceCHash = value;
     if (slot === "D") sourceDHash = value;
+    markSourceDraftEdited();
     if (slot === rolesDraft.carrier) {
       await tick();
       await refreshSpatialCompatibility();
@@ -1046,32 +1354,205 @@
   }
 
   async function refreshFullscreenStatus(): Promise<void> {
-    if (!status.loaded) {
-      outputFullscreen = null;
+    if (!active) {
+      if (outputFullscreen !== true) outputFullscreen = null;
       return;
     }
-    if (fullscreenBusy) return;
+    if (fullscreenBusy || fullscreenStatusPending) return;
+    fullscreenStatusPending = true;
+    try {
+      outputFullscreen = await fullscreenCoordinator.run(() =>
+        q4Client.fullscreenStatusGet(),
+      );
+    } catch (error) {
+      // A status failure can mean a partially mutated host with retained
+      // recovery state. Keep an Exit route visible instead of assuming the
+      // HWND is safely windowed.
+      if (outputFullscreen === null) outputFullscreen = true;
+      markFailure(error);
+    } finally {
+      fullscreenStatusPending = false;
+    }
+  }
+
+  async function toggleFullscreen(): Promise<void> {
+    if (outputFullscreen === null) return;
+    await setFullscreenState(!outputFullscreen);
+  }
+
+  async function setFullscreenState(enabled: boolean): Promise<void> {
+    if (
+      !canSetDeckFullscreen(
+        {
+          active,
+          runtimeLoaded: status.loaded,
+          viewportReady,
+          busy: fullscreenBusy || fullscreenStatusPending,
+          current: outputFullscreen,
+        },
+        enabled,
+      )
+    ) {
+      return;
+    }
+    const previous = outputFullscreen;
     fullscreenBusy = true;
     try {
-      outputFullscreen = await q4Client.fullscreenStatusGet();
+      outputFullscreen = await fullscreenCoordinator.run(() =>
+        q4Client.fullscreenSet(enabled),
+      );
+      await tick();
+      scheduleViewportSync();
     } catch (error) {
-      outputFullscreen = null;
       markFailure(error);
+      try {
+        outputFullscreen = await fullscreenCoordinator.run(() =>
+          q4Client.fullscreenStatusGet(),
+        );
+      } catch {
+        outputFullscreen = enabled || previous === true;
+      }
     } finally {
       fullscreenBusy = false;
     }
   }
 
-  async function toggleFullscreen(): Promise<void> {
-    if (!status.loaded || fullscreenBusy || outputFullscreen === null) return;
-    fullscreenBusy = true;
+  function handleWindowKeydown(event: KeyboardEvent): void {
+    if (
+      event.key !== "Escape" ||
+      outputFullscreen !== true ||
+      fullscreenBusy ||
+      fullscreenStatusPending
+    )
+      return;
+    event.preventDefault();
+    void setFullscreenState(false);
+  }
+
+  function scheduleViewportSync(): void {
+    if (!viewportMounted || viewportFrame !== null) return;
+    viewportFrame = globalThis.requestAnimationFrame(() => {
+      viewportFrame = null;
+      measureViewport();
+    });
+  }
+
+  async function syncViewportAfterSurfaceChange(
+    deckActive: boolean,
+  ): Promise<void> {
+    await tick();
+    scheduleViewportSync();
+    if (deckActive) await refreshFullscreenStatus();
+  }
+
+  function clearViewportRetry(resetAttempt = false): void {
+    if (viewportRetryTimer !== null) {
+      globalThis.clearTimeout(viewportRetryTimer);
+      viewportRetryTimer = null;
+    }
+    if (resetAttempt) viewportRetryAttempt = 0;
+  }
+
+  function scheduleViewportRetry(
+    bounds: EmbeddedViewportBounds,
+    error: unknown,
+  ): void {
+    if (
+      !viewportMounted ||
+      viewportDesired?.epoch !== bounds.epoch ||
+      viewportDesired?.revision !== bounds.revision ||
+      sameEmbeddedViewportGeometry(viewportApplied, bounds)
+    ) {
+      return;
+    }
+    viewportError = describeCommandError(error);
+    if (viewportRetryTimer !== null) return;
+    const delay = EMBEDDED_VIEWPORT_RETRY_DELAYS_MS[viewportRetryAttempt];
+    if (delay === undefined) return;
+    viewportRetryAttempt += 1;
+    viewportRetryTimer = globalThis.setTimeout(() => {
+      viewportRetryTimer = null;
+      if (
+        !viewportMounted ||
+        viewportDesired?.epoch !== bounds.epoch ||
+        viewportDesired?.revision !== bounds.revision ||
+        sameEmbeddedViewportGeometry(viewportApplied, bounds)
+      ) {
+        return;
+      }
+      viewportQueued = bounds;
+      void flushViewportSync();
+    }, delay);
+  }
+
+  function measureViewport(): void {
+    const epoch = viewportEpoch;
+    const anchor = viewportAnchor;
+    if (epoch === null || anchor === null || !anchor.isConnected) return;
+    const rect = anchor.getBoundingClientRect();
+    const style = globalThis.getComputedStyle(anchor);
+    const clientWidth = document.documentElement.clientWidth;
+    const clientHeight = document.documentElement.clientHeight;
+    const scaleFactor = globalThis.devicePixelRatio;
+    const fullyInsideClient = embeddedViewportFullyInsideClient(
+      rect,
+      clientWidth,
+      clientHeight,
+      scaleFactor,
+    );
+    const visible =
+      active &&
+      !document.hidden &&
+      anchor.offsetParent !== null &&
+      style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      style.opacity !== "0" &&
+      fullyInsideClient;
+    const revision = nextEmbeddedViewportRevision(viewportClientRevision);
+    if (revision === null) {
+      viewportError =
+        "LatentDeck exhausted the embedded Q4 video-area revision counter.";
+      return;
+    }
+    const bounds = visible
+      ? buildEmbeddedViewportBounds(epoch, revision, rect, scaleFactor, true)
+      : hiddenEmbeddedViewportBounds(epoch, revision, scaleFactor);
+    if (bounds === null) {
+      viewportError =
+        "LatentDeck could not measure a safe embedded Q4 video area.";
+      return;
+    }
+    if (sameEmbeddedViewportGeometry(viewportDesired, bounds)) return;
+    viewportClientRevision = revision;
+    viewportDesired = bounds;
+    clearViewportRetry(true);
+    viewportQueued = bounds;
+    void flushViewportSync();
+  }
+
+  async function flushViewportSync(): Promise<void> {
+    if (viewportSyncPending || viewportQueued === null) return;
+    const bounds = viewportQueued;
+    viewportQueued = null;
+    viewportSyncPending = true;
     try {
-      outputFullscreen = await q4Client.fullscreenSet(!outputFullscreen);
+      await q4Client.viewportSetBounds(bounds);
+      viewportApplied = bounds;
+      if (
+        viewportDesired?.epoch === bounds.epoch &&
+        viewportDesired.revision === bounds.revision
+      ) {
+        clearViewportRetry(true);
+        viewportError = "";
+      }
     } catch (error) {
-      outputFullscreen = null;
-      markFailure(error);
+      // A monitor-DPI transition can invalidate the in-flight scale. Re-read
+      // the DOM immediately; the bounded retry remains for transient host IO.
+      scheduleViewportSync();
+      scheduleViewportRetry(bounds, error);
     } finally {
-      fullscreenBusy = false;
+      viewportSyncPending = false;
+      if (viewportQueued !== null) void flushViewportSync();
     }
   }
 
@@ -1084,10 +1565,11 @@
       "Preset loop draft discarded after a manual change; current Deck loop state will be used.";
   }
 
-  function duplicateSlotsLabel(slot: Q4Slot): string {
-    const duplicate = duplicateSources.find((group) =>
-      group.slots.includes(slot),
-    );
+  function duplicateSlotsLabel(
+    duplicates: ReturnType<typeof findQ4DuplicateSources>,
+    slot: Q4Slot,
+  ): string {
+    const duplicate = duplicates.find((group) => group.slots.includes(slot));
     return duplicate === undefined
       ? ""
       : `REUSED ARCHIVE · SLOTS ${duplicate.slots.join(" / ")}`;
@@ -1095,13 +1577,19 @@
 
   function compatibilityReasonsFor(
     cartridge: CartridgeView,
+    reasonsByHash: ReadonlyMap<string, readonly string[]>,
   ): readonly string[] {
-    return compatibilityReasons.get(cartridge.archiveSha256) ?? [];
+    return reasonsByHash.get(cartridge.archiveSha256) ?? [];
   }
 
-  function compatibilityLabel(slot: Q4Slot, cartridge: CartridgeView): string {
-    const reasons = compatibilityReasonsFor(cartridge);
-    return slot === rolesDraft.carrier || reasons.length === 0
+  function compatibilityLabel(
+    slot: Q4Slot,
+    cartridge: CartridgeView,
+    carrier: Q4Slot,
+    reasonsByHash: ReadonlyMap<string, readonly string[]>,
+  ): string {
+    const reasons = compatibilityReasonsFor(cartridge, reasonsByHash);
+    return slot === carrier || reasons.length === 0
       ? cartridgeLabel(cartridge)
       : `${cartridgeLabel(cartridge)} · INCOMPATIBLE: ${reasons.join("; ")}`;
   }
@@ -1109,22 +1597,26 @@
   function isIncompatibleCandidate(
     slot: Q4Slot,
     cartridge: CartridgeView,
+    carrier: Q4Slot,
+    ready: boolean,
+    reasonsByHash: ReadonlyMap<string, readonly string[]>,
   ): boolean {
     return (
-      slot !== rolesDraft.carrier &&
-      (!compatibilityReady || compatibilityReasonsFor(cartridge).length > 0)
+      slot !== carrier &&
+      (!ready || compatibilityReasonsFor(cartridge, reasonsByHash).length > 0)
     );
   }
 
   function loadedSourceBySlot(
+    sources: Q4LoadedSources | null,
     slot: Q4Slot,
   ): Q4LoadedSources[keyof Q4LoadedSources] | undefined {
-    if (status.sources === null) return undefined;
+    if (sources === null) return undefined;
     return {
-      A: status.sources.sourceA,
-      B: status.sources.sourceB,
-      C: status.sources.sourceC,
-      D: status.sources.sourceD,
+      A: sources.sourceA,
+      B: sources.sourceB,
+      C: sources.sourceC,
+      D: sources.sourceD,
     }[slot];
   }
 
@@ -1136,7 +1628,11 @@
   }
 </script>
 
+<svelte:window onkeydown={handleWindowKeydown} />
+
 <section
+  bind:this={faceplateRoot}
+  class:output-fullscreen={active && outputFullscreen === true}
   class="q4-faceplate"
   aria-labelledby="q4-title"
   aria-busy={presetBusy || captureBusy}
@@ -1153,7 +1649,7 @@
       class="host-meter"
     >
       <span></span><strong>{hostState}</strong><small
-        >SEQ {status.streamSequence}</small
+        >{status.loaded ? "STREAM ACTIVE" : "NO STREAM"}</small
       >
     </div>
   </header>
@@ -1167,6 +1663,36 @@
     >
   </div>
   {#if resetMessage}<p class="reset-line">{resetMessage}</p>{/if}
+
+  <section class="q4-output-monitor" aria-label="Embedded Q4 native output">
+    <header>
+      <div>
+        <span>PROGRAM MONITOR</span>
+        <strong>POST-OPERATOR NATIVE OUTPUT</strong>
+      </div>
+      <small
+        >{spout === null || spout.width === 0 || spout.height === 0
+          ? "WAITING FOR Q4"
+          : `${spout.width}×${spout.height} INTRINSIC`}</small
+      >
+    </header>
+    <div
+      bind:this={viewportAnchor}
+      class:active={status.loaded && viewportReady}
+      class="native-output-anchor"
+      data-native-viewport="q4"
+    >
+      {#if !status.loaded}
+        <div class="output-placeholder">
+          <strong>Q4 OUTPUT STANDBY</strong>
+          <small>Load four compatible cartridges to start native video.</small>
+        </div>
+      {/if}
+    </div>
+    {#if viewportError}<p class="viewport-error" role="status">
+        {viewportError}
+      </p>{/if}
+  </section>
 
   <section class="codec-bank">
     <div>
@@ -1254,7 +1780,16 @@
       class:active={outputFullscreen === true}
       aria-pressed={outputFullscreen ?? false}
       type="button"
-      disabled={!status.loaded || fullscreenBusy || outputFullscreen === null}
+      disabled={!canSetDeckFullscreen(
+        {
+          active,
+          runtimeLoaded: status.loaded,
+          viewportReady,
+          busy: fullscreenBusy || fullscreenStatusPending,
+          current: outputFullscreen,
+        },
+        !(outputFullscreen ?? false),
+      )}
       onclick={() => void toggleFullscreen()}
       >{fullscreenBusy
         ? "Switching…"
@@ -1300,9 +1835,9 @@
       slots.
     </p>
     <p>
-      Realtime acceptance target: 448×800 at 24 fps. Other intrinsic grids
-      remain playable but are not yet Deck benchmark-certified and are never
-      downscaled implicitly.
+      Portrait and landscape sources are supported at their intrinsic geometry.
+      Direct synthesis requires the same compatible spatial grid; LatentDeck
+      never performs a hidden resize or re-encode.
     </p>
     <div class="preset-controls">
       <span>DECK PRESET · JSON</span>
@@ -1332,15 +1867,42 @@
   {#if bankError}<p class="bank-error">{bankError}</p>{/if}
 
   <div class="slot-grid">
+    {#if status.loaded && sourceDraftDiffers}<p
+        class="next-load-notice"
+        role="status"
+      >
+        NEXT LOAD DRAFT differs from CURRENTLY PLAYING. Runtime playback is
+        unchanged until Load Q4 succeeds.
+      </p>{/if}
     {#each Q4_SLOTS as slot (slot)}
-      {@const source = sourceBySlot(slot)}
-      {@const loadedSource = loadedSourceBySlot(slot)}
+      {@const source = sourceViewBySlot[slot]}
+      {@const loadedSource = loadedSourceBySlot(status.sources, slot)}
+      {@const loadedSourceView =
+        loadedSource === undefined
+          ? undefined
+          : resolvePlayingSourceView(loadedSource, [
+              ...sourceOptions,
+              ...loadedSourceViews,
+            ])}
+      {@const runtimeReadout =
+        loadedSource === undefined
+          ? null
+          : currentlyPlayingReadout(loadedSource, loadedSourceView)}
+      {@const showDraftReadout =
+        status.loaded &&
+        (source === undefined ||
+          (loadedSource !== undefined &&
+            shouldShowNextLoadDraftReadout(
+              loadedSource,
+              sourceHashBySlot[slot],
+              source,
+            )))}
       <article class:carrier={rolesDraft.carrier === slot} class="slot-module">
         <header>
           <span>{slot}</span>
           <div>
             <p>
-              {rolesDraft.carrier === slot
+              NEXT LOAD DRAFT · {rolesDraft.carrier === slot
                 ? "STRUCTURAL CARRIER"
                 : "SOURCE SLOT"}
             </p>
@@ -1348,7 +1910,8 @@
           </div>
         </header>
         <select
-          value={sourceHash(slot)}
+          aria-label={`Next load draft cartridge ${slot}`}
+          value={sourceHashBySlot[slot]}
           onchange={(event) =>
             void setSourceHash(
               slot,
@@ -1360,42 +1923,95 @@
             <option
               value={cartridge.archiveSha256}
               disabled={cartridge.availability !== "present" ||
-                isIncompatibleCandidate(slot, cartridge)}
-              >{compatibilityLabel(slot, cartridge)}</option
+                isIncompatibleCandidate(
+                  slot,
+                  cartridge,
+                  rolesDraft.carrier,
+                  compatibilityReady,
+                  compatibilityReasons,
+                )}
+              >{compatibilityLabel(
+                slot,
+                cartridge,
+                rolesDraft.carrier,
+                compatibilityReasons,
+              )}</option
             >
           {/each}
         </select>
-        {#if slot !== rolesDraft.carrier && (compatibilityReasons.get(sourceHash(slot))?.length ?? 0) > 0}<p
-            class="inline-error"
+        {#if slot !== rolesDraft.carrier && (compatibilityReasons.get(sourceHashBySlot[slot])?.length ?? 0) > 0}<p
+            class="draft-compatibility-note"
             role="status"
           >
-            Slot {slot} cannot mix with carrier {rolesDraft.carrier}: {(
-              compatibilityReasons.get(sourceHash(slot)) ?? []
-            ).join("; ")}. Use an explicit Toolkit Align/Crop node.
+            NEXT LOAD DRAFT ONLY · Slot {slot} cannot mix with draft carrier {rolesDraft.carrier}:
+            {(compatibilityReasons.get(sourceHashBySlot[slot]) ?? []).join(
+              "; ",
+            )}. The currently playing stream is unchanged. Use an explicit
+            Toolkit Align/Crop node.
           </p>{/if}
-        {#if duplicateSlotsLabel(slot) !== ""}<p class="source-reuse-label">
-            {duplicateSlotsLabel(slot)}
+        {#if duplicateSlotsLabel(duplicateSources, slot) !== ""}<p
+            class="source-reuse-label"
+          >
+            {duplicateSlotsLabel(duplicateSources, slot)}
           </p>{/if}
         {#if status.loaded && loadedSource !== undefined}<p
             class="loaded-source-label"
+            title={loadedSource.archiveSha256}
           >
-            LOADED {shortHash(loadedSource.archiveSha256)} · {loadedSource.latentSlotCount}
-            LATENT SLOTS{loadedSource.archiveSha256 !== sourceHash(slot)
-              ? " · DRAFT DIFFERS"
-              : ""}
+            CURRENTLY PLAYING · {describeCurrentlyPlayingSource(
+              loadedSource,
+              loadedSourceView,
+            )}
           </p>{/if}
-        <div class="source-readout">
-          <strong
-            >{source === undefined
-              ? "—"
-              : `${source.decodedWidth}×${source.decodedHeight}`}</strong
-          ><small>{source?.decodedFrameCount ?? 0} frames</small>
-          {#if source !== undefined}<small
-              >{describeIntrinsicFormat(source).aspectLabel} · LATENT {describeIntrinsicFormat(
-                source,
-              ).latentGrid ?? "N/A"}</small
-            >{/if}
-        </div>
+        {#if status.loaded}<div class="source-readout runtime-source-readout">
+            <span>CURRENTLY PLAYING</span>
+            <strong
+              >{runtimeReadout?.geometryLabel ??
+                "RUNTIME STATUS PENDING"}</strong
+            >
+            <small
+              >{runtimeReadout?.frameLabel ?? "SOURCE IDENTITY PENDING"}</small
+            >
+            {#if runtimeReadout !== null}<small
+                >{runtimeReadout.codecLabel} · {runtimeReadout.latentLabel}</small
+              >{/if}
+          </div>{:else}<div class="source-readout draft-primary-readout">
+            <span>NEXT LOAD DRAFT</span>
+            <strong
+              >{source === undefined
+                ? "NO DRAFT SOURCE"
+                : `${source.decodedWidth}×${source.decodedHeight}`}</strong
+            >
+            <small
+              >{source === undefined
+                ? "SELECT A CARTRIDGE"
+                : `${source.decodedFrameCount} DECODED FRAMES`}</small
+            >
+            {#if source !== undefined}<small
+                >{describeIntrinsicFormat(source).aspectLabel} · LATENT {describeIntrinsicFormat(
+                  source,
+                ).latentGrid ?? "N/A"}</small
+              >{/if}
+          </div>{/if}
+        {#if showDraftReadout}<div class="draft-source-readout">
+            <span
+              >NEXT LOAD DRAFT · {source === undefined
+                ? "UNRESOLVED"
+                : "DIFFERS"}</span
+            >
+            <strong
+              >{source === undefined
+                ? "DRAFT UNRESOLVED"
+                : `${source.decodedWidth}×${source.decodedHeight}`}</strong
+            >
+            <small
+              >{source === undefined
+                ? "CURRENTLY PLAYING IS UNCHANGED"
+                : `${source.decodedFrameCount} DECODED FRAMES · ${
+                    describeIntrinsicFormat(source).aspectLabel
+                  }`}</small
+            >
+          </div>{/if}
         <div class="transport">
           <button
             type="button"
@@ -1747,14 +2363,16 @@
         class="load"
         type="button"
         onclick={() => void openDeck()}
-        disabled={hostBusy ||
-          captureBusy ||
-          !captureUi.load ||
-          backend.state !== "ready" ||
-          !allSourcesReady ||
-          !selectedSourcesCompatible ||
-          controlsValidation !== null}>Load Q4</button
+        title={loadGateReason ?? "Load the current four-slot draft."}
+        data-viewport-ready={viewportReady}
+        data-backend-state={backend.state}
+        data-all-sources-ready={allSourcesReady}
+        data-sources-compatible={selectedSourcesCompatible}
+        disabled={loadGateReason !== null}>Load Q4</button
       >
+      <small class:ready={loadGateReason === null} class="load-gate">
+        {loadGateReason ?? "READY · Load the four-slot draft"}
+      </small>
     </div>
     <div>
       <span>DETERMINISTIC SEED</span><input
@@ -1825,6 +2443,21 @@
       linear-gradient(135deg, rgb(255 255 255 / 3%), transparent 30%), #11121a;
     color: var(--ink);
     box-shadow: 0 16px 38px rgb(0 0 0 / 34%);
+  }
+  .q4-faceplate.output-fullscreen {
+    position: fixed;
+    z-index: 1000;
+    inset: 0;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr);
+    min-height: 0;
+    margin: 0;
+    border: 0;
+    background: #000;
+    box-shadow: none;
+  }
+  .q4-faceplate.output-fullscreen > :not(.q4-output-monitor) {
+    display: none;
   }
   .q4-header,
   .routing-panel > header,
@@ -1929,6 +2562,89 @@
   }
   .reset-line {
     color: #d7c27d;
+  }
+  .q4-output-monitor {
+    position: sticky;
+    z-index: 20;
+    top: 0;
+    display: grid;
+    grid-template-rows: auto minmax(300px, 52vh) auto;
+    min-width: 0;
+    border-bottom: 1px solid var(--line);
+    background: #05060a;
+  }
+  .q4-output-monitor > header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    min-height: 42px;
+    padding: 7px 12px;
+    border-bottom: 1px solid #343548;
+    background: linear-gradient(90deg, #171a27, #101119);
+  }
+  .q4-output-monitor > header div {
+    display: grid;
+    gap: 2px;
+  }
+  .q4-output-monitor > header span,
+  .q4-output-monitor > header small {
+    color: #7f8799;
+    font:
+      700 0.54rem ui-monospace,
+      monospace;
+    letter-spacing: 0.08em;
+  }
+  .q4-output-monitor > header strong {
+    color: #cbd8e8;
+    font:
+      700 0.68rem ui-monospace,
+      monospace;
+  }
+  .native-output-anchor {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    background:
+      linear-gradient(135deg, rgb(131 169 255 / 5%), transparent 45%), #000;
+    box-shadow: inset 0 0 0 1px #252738;
+  }
+  .native-output-anchor.active {
+    background: #000;
+  }
+  .output-placeholder {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-content: center;
+    gap: 6px;
+    color: #777b91;
+    text-align: center;
+  }
+  .output-placeholder strong,
+  .output-placeholder small {
+    font-family: ui-monospace, monospace;
+    letter-spacing: 0.08em;
+  }
+  .viewport-error {
+    min-height: 26px;
+    margin: 0;
+    padding: 5px 12px;
+    border-top: 1px solid #6f3740;
+    background: #1b0e12;
+    color: #ec9aa2;
+    font-size: 0.62rem;
+  }
+  .output-fullscreen .q4-output-monitor {
+    position: static;
+    grid-template-rows: minmax(0, 1fr);
+    height: 100%;
+    border: 0;
+  }
+  .output-fullscreen .q4-output-monitor > header,
+  .output-fullscreen .viewport-error {
+    display: none;
   }
   .codec-bank {
     display: grid;
@@ -2077,6 +2793,26 @@
     gap: 7px;
     padding: 7px;
   }
+  .next-load-notice {
+    grid-column: 1 / -1;
+    margin: 0;
+    border: 1px solid #8b6d35;
+    padding: 7px 10px;
+    background: #211b11;
+    color: #d9c18a;
+    font-size: 0.62rem;
+    font-weight: 750;
+    letter-spacing: 0.04em;
+  }
+  .draft-compatibility-note {
+    min-height: 30px;
+    margin: 0;
+    border-left: 2px solid var(--amber);
+    padding: 6px 8px;
+    background: #211b11;
+    color: #d9c18a;
+    font-size: 0.61rem;
+  }
   .slot-module {
     display: flex;
     min-width: 0;
@@ -2130,8 +2866,42 @@
       500 1rem ui-monospace,
       monospace;
   }
+  .source-readout > span {
+    color: var(--blue);
+    font:
+      800 0.54rem ui-monospace,
+      monospace;
+    letter-spacing: 0.08em;
+  }
   .source-readout small {
     color: #777a91;
+  }
+  .runtime-source-readout {
+    border-color: #536b9c;
+    background: #0b101b;
+  }
+  .draft-source-readout {
+    display: grid;
+    gap: 3px;
+    border: 1px dashed #6d5732;
+    padding: 7px 8px;
+    background: #17140e;
+    color: #bda974;
+    font-family: ui-monospace, monospace;
+  }
+  .draft-source-readout span {
+    color: var(--amber);
+    font-size: 0.54rem;
+    font-weight: 800;
+    letter-spacing: 0.07em;
+  }
+  .draft-source-readout strong {
+    color: #d1c198;
+    font-size: 0.72rem;
+  }
+  .draft-source-readout small {
+    color: #8e8268;
+    font-size: 0.55rem;
   }
   .transport {
     display: grid;
@@ -2332,6 +3102,14 @@
   .master-strip .load {
     border-color: #779eff;
     background: linear-gradient(#38558d, #28385d);
+  }
+  .load-gate {
+    color: #c99d7d;
+    font-size: 0.56rem;
+    line-height: 1.25;
+  }
+  .load-gate.ready {
+    color: #8bbf9d;
   }
   .capture {
     grid-template-columns: 1fr 1fr;

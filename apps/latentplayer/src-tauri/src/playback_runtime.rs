@@ -19,9 +19,9 @@ use latentdeck_core::{
         Sha256Token,
     },
 };
-use tauri::AppHandle;
+use tauri::{AppHandle, WebviewWindow};
 
-use crate::native_output::ResizeOutcome;
+use crate::native_output::{PlayerViewport, ResizeOutcome};
 use latentdeck_native_output::{NativeDeviceIdentity, NativeSpoutStatus};
 
 /// Owned, trusted inputs copied from [`PlayerCoordinator::launch_inputs`].
@@ -313,7 +313,7 @@ mod windows {
     use serde::Deserialize;
     use tauri::async_runtime::JoinHandle;
     use tokio::{
-        sync::{mpsc, oneshot},
+        sync::{mpsc, oneshot, watch},
         time::{Instant, MissedTickBehavior, sleep_until, timeout},
     };
 
@@ -321,20 +321,27 @@ mod windows {
         AppHandle, Arc, CartridgeSummary, Duration, Mutex, NativeDeviceIdentity, NativeSpoutStatus,
         PlaybackDiagnosticIdentity, PlaybackLaunchConfig, PlaybackRuntimeDiagnostics,
         PlaybackRuntimeError, PlayerCoordinator, PlayerDiagnosticSession, PlayerView,
-        ResizeOutcome, ValidatedCodecPack, diagnostic_gpu_identity, diagnostic_token,
+        PlayerViewport, ResizeOutcome, ValidatedCodecPack, WebviewWindow, diagnostic_gpu_identity,
+        diagnostic_token,
     };
-    use crate::native_output::{
-        NativeOutput, NativeOutputError, PresentOutcome, native_output_config,
-    };
+    use crate::native_output::{NativeOutput, native_output_config};
 
     const CHANNEL_CAPACITY: usize = 8;
     const ACTOR_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
-    const RESET_REPLY_TIMEOUT: Duration = Duration::from_secs(120);
     const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
     const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
     const SCHEDULER_POLL: Duration = Duration::from_millis(2);
     const DIAGNOSTIC_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+    // One replacement may consume the bounded worker probe plus six bounded
+    // configure/load/bind/prime round trips. User commands already admitted to
+    // the WorkerActor must not time out while that replacement is in progress:
+    // a timed-out Reset would remain queued and could apply later as stale UI
+    // intent. Diagnostics share the same actor-ordering contract.
+    const ROTATION_AWARE_REPLY_TIMEOUT: Duration = Duration::from_secs(900);
     const MAX_TIMING_SAMPLES: usize = 4_096;
+    // Rotate before entering this authenticated-envelope reserve so the old
+    // worker can still acknowledge an orderly shutdown.
+    const SESSION_SHUTDOWN_MESSAGE_RESERVE: usize = 1_024;
     const INITIAL_GENERATION: u64 = 1;
     const SLOT_ID: &str = "player.a";
     const CODEC_FAMILY: &str = "minimax_h3";
@@ -350,11 +357,14 @@ mod windows {
         loop_enabled: Arc<AtomicBool>,
         at_end: Arc<AtomicBool>,
         reset_in_flight: Arc<AtomicBool>,
+        session_rotating: Arc<AtomicBool>,
         closed: Arc<AtomicBool>,
         started_at: Instant,
         diagnostic_identity: PlaybackDiagnosticIdentity,
-        _worker_task: JoinHandle<()>,
-        _presenter_task: JoinHandle<()>,
+        worker_cleanup_complete: watch::Receiver<bool>,
+        presenter_cleanup_complete: watch::Receiver<bool>,
+        worker_task: JoinHandle<()>,
+        presenter_task: JoinHandle<()>,
     }
 
     impl PlaybackRuntime {
@@ -365,10 +375,13 @@ mod windows {
         ///
         /// Returns a stable, path-free error after terminating any worker that
         /// did start successfully.
+        #[allow(clippy::too_many_lines)] // Closed startup ownership and cleanup sequence.
         pub async fn start(
             app: AppHandle,
+            parent: WebviewWindow,
             player: Arc<Mutex<PlayerCoordinator>>,
             config: PlaybackLaunchConfig,
+            viewport: PlayerViewport,
         ) -> Result<Self, PlaybackRuntimeError> {
             let diagnostic_identity = PlaybackDiagnosticIdentity::from_config(&config)?;
             let launch = ValidatedWorkerLaunch::from_codec_pack(&config.codec_pack);
@@ -384,7 +397,8 @@ mod windows {
             })?;
             let mut client = WorkerClient::new(session);
 
-            let initialized = initialize_session(&app, &config, &mut client).await;
+            let initialized =
+                initialize_session(&app, &parent, viewport, &config, &mut client).await;
             let InitializedSession {
                 schedule,
                 slot,
@@ -411,10 +425,16 @@ mod windows {
             let loop_enabled = Arc::new(AtomicBool::new(view.loop_enabled));
             let at_end = Arc::new(AtomicBool::new(false));
             let reset_in_flight = Arc::new(AtomicBool::new(false));
+            let session_rotating = Arc::new(AtomicBool::new(false));
             let closed = Arc::new(AtomicBool::new(false));
             let (worker_tx, worker_rx) = mpsc::channel(CHANNEL_CAPACITY);
             let (presenter_tx, presenter_rx) = mpsc::channel(CHANNEL_CAPACITY);
             let spout_diagnostics = SpoutDiagnosticHistory::from_status(&output.spout_status());
+            // This retained, already-validated launch config is the sole
+            // authority for every replacement session. It is never rebuilt
+            // from UI state or a worker acknowledgement.
+            let session_config = Box::new(config.clone());
+            let session_identity = Box::new(PlaybackSessionIdentity::from_config(&config));
 
             let presenter = PresenterActor {
                 output,
@@ -428,7 +448,7 @@ mod windows {
                 closed: Arc::clone(&closed),
                 generation: INITIAL_GENERATION,
                 frame_count: config.cartridge.frame_count,
-                presented_frames: 0,
+                consumed_frames: 0,
                 pending_frame: None,
                 clock: FrameClock::new(
                     config.cartridge.frame_rate_numerator,
@@ -439,6 +459,7 @@ mod windows {
                 last_presented_at: None,
                 frame_intervals: TimingSamples::new(MAX_TIMING_SAMPLES),
                 spout_diagnostics,
+                viewport_revision: viewport.revision(),
             };
             let worker = WorkerActor {
                 client,
@@ -450,11 +471,22 @@ mod windows {
                 playing: Arc::clone(&playing),
                 at_end: Arc::clone(&at_end),
                 reset_in_flight: Arc::clone(&reset_in_flight),
+                session_rotating: Arc::clone(&session_rotating),
                 closed: Arc::clone(&closed),
+                session_config,
+                session_identity,
             };
 
-            let presenter_task = tauri::async_runtime::spawn(presenter.run(presenter_rx));
-            let worker_task = tauri::async_runtime::spawn(worker.run(worker_rx));
+            let (presenter_cleanup_sender, presenter_cleanup_complete) = watch::channel(false);
+            let presenter_task = tauri::async_runtime::spawn(async move {
+                presenter.run(presenter_rx).await;
+                presenter_cleanup_sender.send_replace(true);
+            });
+            let (worker_cleanup_sender, worker_cleanup_complete) = watch::channel(false);
+            let worker_task = tauri::async_runtime::spawn(async move {
+                worker.run(worker_rx).await;
+                worker_cleanup_sender.send_replace(true);
+            });
 
             Ok(Self {
                 worker_tx,
@@ -464,11 +496,14 @@ mod windows {
                 loop_enabled,
                 at_end,
                 reset_in_flight,
+                session_rotating,
                 closed,
                 started_at: Instant::now(),
                 diagnostic_identity,
-                _worker_task: worker_task,
-                _presenter_task: presenter_task,
+                worker_cleanup_complete,
+                presenter_cleanup_complete,
+                worker_task,
+                presenter_task,
             })
         }
 
@@ -478,12 +513,18 @@ mod windows {
             self.ensure_open()?;
             if self.at_end.load(Ordering::Acquire) {
                 return self
-                    .request_reset(ResetReason::Restart, true, RESET_REPLY_TIMEOUT)
+                    .request_reset(ResetReason::Restart, true, ROTATION_AWARE_REPLY_TIMEOUT)
                     .await;
             }
 
             let view = with_player(&self.player, |player| player.set_playing(true))?;
             self.playing.store(true, Ordering::Release);
+            // A rotating WorkerActor owns the presenter quiesce/ring-swap
+            // barrier. Preserve the new play intent and let that actor issue
+            // the single Resume after the fresh ring is installed.
+            if self.session_rotating.load(Ordering::Acquire) {
+                return Ok(view);
+            }
             if let Err(error) = request_presenter(
                 &self.presenter_tx,
                 PresenterRequest::Resume,
@@ -503,7 +544,16 @@ mod windows {
         pub async fn pause(&self) -> Result<PlayerView, PlaybackRuntimeError> {
             self.ensure_open()?;
             self.playing.store(false, Ordering::Release);
-            let view = with_player(&self.player, |player| player.set_playing(false))?;
+            let view = if self.session_rotating.load(Ordering::Acquire)
+                && player_view(&self.player)?.phase != latentdeck_core::player::PlayerPhase::Playing
+            {
+                player_view(&self.player)?
+            } else {
+                with_player(&self.player, |player| player.set_playing(false))?
+            };
+            if self.session_rotating.load(Ordering::Acquire) {
+                return Ok(view);
+            }
             request_presenter(
                 &self.presenter_tx,
                 PresenterRequest::Quiesce,
@@ -524,7 +574,7 @@ mod windows {
                 ACTOR_REPLY_TIMEOUT,
             )
             .await?;
-            self.request_reset(ResetReason::Restart, false, RESET_REPLY_TIMEOUT)
+            self.request_reset(ResetReason::Restart, false, ROTATION_AWARE_REPLY_TIMEOUT)
                 .await
         }
 
@@ -537,50 +587,16 @@ mod windows {
             Ok(view)
         }
 
-        /// Return the fullscreen state reported by the separate native output
-        /// window. The control UI uses this confirmed value rather than
-        /// inferring state from the last requested action.
-        pub async fn fullscreen_status(&self) -> Result<bool, PlaybackRuntimeError> {
-            self.ensure_open()?;
-            match request_presenter(
-                &self.presenter_tx,
-                PresenterRequest::FullscreenStatus,
-                ACTOR_REPLY_TIMEOUT,
-            )
-            .await?
-            {
-                PresenterReply::Fullscreen(value) => Ok(value),
-                _ => Err(PlaybackRuntimeError::channel_closed()),
-            }
-        }
-
-        /// Set the separate native output window fullscreen state explicitly
-        /// and return the state confirmed by the native window.
-        pub async fn set_fullscreen(&self, enabled: bool) -> Result<bool, PlaybackRuntimeError> {
-            self.ensure_open()?;
-            match request_presenter(
-                &self.presenter_tx,
-                PresenterRequest::SetFullscreen { enabled },
-                ACTOR_REPLY_TIMEOUT,
-            )
-            .await?
-            {
-                PresenterReply::Fullscreen(value) => Ok(value),
-                _ => Err(PlaybackRuntimeError::channel_closed()),
-            }
-        }
-
-        /// Apply a physical native-window resize without changing decoded
-        /// dimensions or resampling the frame.
-        pub async fn resize(
+        /// Apply one monotonic embedded-child viewport update without changing
+        /// decoded or Spout source dimensions.
+        pub async fn set_viewport(
             &self,
-            width: u32,
-            height: u32,
+            viewport: PlayerViewport,
         ) -> Result<ResizeOutcome, PlaybackRuntimeError> {
             self.ensure_open()?;
             match request_presenter(
                 &self.presenter_tx,
-                PresenterRequest::Resize { width, height },
+                PresenterRequest::SetViewport(viewport),
                 ACTOR_REPLY_TIMEOUT,
             )
             .await?
@@ -678,8 +694,10 @@ mod windows {
             }))
         }
 
-        /// Quiesce presentation, request typed worker shutdown, and force-kill
-        /// the contained Job Object only when graceful shutdown fails.
+        /// Quiesce presentation and establish an ownership barrier over both
+        /// runtime actors. Any bounded send/reply failure aborts the affected
+        /// actor, which drops its owned Job Object or native output instead of
+        /// leaving the cross-linked channels detached from the application.
         pub async fn shutdown(&self) -> Result<(), PlaybackRuntimeError> {
             let was_closed = self.closed.swap(true, Ordering::AcqRel);
             self.playing.store(false, Ordering::Release);
@@ -689,27 +707,45 @@ mod windows {
                 ACTOR_REPLY_TIMEOUT,
             )
             .await;
-            let (reply_tx, reply_rx) = oneshot::channel();
-            if let Err(error) = send_bounded(
-                &self.worker_tx,
-                WorkerCommand::Shutdown { reply: reply_tx },
+            let worker_result = if was_closed {
+                Ok(())
+            } else {
+                request_worker_shutdown(&self.worker_tx).await
+            };
+            if worker_result.is_err() {
+                self.worker_task.abort();
+            }
+
+            // WorkerActor normally stops PresenterActor itself. This direct
+            // request is the independent fallback for a blocked worker command
+            // queue or worker IPC call.
+            let presenter_result = request_presenter(
+                &self.presenter_tx,
+                PresenterRequest::Stop,
                 ACTOR_REPLY_TIMEOUT,
             )
-            .await
-            {
-                return if was_closed && error == PlaybackRuntimeError::channel_closed() {
-                    Ok(())
-                } else {
-                    Err(error)
-                };
+            .await;
+            if presenter_result.is_err() {
+                self.presenter_task.abort();
             }
-            match receive_bounded(reply_rx, ACTOR_REPLY_TIMEOUT).await {
-                Ok(result) => result,
-                Err(error) if was_closed && error == PlaybackRuntimeError::channel_closed() => {
-                    Ok(())
-                }
-                Err(error) => Err(error),
-            }
+
+            let presenter_cleanup_result = ensure_task_cleanup(
+                &self.presenter_task,
+                self.presenter_cleanup_complete.clone(),
+            )
+            .await;
+            // Always establish both ownership barriers. A stuck presenter
+            // must not prevent the worker Job Object from being aborted (and
+            // a stuck worker must not leave NativeOutput owned by presenter).
+            let worker_cleanup_result =
+                ensure_task_cleanup(&self.worker_task, self.worker_cleanup_complete.clone()).await;
+            let pause_result = pause_if_playing(&self.player);
+            let output_result = update_output_available(&self.player, false);
+            presenter_cleanup_result?;
+            worker_cleanup_result?;
+            pause_result?;
+            output_result?;
+            worker_result
         }
 
         async fn request_reset(
@@ -760,12 +796,13 @@ mod windows {
 
     impl Drop for PlaybackRuntime {
         fn drop(&mut self) {
-            if self.closed.swap(true, Ordering::AcqRel) {
-                return;
-            }
+            self.closed.store(true, Ordering::Release);
             self.playing.store(false, Ordering::Release);
-            let (reply, _receiver) = oneshot::channel();
-            let _ = self.worker_tx.try_send(WorkerCommand::Shutdown { reply });
+            // Dropping the facade is a terminal ownership transfer. Aborting
+            // both tasks breaks the Worker/Presenter sender cycle; task-future
+            // destruction then drops the worker Job Object and NativeOutput.
+            self.worker_task.abort();
+            self.presenter_task.abort();
         }
     }
 
@@ -777,11 +814,107 @@ mod windows {
         output: NativeOutput,
     }
 
+    struct LoadedWorkerSession {
+        schedule: PlaybackSchedule,
+        slot: SlotLoaded,
+        owner: WindowsRgbRingOwner,
+        consumer: WindowsRgbRingConsumer,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct PlaybackSourceIdentity {
+        cartridge_path: std::path::PathBuf,
+        cartridge: CartridgeSummary,
+        decoder_path: std::path::PathBuf,
+        decoder_asset_id: String,
+        decoder_variant_id: String,
+        decoder_sha256: String,
+        decoder_byte_length: u64,
+    }
+
+    impl PlaybackSourceIdentity {
+        fn from_config(config: &PlaybackLaunchConfig) -> Self {
+            Self {
+                cartridge_path: config.cartridge_path.clone(),
+                cartridge: config.cartridge.clone(),
+                decoder_path: config.decoder_asset.path.clone(),
+                decoder_asset_id: config.decoder_asset.asset_id.clone(),
+                decoder_variant_id: config.decoder_asset.variant_id.clone(),
+                decoder_sha256: config.decoder_asset.sha256.clone(),
+                decoder_byte_length: config.decoder_asset.byte_length,
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct PlaybackSessionIdentity {
+        codec_pack_root: std::path::PathBuf,
+        worker_executable: std::path::PathBuf,
+        worker_working_directory: std::path::PathBuf,
+        codec_pack_manifest: latentdeck_core::codec_pack::CodecPackManifest,
+        source: PlaybackSourceIdentity,
+    }
+
+    impl PlaybackSessionIdentity {
+        fn from_config(config: &PlaybackLaunchConfig) -> Self {
+            Self {
+                codec_pack_root: config.codec_pack.root.clone(),
+                worker_executable: config.codec_pack.worker_executable.clone(),
+                worker_working_directory: config.codec_pack.worker_working_directory.clone(),
+                codec_pack_manifest: config.codec_pack.manifest.clone(),
+                source: PlaybackSourceIdentity::from_config(config),
+            }
+        }
+    }
+
     async fn initialize_session(
         app: &AppHandle,
+        parent: &WebviewWindow,
+        viewport: PlayerViewport,
         config: &PlaybackLaunchConfig,
         client: &mut WorkerClient,
     ) -> Result<InitializedSession, PlaybackRuntimeError> {
+        let LoadedWorkerSession {
+            schedule,
+            slot,
+            owner,
+            consumer,
+        } = initialize_worker_session(config, client).await?;
+
+        let bounds = viewport
+            .bounds()
+            .ok_or_else(|| PlaybackRuntimeError::output("output.viewport_not_ready"))?;
+        let output = NativeOutput::new_embedded(
+            app,
+            parent,
+            native_output_config(slot.width, slot.height),
+            bounds,
+        )
+        .await
+        .map_err(|error| PlaybackRuntimeError::output(error.code()))?;
+        if output.frame_dimensions() != (slot.width, slot.height)
+            || output.present_mode() != wgpu::PresentMode::Fifo
+        {
+            return Err(PlaybackRuntimeError::output("output.contract_invalid"));
+        }
+        if viewport.visible() {
+            output
+                .show()
+                .map_err(|error| PlaybackRuntimeError::output(error.code()))?;
+        }
+        Ok(InitializedSession {
+            schedule,
+            slot,
+            owner,
+            consumer,
+            output,
+        })
+    }
+
+    async fn initialize_worker_session(
+        config: &PlaybackLaunchConfig,
+        client: &mut WorkerClient,
+    ) -> Result<LoadedWorkerSession, PlaybackRuntimeError> {
         configure_session(client).await?;
         let profile = h3_profile();
         let inspection = inspect_codec(client).await?;
@@ -799,28 +932,37 @@ mod windows {
             .open_consumer()
             .map_err(|_| PlaybackRuntimeError::ring())?;
         let mut owner = bind_ring(client, owner).await?;
-        let output = NativeOutput::new(app, native_output_config(slot.width, slot.height))
-            .await
-            .map_err(|error| PlaybackRuntimeError::output(error.code()))?;
-        if output.frame_dimensions() != (slot.width, slot.height)
-            || output.present_mode() != wgpu::PresentMode::Fifo
-        {
-            return Err(PlaybackRuntimeError::output("output.contract_invalid"));
-        }
         let decoded = decode_next(client, &mut schedule, &slot, &mut owner).await?;
         if !decoded {
             return Err(PlaybackRuntimeError::ring());
         }
-        output
-            .show()
-            .map_err(|error| PlaybackRuntimeError::output(error.code()))?;
-        Ok(InitializedSession {
+        Ok(LoadedWorkerSession {
             schedule,
             slot,
             owner,
             consumer,
-            output,
         })
+    }
+
+    async fn spawn_loaded_worker_session(
+        config: &PlaybackLaunchConfig,
+    ) -> Result<(WorkerClient, LoadedWorkerSession), PlaybackRuntimeError> {
+        let launch = ValidatedWorkerLaunch::from_codec_pack(&config.codec_pack);
+        let pending = spawn_worker(launch)
+            .await
+            .map_err(|_| PlaybackRuntimeError::worker_start())?;
+        let session = pending
+            .connect()
+            .await
+            .map_err(|_| PlaybackRuntimeError::worker_start())?;
+        let mut client = WorkerClient::new(session);
+        match initialize_worker_session(config, &mut client).await {
+            Ok(loaded) => Ok((client, loaded)),
+            Err(error) => {
+                let _ = stop_worker(&mut client, ShutdownReason::Recovery).await;
+                Err(error)
+            }
+        }
     }
 
     async fn configure_session(client: &mut WorkerClient) -> Result<(), PlaybackRuntimeError> {
@@ -1036,7 +1178,10 @@ mod windows {
         playing: Arc<AtomicBool>,
         at_end: Arc<AtomicBool>,
         reset_in_flight: Arc<AtomicBool>,
+        session_rotating: Arc<AtomicBool>,
         closed: Arc<AtomicBool>,
+        session_config: Box<PlaybackLaunchConfig>,
+        session_identity: Box<PlaybackSessionIdentity>,
     }
 
     impl WorkerActor {
@@ -1089,6 +1234,11 @@ mod windows {
                     true
                 }
                 WorkerCommand::Diagnostics { reply } => {
+                    if let Err(error) = self.ensure_worker_session_ready().await {
+                        let _ = reply.send(Err(error));
+                        self.fail(error).await;
+                        return true;
+                    }
                     let result = match self
                         .client
                         .call(
@@ -1126,6 +1276,7 @@ mod windows {
             if !state.can_publish(expected) {
                 return Ok(());
             }
+            self.ensure_worker_session_ready().await?;
             let _ = decode_next(
                 &mut self.client,
                 &mut self.schedule,
@@ -1141,6 +1292,10 @@ mod windows {
             reason: ResetReason,
             resume: bool,
         ) -> Result<PlayerView, PlaybackRuntimeError> {
+            // Rotation is admitted only at this top-level actor boundary. The
+            // SlotReset -> generation adoption -> prime sequence below stays
+            // on one authenticated session.
+            self.ensure_worker_session_ready().await?;
             self.playing.store(false, Ordering::Release);
             request_presenter(
                 &self.presenter_tx,
@@ -1178,6 +1333,7 @@ mod windows {
                 ACTOR_REPLY_TIMEOUT,
             )
             .await?;
+            self.ensure_reserved_message_capacity()?;
             if !decode_next(
                 &mut self.client,
                 &mut self.schedule,
@@ -1203,8 +1359,118 @@ mod windows {
             Ok(view)
         }
 
+        async fn ensure_worker_session_ready(&mut self) -> Result<(), PlaybackRuntimeError> {
+            if !session_rotation_required(
+                self.client.remaining_inbound_message_budget(),
+                self.client.remaining_outbound_message_budget(),
+            ) {
+                return Ok(());
+            }
+            self.rotate_worker_session().await
+        }
+
+        fn ensure_reserved_message_capacity(&self) -> Result<(), PlaybackRuntimeError> {
+            if reserved_message_capacity_available(
+                self.client.remaining_inbound_message_budget(),
+                self.client.remaining_outbound_message_budget(),
+            ) {
+                Ok(())
+            } else {
+                Err(PlaybackRuntimeError::worker_protocol())
+            }
+        }
+
+        fn rotation_config(&self) -> Result<Box<PlaybackLaunchConfig>, PlaybackRuntimeError> {
+            // The current worker acknowledgement must still describe the
+            // retained cartridge. The cartridge path/hash and the complete
+            // validated Codec Pack + decoder selection remain in this private
+            // immutable config and are replayed verbatim into the new worker.
+            validate_slot(&self.slot, &self.session_config.cartridge, &h3_profile())?;
+            if PlaybackSessionIdentity::from_config(&self.session_config) != *self.session_identity
+            {
+                return Err(PlaybackRuntimeError::worker_protocol());
+            }
+            Ok(self.session_config.clone())
+        }
+
+        async fn rotate_worker_session(&mut self) -> Result<(), PlaybackRuntimeError> {
+            let mut guard = SessionRotationGuard::acquire(Arc::clone(&self.session_rotating))?;
+            let config = self.rotation_config()?;
+
+            request_presenter(
+                &self.presenter_tx,
+                PresenterRequest::Quiesce,
+                ACTOR_REPLY_TIMEOUT,
+            )
+            .await?;
+            stop_worker(&mut self.client, ShutdownReason::Recovery).await?;
+
+            let (mut replacement_client, loaded) = spawn_loaded_worker_session(&config).await?;
+            let LoadedWorkerSession {
+                schedule,
+                slot,
+                owner,
+                consumer,
+            } = loaded;
+            let primed_frame_count = match expected_cycle_frames(&slot.timing, 0) {
+                Ok(value) => value,
+                Err(error) => {
+                    stop_worker(&mut replacement_client, ShutdownReason::Recovery).await?;
+                    return Err(error);
+                }
+            };
+            let replace = request_presenter(
+                &self.presenter_tx,
+                PresenterRequest::ReplaceSession {
+                    consumer,
+                    generation: INITIAL_GENERATION,
+                    frame_count: config.cartridge.frame_count,
+                    frame_rate_numerator: config.cartridge.frame_rate_numerator,
+                    frame_rate_denominator: config.cartridge.frame_rate_denominator,
+                    primed_frame_count,
+                },
+                ACTOR_REPLY_TIMEOUT,
+            )
+            .await;
+            let replace = replace.and_then(|reply| validate_replace_session_reply(&reply));
+            if let Err(error) = replace {
+                let cleanup = stop_worker(&mut replacement_client, ShutdownReason::Recovery).await;
+                return cleanup.and(Err(error));
+            }
+
+            // Commit only after PresenterActor owns and has acknowledged the
+            // fresh consumer. Dropping the previous fields now releases the
+            // old mapping after its worker has already stopped.
+            self.client = replacement_client;
+            self.schedule = schedule;
+            self.slot = slot;
+            self.owner = owner;
+            self.session_config = config;
+            self.at_end.store(false, Ordering::Release);
+
+            apply_rotation_intent(&self.player, self.playing.load(Ordering::Acquire))?;
+
+            // Clear before the last intent read. A concurrent Play after this
+            // point sends its own Resume; a Play while the guard was set is
+            // observed by the read below. Duplicate Resume is idempotent.
+            guard.release();
+            let latest_playing = self.playing.load(Ordering::Acquire);
+            reconcile_rotation_play_intent(&self.player, latest_playing)?;
+            if latest_playing {
+                request_presenter(
+                    &self.presenter_tx,
+                    PresenterRequest::Resume,
+                    ACTOR_REPLY_TIMEOUT,
+                )
+                .await?;
+            }
+            record_global(LogLevel::Info, "player.worker_session_rotated", None);
+            Ok(())
+        }
+
         async fn fail(&mut self, error: PlaybackRuntimeError) {
             self.playing.store(false, Ordering::Release);
+            self.session_rotating.store(false, Ordering::Release);
             self.closed.store(true, Ordering::Release);
             self.reset_in_flight.store(false, Ordering::Release);
             record_runtime_error(&self.player, error);
@@ -1219,6 +1485,7 @@ mod windows {
 
         async fn stop(&mut self, reason: ShutdownReason) -> Result<(), PlaybackRuntimeError> {
             self.playing.store(false, Ordering::Release);
+            self.session_rotating.store(false, Ordering::Release);
             let _ = request_presenter(
                 &self.presenter_tx,
                 PresenterRequest::Quiesce,
@@ -1250,7 +1517,7 @@ mod windows {
         closed: Arc<AtomicBool>,
         generation: u64,
         frame_count: u64,
-        presented_frames: u64,
+        consumed_frames: u64,
         pending_frame: Option<latentdeck_gpu::ring::RgbaFrame>,
         clock: FrameClock,
         quiesced: bool,
@@ -1258,6 +1525,7 @@ mod windows {
         last_presented_at: Option<Instant>,
         frame_intervals: TimingSamples,
         spout_diagnostics: SpoutDiagnosticHistory,
+        viewport_revision: u64,
     }
 
     impl PresenterActor {
@@ -1336,19 +1604,28 @@ mod windows {
                         });
                     if result.is_ok() {
                         self.generation = generation;
-                        self.presented_frames = 0;
+                        self.consumed_frames = 0;
                         self.last_presented_at = None;
                         self.clock.restart();
                     }
                     result.map(|()| PresenterReply::Unit)
                 }
-                PresenterRequest::FullscreenStatus => self.fullscreen_reply(None),
-                PresenterRequest::SetFullscreen { enabled } => self.fullscreen_reply(Some(enabled)),
-                PresenterRequest::Resize { width, height } => self
-                    .output
-                    .resize(width, height)
-                    .map(PresenterReply::Resize)
-                    .map_err(|error| PlaybackRuntimeError::output(error.code())),
+                PresenterRequest::ReplaceSession {
+                    consumer,
+                    generation,
+                    frame_count,
+                    frame_rate_numerator,
+                    frame_rate_denominator,
+                    primed_frame_count,
+                } => self.replace_session(
+                    consumer,
+                    generation,
+                    frame_count,
+                    frame_rate_numerator,
+                    frame_rate_denominator,
+                    primed_frame_count,
+                ),
+                PresenterRequest::SetViewport(viewport) => self.set_viewport_reply(viewport),
                 PresenterRequest::SpoutStatus => {
                     let status = self.output.spout_status();
                     self.spout_diagnostics.observe(&status);
@@ -1370,15 +1647,12 @@ mod windows {
                     self.quiesced = true;
                     self.last_presented_at = None;
                     self.playing.store(false, Ordering::Release);
-                    let result = self
-                        .output
-                        .hide()
-                        .and_then(|()| {
-                            self.output
-                                .window()
-                                .destroy()
-                                .map_err(|_| NativeOutputError::WindowVisibility)
-                        })
+                    // Evaluate both operations: a visibility failure must not
+                    // skip destruction and leave the fixed Tauri label alive.
+                    let hidden = self.output.hide();
+                    let destroyed = self.output.destroy();
+                    let result = hidden
+                        .and(destroyed)
                         .map(|()| PresenterReply::Unit)
                         .map_err(|error| PlaybackRuntimeError::output(error.code()));
                     let _ = reply.send(result);
@@ -1402,19 +1676,78 @@ mod windows {
             }
         }
 
-        fn fullscreen_reply(
-            &self,
-            requested: Option<bool>,
+        fn set_viewport_reply(
+            &mut self,
+            viewport: PlayerViewport,
         ) -> Result<PresenterReply, PlaybackRuntimeError> {
-            if let Some(enabled) = requested {
-                self.output
-                    .set_fullscreen(enabled)
-                    .map_err(|error| PlaybackRuntimeError::output(error.code()))?;
+            if viewport.revision() <= self.viewport_revision {
+                return Ok(PresenterReply::Resize(ResizeOutcome::Unchanged));
             }
-            self.output
-                .fullscreen()
-                .map(PresenterReply::Fullscreen)
-                .map_err(|error| PlaybackRuntimeError::output(error.code()))
+            let outcome = match viewport.bounds() {
+                Some(bounds) => self
+                    .output
+                    .set_embedded_bounds(bounds)
+                    .map_err(|error| PlaybackRuntimeError::output(error.code()))?,
+                None => self
+                    .output
+                    .resize(0, 0)
+                    .map_err(|error| PlaybackRuntimeError::output(error.code()))?,
+            };
+            if viewport.visible() {
+                self.output.show()
+            } else {
+                self.output.hide()
+            }
+            .map_err(|error| PlaybackRuntimeError::output(error.code()))?;
+            self.viewport_revision = viewport.revision();
+            Ok(PresenterReply::Resize(outcome))
+        }
+
+        fn replace_session(
+            &mut self,
+            consumer: WindowsRgbRingConsumer,
+            generation: u64,
+            frame_count: u64,
+            frame_rate_numerator: u64,
+            frame_rate_denominator: u64,
+            primed_frame_count: u32,
+        ) -> Result<PresenterReply, PlaybackRuntimeError> {
+            let descriptor = consumer.descriptor();
+            let state = consumer.state().map_err(|_| PlaybackRuntimeError::ring())?;
+            let (output_width, output_height) = self.output.frame_dimensions();
+            if !fresh_primed_ring_matches(
+                FreshRingObservation {
+                    generation: descriptor.generation(),
+                    width: descriptor.layout().width(),
+                    height: descriptor.layout().height(),
+                    producer_sequence: state.producer_sequence(),
+                    consumer_sequence: state.consumer_sequence(),
+                    occupancy: state.occupancy(),
+                },
+                FreshRingExpectation {
+                    generation,
+                    width: output_width,
+                    height: output_height,
+                    primed_frame_count,
+                },
+            ) || generation != INITIAL_GENERATION
+                || frame_count != self.frame_count
+                || frame_rate_numerator != self.clock.numerator
+                || frame_rate_denominator != self.clock.denominator
+            {
+                return Err(PlaybackRuntimeError::ring());
+            }
+            let clock = FrameClock::new(frame_rate_numerator, frame_rate_denominator)?;
+
+            self.quiesced = true;
+            self.pending_frame = None;
+            self.consumer = consumer;
+            self.generation = generation;
+            self.frame_count = frame_count;
+            self.consumed_frames = 0;
+            self.last_presented_at = None;
+            self.clock = clock;
+            Ok(PresenterReply::Unit)
         }
 
         fn diagnostic_snapshot(&mut self) -> Result<PresenterReply, PlaybackRuntimeError> {
@@ -1453,7 +1786,7 @@ mod windows {
                 .as_ref()
                 .ok_or_else(PlaybackRuntimeError::ring)?;
             let expected_sequence = self
-                .presented_frames
+                .consumed_frames
                 .checked_add(1)
                 .ok_or_else(PlaybackRuntimeError::schedule)?;
             if frame.generation() != self.generation || frame.sequence() != expected_sequence {
@@ -1469,28 +1802,26 @@ mod windows {
                 )
                 .map_err(|error| PlaybackRuntimeError::output(error.code()))?;
             self.spout_diagnostics.observe(&self.output.spout_status());
-            if !matches!(
-                outcome,
-                PresentOutcome::Presented | PresentOutcome::PresentedAndReconfigured
-            ) {
-                return Ok(());
+            if outcome.locally_presented() {
+                let presented_at = Instant::now();
+                if let Some(previous) = self.last_presented_at.replace(presented_at) {
+                    self.frame_intervals
+                        .push(presented_at.saturating_duration_since(previous));
+                }
+                self.diagnostic_frames_presented = self
+                    .diagnostic_frames_presented
+                    .checked_add(1)
+                    .ok_or_else(PlaybackRuntimeError::diagnostics_contract)?;
+            } else {
+                self.last_presented_at = None;
             }
-            let presented_at = Instant::now();
-            if let Some(previous) = self.last_presented_at.replace(presented_at) {
-                self.frame_intervals
-                    .push(presented_at.saturating_duration_since(previous));
-            }
-            self.diagnostic_frames_presented = self
-                .diagnostic_frames_presented
-                .checked_add(1)
-                .ok_or_else(PlaybackRuntimeError::diagnostics_contract)?;
             self.pending_frame = None;
-            self.presented_frames = expected_sequence;
+            self.consumed_frames = expected_sequence;
             let position = expected_sequence
                 .checked_sub(1)
                 .ok_or_else(PlaybackRuntimeError::schedule)?;
             with_player(&self.player, |player| player.set_position_frame(position))?;
-            if self.presented_frames == self.frame_count {
+            if self.consumed_frames == self.frame_count {
                 self.reached_end().await?;
             }
             Ok(())
@@ -1549,14 +1880,15 @@ mod windows {
         Resume,
         Quiesce,
         AdoptGeneration(u64),
-        FullscreenStatus,
-        SetFullscreen {
-            enabled: bool,
+        ReplaceSession {
+            consumer: WindowsRgbRingConsumer,
+            generation: u64,
+            frame_count: u64,
+            frame_rate_numerator: u64,
+            frame_rate_denominator: u64,
+            primed_frame_count: u32,
         },
-        Resize {
-            width: u32,
-            height: u32,
-        },
+        SetViewport(PlayerViewport),
         SpoutStatus,
         ConfigureSpout {
             name: Option<String>,
@@ -1578,7 +1910,6 @@ mod windows {
 
     enum PresenterReply {
         Unit,
-        Fullscreen(bool),
         Resize(ResizeOutcome),
         Spout(NativeSpoutStatus),
         Diagnostics(PresenterDiagnosticSnapshot),
@@ -1633,6 +1964,58 @@ mod windows {
         receive_bounded(reply_rx, deadline).await?
     }
 
+    fn validate_replace_session_reply(reply: &PresenterReply) -> Result<(), PlaybackRuntimeError> {
+        match reply {
+            PresenterReply::Unit => Ok(()),
+            PresenterReply::Resize(_)
+            | PresenterReply::Spout(_)
+            | PresenterReply::Diagnostics(_) => Err(PlaybackRuntimeError::worker_protocol()),
+        }
+    }
+
+    async fn request_worker_shutdown(
+        sender: &mpsc::Sender<WorkerCommand>,
+    ) -> Result<(), PlaybackRuntimeError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        send_bounded(
+            sender,
+            WorkerCommand::Shutdown { reply: reply_tx },
+            ACTOR_REPLY_TIMEOUT,
+        )
+        .await?;
+        receive_bounded(reply_rx, ACTOR_REPLY_TIMEOUT).await?
+    }
+
+    async fn ensure_task_cleanup(
+        task: &JoinHandle<()>,
+        completion: watch::Receiver<bool>,
+    ) -> Result<(), PlaybackRuntimeError> {
+        if wait_for_task_cleanup(completion.clone(), ACTOR_REPLY_TIMEOUT)
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+        task.abort();
+        wait_for_task_cleanup(completion, ACTOR_REPLY_TIMEOUT).await
+    }
+
+    async fn wait_for_task_cleanup(
+        mut completion: watch::Receiver<bool>,
+        deadline: Duration,
+    ) -> Result<(), PlaybackRuntimeError> {
+        if *completion.borrow() {
+            return Ok(());
+        }
+        match timeout(deadline, completion.changed()).await {
+            Ok(Ok(())) if *completion.borrow() => Ok(()),
+            // Closing the only sender also proves that the task future and all
+            // actor-owned resources have been dropped (including after abort).
+            Ok(Err(_)) => Ok(()),
+            Ok(Ok(())) | Err(_) => Err(PlaybackRuntimeError::reply_timeout()),
+        }
+    }
+
     async fn request_worker_diagnostics(
         sender: &mpsc::Sender<WorkerCommand>,
     ) -> Result<MetricsSnapshot, PlaybackRuntimeError> {
@@ -1640,10 +2023,10 @@ mod windows {
         send_bounded(
             sender,
             WorkerCommand::Diagnostics { reply: reply_tx },
-            DIAGNOSTIC_REPLY_TIMEOUT,
+            ROTATION_AWARE_REPLY_TIMEOUT,
         )
         .await?;
-        receive_bounded(reply_rx, DIAGNOSTIC_REPLY_TIMEOUT).await?
+        receive_bounded(reply_rx, ROTATION_AWARE_REPLY_TIMEOUT).await?
     }
 
     async fn send_bounded<T>(
@@ -1755,6 +2138,138 @@ mod windows {
         } else {
             Err(PlaybackRuntimeError::ring())
         }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct SessionRotationIntent {
+        playing: bool,
+        loop_enabled: bool,
+    }
+
+    impl SessionRotationIntent {
+        const fn new(playing: bool, loop_enabled: bool) -> Self {
+            Self {
+                playing,
+                loop_enabled,
+            }
+        }
+
+        const fn rehydrated(self) -> SessionRotationState {
+            SessionRotationState {
+                position_frame: 0,
+                playing: self.playing,
+                loop_enabled: self.loop_enabled,
+                at_end: false,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct SessionRotationState {
+        position_frame: u64,
+        playing: bool,
+        loop_enabled: bool,
+        at_end: bool,
+    }
+
+    struct SessionRotationGuard {
+        flag: Arc<AtomicBool>,
+        active: bool,
+    }
+
+    impl SessionRotationGuard {
+        fn acquire(flag: Arc<AtomicBool>) -> Result<Self, PlaybackRuntimeError> {
+            flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .map_err(|_| PlaybackRuntimeError::worker_protocol())?;
+            Ok(Self { flag, active: true })
+        }
+
+        fn release(&mut self) {
+            self.flag.store(false, Ordering::Release);
+            self.active = false;
+        }
+    }
+
+    impl Drop for SessionRotationGuard {
+        fn drop(&mut self) {
+            if self.active {
+                self.flag.store(false, Ordering::Release);
+            }
+        }
+    }
+
+    const fn session_rotation_required(inbound: usize, outbound: usize) -> bool {
+        inbound <= SESSION_SHUTDOWN_MESSAGE_RESERVE || outbound <= SESSION_SHUTDOWN_MESSAGE_RESERVE
+    }
+
+    const fn reserved_message_capacity_available(inbound: usize, outbound: usize) -> bool {
+        inbound > 1 && outbound > 1
+    }
+
+    fn apply_rotation_intent(
+        player: &Arc<Mutex<PlayerCoordinator>>,
+        playing: bool,
+    ) -> Result<SessionRotationState, PlaybackRuntimeError> {
+        with_player(player, |player| {
+            let intent = SessionRotationIntent::new(playing, player.view().loop_enabled);
+            let state = intent.rehydrated();
+            let mut view = player.reset_to_start()?;
+            if state.playing {
+                view = player.set_playing(true)?;
+            }
+            debug_assert_eq!(view.position_frame, state.position_frame);
+            debug_assert_eq!(view.loop_enabled, state.loop_enabled);
+            Ok(state)
+        })
+    }
+
+    fn reconcile_rotation_play_intent(
+        player: &Arc<Mutex<PlayerCoordinator>>,
+        playing: bool,
+    ) -> Result<(), PlaybackRuntimeError> {
+        let phase = player_view(player)?.phase;
+        match (playing, phase) {
+            (
+                true,
+                latentdeck_core::player::PlayerPhase::Ready
+                | latentdeck_core::player::PlayerPhase::Paused,
+            ) => with_player(player, |player| player.set_playing(true)).map(|_| ()),
+            (false, latentdeck_core::player::PlayerPhase::Playing) => {
+                with_player(player, |player| player.set_playing(false)).map(|_| ())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct FreshRingObservation {
+        generation: u64,
+        width: u32,
+        height: u32,
+        producer_sequence: u64,
+        consumer_sequence: u64,
+        occupancy: u32,
+    }
+
+    #[derive(Clone, Copy)]
+    struct FreshRingExpectation {
+        generation: u64,
+        width: u32,
+        height: u32,
+        primed_frame_count: u32,
+    }
+
+    const fn fresh_primed_ring_matches(
+        actual: FreshRingObservation,
+        expected: FreshRingExpectation,
+    ) -> bool {
+        actual.generation == expected.generation
+            && actual.width == expected.width
+            && actual.height == expected.height
+            && expected.primed_frame_count > 0
+            && actual.producer_sequence == expected.primed_frame_count as u64
+            && actual.consumer_sequence == 0
+            && actual.occupancy == expected.primed_frame_count
     }
 
     async fn stop_worker(
@@ -2048,16 +2563,193 @@ mod windows {
         use super::*;
 
         #[test]
-        fn fullscreen_presenter_contract_is_explicit_and_queryable() {
-            let set = PresenterRequest::SetFullscreen { enabled: true };
-            assert!(matches!(
-                set,
-                PresenterRequest::SetFullscreen { enabled: true }
+        fn session_rotation_threshold_preserves_shutdown_reserve() {
+            let above = SESSION_SHUTDOWN_MESSAGE_RESERVE + 1;
+            assert!(!session_rotation_required(above, above));
+            assert!(session_rotation_required(
+                SESSION_SHUTDOWN_MESSAGE_RESERVE,
+                above
             ));
-            assert!(matches!(
-                PresenterRequest::FullscreenStatus,
-                PresenterRequest::FullscreenStatus
+            assert!(session_rotation_required(
+                above,
+                SESSION_SHUTDOWN_MESSAGE_RESERVE
             ));
+        }
+
+        #[test]
+        fn reset_reply_timeout_covers_the_bounded_rotation_path() {
+            // One probe/connect deadline plus configure, inspect, codec load,
+            // slot load, ring bind, and initial decode. Include the old-worker
+            // shutdown and presenter barrier as well.
+            let bounded_rotation =
+                COMMAND_TIMEOUT.saturating_mul(7) + SHUTDOWN_TIMEOUT + ACTOR_REPLY_TIMEOUT;
+            assert!(ROTATION_AWARE_REPLY_TIMEOUT > bounded_rotation);
+        }
+
+        #[test]
+        fn atomic_reset_follow_up_requires_two_remaining_envelopes() {
+            assert!(reserved_message_capacity_available(2, 2));
+            assert!(!reserved_message_capacity_available(1, 2));
+            assert!(!reserved_message_capacity_available(2, 1));
+        }
+
+        #[test]
+        fn rotation_rehydrates_transport_at_frame_zero_without_changing_loop() {
+            for (playing, loop_enabled) in
+                [(false, false), (false, true), (true, false), (true, true)]
+            {
+                let state = SessionRotationIntent::new(playing, loop_enabled).rehydrated();
+                assert_eq!(state.position_frame, 0);
+                assert_eq!(state.playing, playing);
+                assert_eq!(state.loop_enabled, loop_enabled);
+                assert!(!state.at_end);
+            }
+        }
+
+        #[test]
+        fn rotation_guard_clears_on_success_and_failure_paths() {
+            let flag = Arc::new(AtomicBool::new(false));
+            {
+                let _failure_path =
+                    SessionRotationGuard::acquire(Arc::clone(&flag)).expect("first rotation");
+                assert!(flag.load(Ordering::Acquire));
+                assert!(SessionRotationGuard::acquire(Arc::clone(&flag)).is_err());
+            }
+            assert!(!flag.load(Ordering::Acquire));
+
+            let mut success_path =
+                SessionRotationGuard::acquire(Arc::clone(&flag)).expect("second rotation");
+            success_path.release();
+            assert!(!flag.load(Ordering::Acquire));
+        }
+
+        #[test]
+        fn source_identity_covers_exact_cartridge_and_decoder_selection() {
+            let exact = PlaybackSourceIdentity {
+                cartridge_path: std::path::PathBuf::from(r"W:\private\portrait.lc"),
+                cartridge: CartridgeSummary {
+                    cartridge_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+                    archive_sha256: "aa".repeat(32),
+                    file_name: "portrait.lc".to_owned(),
+                    width: 448,
+                    height: 800,
+                    frame_count: 107,
+                    frame_rate_numerator: 24,
+                    frame_rate_denominator: 1,
+                    audio_present: true,
+                },
+                decoder_path: std::path::PathBuf::from(r"W:\weights\taehv.safetensors"),
+                decoder_asset_id: "taehv".to_owned(),
+                decoder_variant_id: "taehv-h3-v1".to_owned(),
+                decoder_sha256: "bb".repeat(32),
+                decoder_byte_length: 123_456,
+            };
+            assert_eq!(exact, exact.clone());
+
+            let mut changed = exact.clone();
+            changed.cartridge.archive_sha256 = "cc".repeat(32);
+            assert_ne!(exact, changed);
+            let mut changed = exact.clone();
+            changed.cartridge.width = 800;
+            assert_ne!(exact, changed);
+            let mut changed = exact.clone();
+            changed.decoder_variant_id = "different".to_owned();
+            assert_ne!(exact, changed);
+            let mut changed = exact.clone();
+            changed.decoder_sha256 = "dd".repeat(32);
+            assert_ne!(exact, changed);
+            let mut changed = exact.clone();
+            changed.decoder_path = std::path::PathBuf::from(r"W:\weights\other.safetensors");
+            assert_ne!(exact, changed);
+        }
+
+        #[test]
+        fn fresh_session_accepts_only_exact_primed_generation_one_ring() {
+            let expected = FreshRingExpectation {
+                generation: INITIAL_GENERATION,
+                width: 448,
+                height: 800,
+                primed_frame_count: 17,
+            };
+            let exact = FreshRingObservation {
+                generation: INITIAL_GENERATION,
+                width: 448,
+                height: 800,
+                producer_sequence: 17,
+                consumer_sequence: 0,
+                occupancy: 17,
+            };
+            assert!(fresh_primed_ring_matches(exact, expected));
+
+            for incompatible in [
+                FreshRingObservation {
+                    generation: 2,
+                    ..exact
+                },
+                FreshRingObservation {
+                    width: 800,
+                    height: 448,
+                    ..exact
+                },
+                FreshRingObservation {
+                    producer_sequence: 0,
+                    occupancy: 0,
+                    ..exact
+                },
+                FreshRingObservation {
+                    consumer_sequence: 1,
+                    occupancy: 16,
+                    ..exact
+                },
+            ] {
+                assert!(!fresh_primed_ring_matches(incompatible, expected));
+            }
+        }
+
+        #[test]
+        fn replacement_commit_requires_presenter_unit_ack() {
+            assert!(validate_replace_session_reply(&PresenterReply::Unit).is_ok());
+            assert!(
+                validate_replace_session_reply(&PresenterReply::Resize(ResizeOutcome::Unchanged))
+                    .is_err()
+            );
+        }
+
+        #[tokio::test]
+        async fn aborting_cross_linked_tasks_closes_both_cleanup_barriers() {
+            let (worker_tx, mut worker_rx) = mpsc::channel::<()>(1);
+            let (presenter_tx, mut presenter_rx) = mpsc::channel::<()>(1);
+            let (worker_cleanup_sender, worker_cleanup) = watch::channel(false);
+            let (presenter_cleanup_sender, presenter_cleanup) = watch::channel(false);
+
+            let worker_task = tauri::async_runtime::spawn(async move {
+                let _presenter_liveness = presenter_tx;
+                let _cleanup = worker_cleanup_sender;
+                while worker_rx.recv().await.is_some() {}
+            });
+            let presenter_task = tauri::async_runtime::spawn(async move {
+                let _worker_liveness = worker_tx;
+                let _cleanup = presenter_cleanup_sender;
+                while presenter_rx.recv().await.is_some() {}
+            });
+
+            worker_task.abort();
+            presenter_task.abort();
+            wait_for_task_cleanup(worker_cleanup, Duration::from_secs(1))
+                .await
+                .expect("worker actor future dropped");
+            wait_for_task_cleanup(presenter_cleanup, Duration::from_secs(1))
+                .await
+                .expect("presenter actor future dropped");
+        }
+
+        #[tokio::test]
+        async fn cleanup_barrier_times_out_while_actor_still_owns_resources() {
+            let (_completion_sender, completion) = watch::channel(false);
+            let error = wait_for_task_cleanup(completion, Duration::from_millis(10))
+                .await
+                .expect_err("live actor must not satisfy cleanup barrier");
+            assert_eq!(error, PlaybackRuntimeError::reply_timeout());
         }
 
         #[test]
@@ -2182,8 +2874,10 @@ pub struct PlaybackRuntime;
 impl PlaybackRuntime {
     pub async fn start(
         _app: AppHandle,
+        _parent: WebviewWindow,
         _player: Arc<Mutex<PlayerCoordinator>>,
         _config: PlaybackLaunchConfig,
+        _viewport: PlayerViewport,
     ) -> Result<Self, PlaybackRuntimeError> {
         Err(PlaybackRuntimeError::unsupported())
     }
@@ -2204,18 +2898,9 @@ impl PlaybackRuntime {
         Err(PlaybackRuntimeError::unsupported())
     }
 
-    pub async fn fullscreen_status(&self) -> Result<bool, PlaybackRuntimeError> {
-        Err(PlaybackRuntimeError::unsupported())
-    }
-
-    pub async fn set_fullscreen(&self, _enabled: bool) -> Result<bool, PlaybackRuntimeError> {
-        Err(PlaybackRuntimeError::unsupported())
-    }
-
-    pub async fn resize(
+    pub async fn set_viewport(
         &self,
-        _width: u32,
-        _height: u32,
+        _viewport: PlayerViewport,
     ) -> Result<ResizeOutcome, PlaybackRuntimeError> {
         Err(PlaybackRuntimeError::unsupported())
     }

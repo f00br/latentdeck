@@ -42,6 +42,17 @@ describe("Q4 client boundary", () => {
     });
     await client.rolesSet(DEFAULT_Q4_ROLES);
     await client.captureSnapshot();
+    await client.viewportSessionBegin();
+    await client.viewportSetBounds({
+      epoch: 4,
+      revision: 7,
+      xCss: 10,
+      yCss: 20,
+      widthCss: 640,
+      heightCss: 360,
+      scaleFactor: 1.5,
+      visible: true,
+    });
     await client.fullscreenStatusGet();
     await client.fullscreenSet(true);
     await client.spoutStatusGet();
@@ -52,6 +63,8 @@ describe("Q4 client boundary", () => {
       Q4_COMMANDS.open,
       Q4_COMMANDS.rolesSet,
       Q4_COMMANDS.captureSnapshot,
+      Q4_COMMANDS.viewportSessionBegin,
+      Q4_COMMANDS.viewportSetBounds,
       Q4_COMMANDS.fullscreenStatusGet,
       Q4_COMMANDS.fullscreenSet,
       Q4_COMMANDS.spoutStatusGet,
@@ -60,6 +73,21 @@ describe("Q4 client boundary", () => {
     expect(calls.at(-1)?.args).toEqual({
       name: "LatentDeck Q4",
       enabled: true,
+    });
+    expect(
+      calls.find((call) => call.command === Q4_COMMANDS.viewportSetBounds)
+        ?.args,
+    ).toEqual({
+      bounds: {
+        epoch: 4,
+        revision: 7,
+        xCss: 10,
+        yCss: 20,
+        widthCss: 640,
+        heightCss: 360,
+        scaleFactor: 1.5,
+        visible: true,
+      },
     });
     expect(JSON.stringify(calls)).not.toContain("path");
   });

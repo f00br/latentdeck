@@ -1,6 +1,8 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::sync::{
     Arc, Mutex, MutexGuard,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicU8, Ordering},
 };
 use std::{path::PathBuf, time::SystemTime};
 
@@ -14,22 +16,29 @@ use latentdeck_core::{
     player::{PlayerCoordinator, PlayerCoordinatorError, PlayerView},
     realtime_diagnostics::RealtimeDiagnosticError,
 };
-use latentdeck_native_output::NativeSpoutStatus;
+use latentdeck_native_output::{HostFullscreenController, NativeSpoutStatus};
 use playback_runtime::{PlaybackLaunchConfig, PlaybackRuntime, PlaybackRuntimeError};
 use serde::Serialize;
-use tauri::{AppHandle, Manager, RunEvent, State, WindowEvent};
+use tauri::{AppHandle, Manager, RunEvent, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt as _;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::diagnostic_state::{
     DiagnosticSaveResult, active_snapshot, inactive_snapshot, write_player_bundle,
 };
-use crate::native_output::NATIVE_OUTPUT_WINDOW_LABEL;
+use crate::native_output::{
+    PlayerViewportStore, ViewportBoundsError, ViewportBoundsRequest, ViewportSessionAck,
+    ViewportStoreError, validate_viewport_bounds,
+};
+
+const MAIN_WINDOW_LABEL: &str = "main";
 
 struct AppState {
     player: Arc<Mutex<PlayerCoordinator>>,
     runtime: Arc<AsyncMutex<Option<PlaybackRuntime>>>,
-    exit_started: AtomicBool,
+    viewport: PlayerViewportStore,
+    fullscreen: HostFullscreenController,
+    exit_gate: ExitGate,
 }
 
 impl AppState {
@@ -41,8 +50,60 @@ impl AppState {
         Self {
             player: Arc::new(Mutex::new(player)),
             runtime: Arc::new(AsyncMutex::new(None)),
-            exit_started: AtomicBool::new(false),
+            viewport: PlayerViewportStore::new(),
+            fullscreen: HostFullscreenController::new(),
+            exit_gate: ExitGate::new(),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExitRequest {
+    BeginShutdown,
+    WaitForShutdown,
+    AllowExit,
+}
+
+const EXIT_IDLE: u8 = 0;
+const EXIT_SHUTTING_DOWN: u8 = 1;
+const EXIT_READY: u8 = 2;
+
+struct ExitGate {
+    phase: AtomicU8,
+}
+
+impl ExitGate {
+    const fn new() -> Self {
+        Self {
+            phase: AtomicU8::new(EXIT_IDLE),
+        }
+    }
+
+    fn request(&self) -> ExitRequest {
+        loop {
+            match self.phase.load(Ordering::Acquire) {
+                EXIT_IDLE => {
+                    if self
+                        .phase
+                        .compare_exchange(
+                            EXIT_IDLE,
+                            EXIT_SHUTTING_DOWN,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        return ExitRequest::BeginShutdown;
+                    }
+                }
+                EXIT_READY => return ExitRequest::AllowExit,
+                _ => return ExitRequest::WaitForShutdown,
+            }
+        }
+    }
+
+    fn mark_ready(&self) {
+        self.phase.store(EXIT_READY, Ordering::Release);
     }
 }
 
@@ -154,6 +215,34 @@ fn trusted_snapshot(player: &Arc<Mutex<PlayerCoordinator>>) -> Result<PlayerView
     Ok(lock_player(player)?.view())
 }
 
+fn main_window(app: &AppHandle) -> Result<WebviewWindow, CommandError> {
+    app.get_webview_window(MAIN_WINDOW_LABEL).ok_or_else(|| {
+        CommandError::new(
+            "output.parent_window_unavailable",
+            "LatentPlayer could not attach the native video surface to its main window.",
+        )
+    })
+}
+
+fn viewport_error(error: ViewportBoundsError) -> CommandError {
+    let code = match error {
+        ViewportBoundsError::NonFinite => "output.viewport_non_finite",
+        ViewportBoundsError::InvalidScaleFactor => "output.viewport_scale_invalid",
+        ViewportBoundsError::StaleScaleFactor => "output.viewport_scale_stale",
+        ViewportBoundsError::InvalidExtent => "output.viewport_extent_invalid",
+        ViewportBoundsError::OutsideClient => "output.viewport_outside_client",
+        ViewportBoundsError::Overflow => "output.viewport_overflow",
+    };
+    CommandError::new(
+        code,
+        "LatentPlayer rejected an invalid embedded video-area measurement.",
+    )
+}
+
+fn viewport_store_error(error: ViewportStoreError) -> CommandError {
+    CommandError::new(error.code(), error.message())
+}
+
 async fn shutdown_runtime(runtime: &mut Option<PlaybackRuntime>) -> Result<(), CommandError> {
     let Some(runtime) = runtime.take() else {
         return Ok(());
@@ -164,9 +253,12 @@ async fn shutdown_runtime(runtime: &mut Option<PlaybackRuntime>) -> Result<(), C
 async fn start_runtime(
     app: &AppHandle,
     player: &Arc<Mutex<PlayerCoordinator>>,
+    viewport: &PlayerViewportStore,
 ) -> Result<PlaybackRuntime, CommandError> {
     let config = launch_config(player)?;
-    PlaybackRuntime::start(app.clone(), Arc::clone(player), config)
+    let viewport = viewport.current_visible().map_err(viewport_store_error)?;
+    let parent = main_window(app)?;
+    PlaybackRuntime::start(app.clone(), parent, Arc::clone(player), config, viewport)
         .await
         .map_err(Into::into)
 }
@@ -174,8 +266,9 @@ async fn start_runtime(
 async fn start_and_restart(
     app: &AppHandle,
     player: &Arc<Mutex<PlayerCoordinator>>,
+    viewport: &PlayerViewportStore,
 ) -> Result<(PlaybackRuntime, PlayerView), CommandError> {
-    let runtime = start_runtime(app, player).await?;
+    let runtime = start_runtime(app, player, viewport).await?;
     match runtime.restart().await {
         Ok(view) => Ok((runtime, view)),
         Err(error) => {
@@ -194,6 +287,68 @@ const fn product_version() -> &'static str {
 #[allow(clippy::needless_pass_by_value)] // Tauri command extractor owns `State`.
 fn player_snapshot(state: State<'_, AppState>) -> Result<PlayerView, CommandError> {
     trusted_snapshot(&state.player)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri command extractors own their values.
+async fn player_viewport_set_bounds(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    bounds: ViewportBoundsRequest,
+) -> Result<(), CommandError> {
+    let window = main_window(&app)?;
+    let scale_factor = window.scale_factor().map_err(|_| {
+        CommandError::new(
+            "output.viewport_scale_unavailable",
+            "LatentPlayer could not read the current display scale.",
+        )
+    })?;
+    let client = window.inner_size().map_err(|_| {
+        CommandError::new(
+            "output.viewport_client_unavailable",
+            "LatentPlayer could not read the main window size.",
+        )
+    })?;
+    let request = validate_viewport_bounds(bounds, scale_factor, client.width, client.height)
+        .map_err(viewport_error)?;
+    let viewport = state
+        .viewport
+        .apply(request)
+        .map_err(viewport_store_error)?;
+
+    let runtime = state.runtime.lock().await;
+    if let Some(runtime) = runtime.as_ref() {
+        let _ = runtime.set_viewport(viewport).await?;
+    }
+    state
+        .viewport
+        .confirm_applied(request, viewport)
+        .map_err(viewport_store_error)?;
+    Ok(())
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+async fn player_viewport_session_begin(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ViewportSessionAck, CommandError> {
+    // Resolve the authoritative parent before mutating the epoch. An auxiliary
+    // WebView must never select itself as the native child parent.
+    let _parent = main_window(&app)?;
+    let (session, hidden) = state
+        .viewport
+        .begin_session()
+        .map_err(viewport_store_error)?;
+    let runtime = state.runtime.lock().await;
+    if let Some(runtime) = runtime.as_ref() {
+        let _ = runtime.set_viewport(hidden).await?;
+    }
+    state
+        .viewport
+        .confirm_session(session, hidden)
+        .map_err(viewport_store_error)?;
+    Ok(session)
 }
 
 #[tauri::command]
@@ -269,7 +424,7 @@ async fn player_play(
         return runtime.play().await.map_err(Into::into);
     }
 
-    let runtime = start_runtime(&app, &state.player).await?;
+    let runtime = start_runtime(&app, &state.player, &state.viewport).await?;
     match runtime.play().await {
         Ok(view) => {
             *runtime_slot = Some(runtime);
@@ -310,7 +465,7 @@ async fn player_restart(
     }
 
     shutdown_runtime(&mut runtime_slot).await?;
-    let (runtime, view) = start_and_restart(&app, &state.player).await?;
+    let (runtime, view) = start_and_restart(&app, &state.player, &state.viewport).await?;
     *runtime_slot = Some(runtime);
     Ok(view)
 }
@@ -318,34 +473,43 @@ async fn player_restart(
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)] // Tauri command extractor owns `State`.
 async fn player_fullscreen_status(
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Option<FullscreenStatus>, CommandError> {
-    let runtime = state.runtime.lock().await;
-    let Some(runtime) = runtime.as_ref() else {
-        return Ok(None);
-    };
-    runtime
-        .fullscreen_status()
+    let window = main_window(&app)?;
+    state
+        .fullscreen
+        .status(&window)
         .await
         .map(FullscreenStatus::from)
         .map(Some)
-        .map_err(Into::into)
+        .map_err(|_| {
+            CommandError::new(
+                "output.window_fullscreen_failed",
+                "LatentPlayer could not read the main window fullscreen state.",
+            )
+        })
 }
 
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)] // Tauri command extractor owns `State`.
 async fn player_set_fullscreen(
+    app: AppHandle,
     state: State<'_, AppState>,
     enabled: bool,
 ) -> Result<FullscreenStatus, CommandError> {
-    let runtime = state.runtime.lock().await;
-    runtime
-        .as_ref()
-        .ok_or_else(CommandError::runtime_inactive)?
-        .set_fullscreen(enabled)
+    let window = main_window(&app)?;
+    state
+        .fullscreen
+        .set(&window, enabled)
         .await
         .map(FullscreenStatus::from)
-        .map_err(Into::into)
+        .map_err(|_| {
+            CommandError::new(
+                "output.window_fullscreen_failed",
+                "LatentPlayer could not change or confirm the main window fullscreen state.",
+            )
+        })
 }
 
 #[tauri::command]
@@ -493,39 +657,11 @@ fn main() {
             }
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if window.label() != NATIVE_OUTPUT_WINDOW_LABEL {
-                return;
-            }
-
-            match event {
-                WindowEvent::Resized(size) => {
-                    let width = size.width;
-                    let height = size.height;
-                    let runtime = Arc::clone(&window.state::<AppState>().runtime);
-                    tauri::async_runtime::spawn(async move {
-                        let runtime = runtime.lock().await;
-                        if let Some(runtime) = runtime.as_ref() {
-                            let _ = runtime.resize(width, height).await;
-                        }
-                    });
-                }
-                WindowEvent::CloseRequested { api, .. } => {
-                    api.prevent_close();
-                    let runtime = Arc::clone(&window.state::<AppState>().runtime);
-                    let native_window = window.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let mut runtime = runtime.lock().await;
-                        let _ = shutdown_runtime(&mut runtime).await;
-                        let _ = native_window.destroy();
-                    });
-                }
-                _ => {}
-            }
-        })
         .invoke_handler(tauri::generate_handler![
             product_version,
             player_snapshot,
+            player_viewport_session_begin,
+            player_viewport_set_bounds,
             player_open,
             player_select_decoder,
             player_set_loop,
@@ -545,19 +681,22 @@ fn main() {
         if let RunEvent::ExitRequested { api, code, .. } = event {
             record_global(LogLevel::Info, "app.exit_requested", None);
             let state = app_handle.state::<AppState>();
-            if state.exit_started.swap(true, Ordering::AcqRel) {
-                return;
+            match state.exit_gate.request() {
+                ExitRequest::BeginShutdown => {
+                    api.prevent_exit();
+                    let runtime = Arc::clone(&state.runtime);
+                    let app_handle = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let mut runtime = runtime.lock().await;
+                        let _ = shutdown_runtime(&mut runtime).await;
+                        app_handle.state::<AppState>().exit_gate.mark_ready();
+                        record_global(LogLevel::Info, "app.exit_ready", None);
+                        app_handle.exit(code.unwrap_or_default());
+                    });
+                }
+                ExitRequest::WaitForShutdown => api.prevent_exit(),
+                ExitRequest::AllowExit => {}
             }
-
-            api.prevent_exit();
-            let runtime = Arc::clone(&state.runtime);
-            let app_handle = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                let mut runtime = runtime.lock().await;
-                let _ = shutdown_runtime(&mut runtime).await;
-                record_global(LogLevel::Info, "app.exit_ready", None);
-                app_handle.exit(code.unwrap_or_default());
-            });
         }
     });
 }
@@ -606,5 +745,14 @@ mod tests {
 
         assert_eq!(active, serde_json::json!({ "active": true }));
         assert_eq!(inactive, serde_json::json!({ "active": false }));
+    }
+
+    #[test]
+    fn exit_gate_prevents_repeated_close_until_shutdown_is_ready() {
+        let gate = ExitGate::new();
+        assert_eq!(gate.request(), ExitRequest::BeginShutdown);
+        assert_eq!(gate.request(), ExitRequest::WaitForShutdown);
+        gate.mark_ready();
+        assert_eq!(gate.request(), ExitRequest::AllowExit);
     }
 }

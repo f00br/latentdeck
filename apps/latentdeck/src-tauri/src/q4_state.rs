@@ -4,14 +4,18 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use latentdeck_core::diagnostics::{LogLevel, record_global};
 use latentdeck_library::{CartridgeKey, DeckSourceIdentity, ResolvedDeckSource};
-use latentdeck_native_output::NativeSpoutStatus;
+use latentdeck_native_output::{HostFullscreenController, NativeSpoutStatus};
 use serde::Deserialize;
-use tauri::{AppHandle, Emitter as _, Manager as _, State};
+use tauri::{AppHandle, Emitter as _, Manager as _, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt as _;
-use tokio::sync::{Mutex as AsyncMutex, watch};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
     diagnostic_state::DeckDiagnosticLifecycle,
+    embedded_viewport::{
+        EmbeddedViewportStore, ViewportBoundsRequest, ViewportSessionAck, validate_viewport_bounds,
+        viewport_error,
+    },
     library_state::{AppState as LibraryAppState, CommandError, DeckKind},
     q4_capture_host::Q4CaptureView,
     q4_runtime::{
@@ -35,56 +39,24 @@ pub(crate) struct Q4AppState {
     lifecycle: AsyncMutex<()>,
     status: Arc<Mutex<Q4StatusView>>,
     capture_status: Arc<Mutex<Q4CaptureView>>,
-    resize_sender: watch::Sender<(u32, u32)>,
-    resize_receiver: Mutex<Option<watch::Receiver<(u32, u32)>>>,
+    viewport: EmbeddedViewportStore,
 }
 
 impl Q4AppState {
     pub(crate) fn discover() -> Self {
-        let (resize_sender, resize_receiver) = watch::channel((0, 0));
         Self {
             backend: Arc::new(Mutex::new(Q4BackendController::discover_default())),
             runtime: AsyncMutex::new(None),
             lifecycle: AsyncMutex::new(()),
             status: Arc::new(Mutex::new(Q4StatusView::default())),
             capture_status: Arc::new(Mutex::new(Q4CaptureView::default())),
-            resize_sender,
-            resize_receiver: Mutex::new(Some(resize_receiver)),
+            viewport: EmbeddedViewportStore::new(),
         }
-    }
-
-    pub(crate) fn start_resize_forwarder(&self, app: AppHandle) {
-        let receiver = self
-            .resize_receiver
-            .lock()
-            .ok()
-            .and_then(|mut receiver| receiver.take());
-        let Some(mut receiver) = receiver else {
-            return;
-        };
-        tauri::async_runtime::spawn(async move {
-            while receiver.changed().await.is_ok() {
-                let (width, height) = *receiver.borrow_and_update();
-                if width > 0 && height > 0 {
-                    app.state::<Q4AppState>().resize(width, height).await;
-                }
-            }
-        });
-    }
-
-    pub(crate) fn queue_resize(&self, width: u32, height: u32) {
-        self.resize_sender.send_replace((width, height));
     }
 
     pub(crate) async fn shutdown_runtime(&self) -> Result<(), Q4RuntimeError> {
         let _lifecycle = self.lifecycle.lock().await;
         shutdown_runtime_slot(&self.runtime).await
-    }
-
-    pub(crate) async fn resize(&self, width: u32, height: u32) {
-        if let Some(runtime) = clone_slot(&self.runtime).await {
-            let _ = runtime.resize(width, height).await;
-        }
     }
 
     pub(crate) async fn runtime_diagnostics(
@@ -208,7 +180,11 @@ pub(crate) async fn deck_q4_select_decoder(
 }
 
 #[tauri::command]
-#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::needless_pass_by_value
+)]
 pub(crate) async fn deck_q4_open(
     app: AppHandle,
     state: State<'_, Q4AppState>,
@@ -285,9 +261,13 @@ pub(crate) async fn deck_q4_open(
             return Err(command_error(error));
         }
     };
+    let parent = main_window(&app)?;
+    let viewport = state.viewport.current_visible()?;
     let deck_session = library.begin_deck_session(DeckKind::Q4)?;
     let started = Q4Runtime::start(
         app.clone(),
+        parent,
+        viewport,
         Arc::clone(&state.status),
         Arc::clone(&state.capture_status),
         config,
@@ -310,7 +290,21 @@ pub(crate) async fn deck_q4_open(
             return Err(command_error(error));
         }
     };
-    replace_slot(&state.runtime, started).await;
+    replace_slot(&state.runtime, Arc::clone(&started)).await;
+    // Viewport updates can arrive while the worker and renderer are starting,
+    // before the runtime is published into the state slot. Re-apply the
+    // authoritative latest revision after publication so none are lost.
+    let latest_viewport = match state.viewport.current() {
+        Ok(viewport) => viewport,
+        Err(error) => {
+            let _ = shutdown_runtime_slot(&state.runtime).await;
+            return Err(error);
+        }
+    };
+    if let Err(error) = started.set_viewport(latest_viewport).await {
+        let _ = shutdown_runtime_slot(&state.runtime).await;
+        return Err(command_error(error));
+    }
     if let Err(error) = deck_session.publish(slot_bindings) {
         let _ = shutdown_runtime_slot(&state.runtime).await;
         return Err(error);
@@ -471,29 +465,81 @@ pub(crate) async fn deck_q4_status_get(
 
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
-pub(crate) async fn deck_q4_fullscreen_status_get(
+pub(crate) async fn deck_q4_viewport_set_bounds(
+    app: AppHandle,
     state: State<'_, Q4AppState>,
-) -> Result<Option<bool>, CommandError> {
-    let Some(runtime) = clone_slot(&state.runtime).await else {
-        return Ok(None);
-    };
-    match runtime.fullscreen_status().await {
-        Ok(active) => Ok(Some(active)),
-        Err(error) if error.code == "deck.runtime_unavailable" => Ok(None),
-        Err(error) => Err(command_error(error)),
+    bounds: ViewportBoundsRequest,
+) -> Result<(), CommandError> {
+    let parent = main_window(&app)?;
+    let client_size = parent.inner_size().map_err(|_| {
+        CommandError::new(
+            "output.viewport_client_unavailable",
+            "LatentDeck could not measure the main window client area.",
+        )
+    })?;
+    let scale_factor = parent.scale_factor().map_err(|_| {
+        CommandError::new(
+            "output.viewport_scale_unavailable",
+            "LatentDeck could not measure the main window scale factor.",
+        )
+    })?;
+    let request =
+        validate_viewport_bounds(bounds, scale_factor, client_size.width, client_size.height)
+            .map_err(viewport_error)?;
+    let viewport = state.viewport.apply(request)?;
+    if let Some(runtime) = clone_slot(&state.runtime).await {
+        runtime
+            .set_viewport(viewport)
+            .await
+            .map_err(command_error)?;
     }
+    state.viewport.confirm_applied(request, viewport)?;
+    Ok(())
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) async fn deck_q4_viewport_session_begin(
+    app: AppHandle,
+    state: State<'_, Q4AppState>,
+) -> Result<ViewportSessionAck, CommandError> {
+    // Resolve the authoritative parent before mutating the epoch. A future
+    // auxiliary WebView must never select the child-output parent by invoking
+    // this command itself.
+    let _parent = main_window(&app)?;
+    let (session, hidden) = state.viewport.begin_session()?;
+    if let Some(runtime) = clone_slot(&state.runtime).await {
+        runtime.set_viewport(hidden).await.map_err(command_error)?;
+    }
+    state.viewport.confirm_session(session, hidden)?;
+    Ok(session)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) async fn deck_q4_fullscreen_status_get(
+    app: AppHandle,
+    fullscreen: State<'_, HostFullscreenController>,
+) -> Result<Option<bool>, CommandError> {
+    fullscreen
+        .status(&main_window(&app)?)
+        .await
+        .map(Some)
+        .map_err(|_| fullscreen_error())
 }
 
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) async fn deck_q4_fullscreen_set(
-    state: State<'_, Q4AppState>,
+    app: AppHandle,
+    fullscreen: State<'_, HostFullscreenController>,
     enabled: bool,
 ) -> Result<bool, CommandError> {
-    let runtime = clone_slot(&state.runtime)
+    let window = main_window(&app)?;
+    fullscreen
+        .set(&window, enabled)
         .await
-        .ok_or_else(runtime_inactive)?;
-    runtime.set_fullscreen(enabled).await.map_err(command_error)
+        .map_err(|_| fullscreen_error())
 }
 
 #[tauri::command]
@@ -633,6 +679,22 @@ fn runtime_inactive() -> CommandError {
     )
 }
 
+fn main_window(app: &AppHandle) -> Result<WebviewWindow, CommandError> {
+    app.get_webview_window("main").ok_or_else(|| {
+        CommandError::new(
+            "output.main_window_unavailable",
+            "The LatentDeck main window is unavailable.",
+        )
+    })
+}
+
+fn fullscreen_error() -> CommandError {
+    CommandError::new(
+        "output.window_fullscreen_failed",
+        "LatentDeck could not change the main-window fullscreen state.",
+    )
+}
+
 fn command_error(error: Q4RuntimeError) -> CommandError {
     record_global(LogLevel::Error, "deck.q4.command_failed", Some(&error.code));
     CommandError::new(error.code, error.message)
@@ -667,13 +729,10 @@ mod tests {
         assert!(!json.contains("W:\\\\"));
     }
 
-    #[tokio::test]
-    async fn resize_channel_coalesces_to_latest_dimensions() {
-        let (sender, mut receiver) = watch::channel((0, 0));
-        sender.send_replace((640, 360));
-        sender.send_replace((1280, 720));
-        receiver.changed().await.expect("sender remains live");
-        assert_eq!(*receiver.borrow_and_update(), (1280, 720));
+    #[test]
+    fn fullscreen_error_uses_the_shared_host_code() {
+        let value = serde_json::to_value(fullscreen_error()).expect("serialize error");
+        assert_eq!(value["code"], "output.window_fullscreen_failed");
     }
 
     #[tokio::test]

@@ -31,6 +31,32 @@ describe("LatentDeck minimum-window layout contract", () => {
     expect(responsive).toContain("grid-column: 1 / -1;");
   });
 
+  it("keeps D2 decoded output inside a revisioned native viewport", () => {
+    expect(d2Faceplate).toContain('data-native-viewport="d2"');
+    expect(d2Faceplate).toContain("new ResizeObserver(scheduleViewportSync)");
+    expect(d2Faceplate).toContain(
+      'globalThis.addEventListener("scroll", scheduleViewportSync, true)',
+    );
+    expect(d2Faceplate).toContain("d2Client.viewportSetBounds(bounds)");
+    expect(d2Faceplate).toContain("hiddenEmbeddedViewportBounds(");
+    expect(d2Faceplate).toContain("!viewportReady ||");
+    expect(d2Faceplate).toMatch(
+      /\.d2-output-monitor\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s,
+    );
+    expect(d2Faceplate).not.toMatch(
+      /<canvas|<video|ImageData|createImageBitmap/i,
+    );
+  });
+
+  it("gives the D2 viewport the only fullscreen faceplate row", () => {
+    expect(d2Faceplate).toContain("class:fullscreen-faceplate={active &&");
+    expect(d2Faceplate).toMatch(
+      /\.fullscreen-faceplate \.d2-output-monitor\s*\{[^}]*grid-template-rows:\s*minmax\(0, 1fr\);/s,
+    );
+    expect(d2Faceplate).toContain("await tick();");
+    expect(d2Faceplate).toContain("scheduleViewportSync();");
+  });
+
   it("collapses Q4 Bank content before the 960px app minimum", () => {
     const responsive = mediaBlock(q4Faceplate, 1180);
     expect(responsive).toContain(".bank-strip {");
@@ -41,5 +67,13 @@ describe("LatentDeck minimum-window layout contract", () => {
     expect(responsive).toContain(".bank-strip select {");
     expect(responsive).toContain(".preset-controls {");
     expect(responsive).toContain("grid-column: 1 / -1;");
+  });
+
+  it("keeps Q4 output visible while its controls scroll", () => {
+    expect(q4Faceplate).toMatch(
+      /\.q4-output-monitor\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s,
+    );
+    expect(q4Faceplate).toContain("viewportEpoch !== null");
+    expect(q4Faceplate).toContain("viewportApplied?.visible === true");
   });
 });

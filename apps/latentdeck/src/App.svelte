@@ -22,13 +22,18 @@
   } from "./library-model";
   import D2Faceplate from "./D2Faceplate.svelte";
   import Q4Faceplate from "./Q4Faceplate.svelte";
+  import { d2Client } from "./d2-client";
+  import {
+    createDeckFullscreenCoordinator,
+    type DeckSurface,
+    type FullscreenDeckSurface,
+  } from "./deck-fullscreen-coordinator";
   import {
     describeDiagnosticSaveResult,
     type DiagnosticSaveResult,
   } from "./diagnostic-model";
   import { product } from "./product";
-
-  type AppSurface = "library" | "d2" | "q4";
+  import { q4Client } from "./q4-client";
 
   let view: LibraryView = EMPTY_LIBRARY_VIEW;
   let search = "";
@@ -41,10 +46,11 @@
   let renameDraft = "";
   let tagDrafts: Record<string, string> = {};
   let membershipTargets: Record<string, string> = {};
-  let activeSurface: AppSurface = "library";
+  let activeSurface: DeckSurface = "library";
   let diagnosticBusy = false;
   let diagnosticFailed = false;
   let diagnosticStatus = "Path-free support bundle";
+  const fullscreenCoordinator = createDeckFullscreenCoordinator();
 
   let activeCollection: CollectionView | undefined;
   let persistedCollections: CollectionView[] = [];
@@ -59,11 +65,33 @@
     void initialLoad();
   });
 
-  async function selectSurface(surface: AppSurface): Promise<void> {
-    activeSurface = surface;
+  async function selectSurface(surface: DeckSurface): Promise<void> {
+    try {
+      await fullscreenCoordinator.transition({
+        target: surface,
+        current: () => activeSurface,
+        leave: leaveFullscreenDeck,
+        commit: (nextSurface) => {
+          activeSurface = nextSurface;
+        },
+      });
+    } catch (error) {
+      errorMessage = describeCommandError(error);
+      return;
+    }
     if (surface === "library") {
       errorMessage = "";
       await initialLoad();
+    }
+  }
+
+  async function leaveFullscreenDeck(
+    surface: FullscreenDeckSurface,
+  ): Promise<void> {
+    if (surface === "d2") {
+      await d2Client.fullscreenSet(false);
+    } else {
+      await q4Client.fullscreenSet(false);
     }
   }
 
@@ -851,9 +879,18 @@
       </div>
     </aside>
   </div>
-  {#if activeSurface === "d2"}
-    <D2Faceplate />
-  {:else if activeSurface === "q4"}
-    <Q4Faceplate />
-  {/if}
+  <section
+    class="deck-surface"
+    class:active={activeSurface === "d2"}
+    aria-hidden={activeSurface !== "d2"}
+  >
+    <D2Faceplate active={activeSurface === "d2"} {fullscreenCoordinator} />
+  </section>
+  <section
+    class="deck-surface"
+    class:active={activeSurface === "q4"}
+    aria-hidden={activeSurface !== "q4"}
+  >
+    <Q4Faceplate active={activeSurface === "q4"} {fullscreenCoordinator} />
+  </section>
 </main>

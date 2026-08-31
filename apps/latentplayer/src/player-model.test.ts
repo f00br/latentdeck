@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   EMPTY_PLAYER_VIEW,
   acceptTrustedSnapshot,
+  buildNativeViewportBounds,
   controlsFor,
   describeAudioAvailability,
   describeDiagnosticSaveResult,
@@ -11,9 +12,13 @@ import {
   formatFrameRate,
   formatFramePosition,
   fullscreenActionLabel,
+  hiddenNativeViewportBounds,
+  nextNativeViewportRevision,
   progressPercent,
   selectDisplayedError,
+  sameNativeViewportGeometry,
   spoutControlsFor,
+  viewportRetryRequiresRemeasure,
   type DiagnosticSaveResult,
   type PlayerError,
   type PlayerView,
@@ -248,5 +253,104 @@ describe("LatentPlayer presentation state", () => {
     expect(fullscreenActionLabel(null)).toBe("Fullscreen");
     expect(fullscreenActionLabel({ active: false })).toBe("Fullscreen");
     expect(fullscreenActionLabel({ active: true })).toBe("Exit fullscreen");
+  });
+
+  it("builds revisioned CSS viewport bounds without converting media pixels", () => {
+    expect(
+      buildNativeViewportBounds(
+        3,
+        7,
+        { left: 12.5, top: 48, width: 611.25, height: 344 },
+        1.25,
+        true,
+      ),
+    ).toEqual({
+      epoch: 3,
+      revision: 7,
+      xCss: 12.5,
+      yCss: 48,
+      widthCss: 611.25,
+      heightCss: 344,
+      scaleFactor: 1.25,
+      visible: true,
+    });
+  });
+
+  it("suspends a zero-sized native viewport and rejects unsafe measurements", () => {
+    expect(
+      buildNativeViewportBounds(
+        1,
+        8,
+        { left: 0, top: 0, width: 0, height: 200 },
+        1,
+        true,
+      ),
+    ).toMatchObject({ epoch: 1, revision: 8, visible: false });
+    expect(
+      buildNativeViewportBounds(
+        1,
+        9,
+        { left: -1, top: 0, width: 100, height: 100 },
+        1,
+        true,
+      ),
+    ).toBeNull();
+    expect(
+      buildNativeViewportBounds(
+        1,
+        10,
+        { left: 0, top: 0, width: Number.NaN, height: 100 },
+        1,
+        true,
+      ),
+    ).toBeNull();
+    expect(
+      buildNativeViewportBounds(
+        1,
+        11,
+        { left: 0, top: 0, width: 100, height: 100 },
+        9,
+        true,
+      ),
+    ).toBeNull();
+  });
+
+  it("coalesces unchanged viewport geometry while preserving revisions", () => {
+    const first = buildNativeViewportBounds(
+      1,
+      12,
+      { left: 10, top: 20, width: 600, height: 320 },
+      1.5,
+      true,
+    )!;
+    const unchanged = { ...first, revision: 13, xCss: 10.005 };
+    const resized = { ...first, revision: 14, widthCss: 601 };
+
+    expect(sameNativeViewportGeometry(first, unchanged)).toBe(true);
+    expect(sameNativeViewportGeometry(first, resized)).toBe(false);
+    expect(sameNativeViewportGeometry(first, { ...unchanged, epoch: 2 })).toBe(
+      false,
+    );
+  });
+
+  it("allocates client revisions inside one host-issued epoch", () => {
+    expect(nextNativeViewportRevision(0)).toBe(1);
+    expect(nextNativeViewportRevision(Number.MAX_SAFE_INTEGER)).toBeNull();
+    expect(hiddenNativeViewportBounds(4, 1, 1.5)).toMatchObject({
+      epoch: 4,
+      revision: 1,
+      visible: false,
+      widthCss: 0,
+    });
+    expect(hiddenNativeViewportBounds(0, 1, 1.5)).toBeNull();
+  });
+
+  it("re-measures instead of replaying stale DPI geometry", () => {
+    expect(viewportRetryRequiresRemeasure("output.viewport_scale_stale")).toBe(
+      true,
+    );
+    expect(
+      viewportRetryRequiresRemeasure("output.window_placement_failed"),
+    ).toBe(false);
   });
 });

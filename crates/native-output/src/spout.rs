@@ -236,13 +236,13 @@ mod raw_wgpu {
     ) -> Result<SenderStatus, SpoutError> {
         // SAFETY: the wgpu texture guard remains live through the synchronous
         // bridge call. The D3D11On12 wrapper acquires and releases the resource
-        // with matching PIXEL_SHADER_RESOURCE states and takes its own bounded
-        // reference for future frames.
+        // with matching combined pixel/non-pixel shader-resource states and
+        // takes its own bounded reference for future frames.
         let hal = unsafe { texture.as_hal::<wgpu::hal::api::Dx12>() }.ok_or(
             SpoutError::Backend(latentdeck_output_spout::BackendFault::IncompatibleDx12),
         )?;
         let resource = unsafe { hal.raw_resource() };
-        sender.send_frame(sequence, resource, Dx12ResourceState::PixelShaderResource)
+        sender.send_frame(sequence, resource, Dx12ResourceState::ShaderResource)
     }
 }
 

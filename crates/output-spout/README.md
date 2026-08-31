@@ -7,11 +7,12 @@ official `SpoutDX12` device and sends it with official `SendDX11Resource`.
 There is no encoded, readback, `SendImage`, or CPU-pixel fallback.
 
 The upstream `WrapDX12Resource` helper always releases to `PRESENT`. That is not
-safe for LatentDeck's reused wgpu frame texture, whose tracker ends in
-`PIXEL_SHADER_RESOURCE`. The bridge instead calls `CreateWrappedResource` on
-the official `ID3D11On12Device` with identical input and output states. A frame
-submitted as `PixelShaderResource` is returned in `PixelShaderResource`, so the
-next wgpu use does not inherit an untracked native state change.
+safe for LatentDeck's reused wgpu frame texture. Pinned wgpu-hal 30 maps a
+sampled `TextureUses::RESOURCE` texture to the combined
+`PIXEL_SHADER_RESOURCE | NON_PIXEL_SHADER_RESOURCE` D3D12 state. The bridge
+instead calls `CreateWrappedResource` on the official `ID3D11On12Device` with
+that exact state for both input and output, so the next wgpu use does not
+inherit an untracked native state change.
 
 The normal workspace build is network-free and does not require third-party
 source. It compiles the safe state machine and deterministic mock tests. To

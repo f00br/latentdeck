@@ -17,6 +17,9 @@ constexpr size_t kMaxRequestedNameBytes = 240;
 constexpr size_t kMaxWrappedResources = 8;
 constexpr uint32_t kDxgiFormatRgba8Unorm = 28;
 constexpr uint32_t kDxgiFormatBgra8Unorm = 87;
+constexpr uint32_t kShaderResourceState = static_cast<uint32_t>(
+    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
 struct wrapped_resource {
     ID3D12Resource* source = nullptr;
@@ -52,6 +55,7 @@ bool valid_initial_state(uint32_t state) noexcept {
     return state == D3D12_RESOURCE_STATE_COMMON ||
            state == D3D12_RESOURCE_STATE_RENDER_TARGET ||
            state == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE ||
+           state == kShaderResourceState ||
            state == D3D12_RESOURCE_STATE_COPY_DEST ||
            state == D3D12_RESOURCE_STATE_COPY_SOURCE;
 }
@@ -385,7 +389,9 @@ extern "C" int32_t latentdeck_spout_sender_send_resource(
             }
             ID3D11Resource* wrapped_resource_11 = nullptr;
             // The official SpoutDX12 helper hardcodes OutState=PRESENT. LatentDeck
-            // reuses a wgpu-owned texture whose tracker expects PIXEL_SHADER_RESOURCE,
+            // reuses a wgpu-owned texture whose tracker expects the exact state
+            // supplied by the caller (combined pixel/non-pixel shader resource
+            // for pinned wgpu 30),
             // so use the official D3D11On12 device with identical In/Out states.
             // The subsequent send remains the official SendDX11Resource path.
             if (!wrap_resource_preserving_state(

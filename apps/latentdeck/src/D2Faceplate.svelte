@@ -25,6 +25,7 @@
     type D2Algorithm,
     type D2Controls,
     type D2ErrorEvent,
+    type D2LoadedSources,
     type D2Slot,
     type D2Status,
     type D2Transport,
@@ -57,12 +58,43 @@
     transitionPresetLoopDraft,
     type D2DeckPreset,
     type DeckPreset,
+    type PresetCartridgeIdentity,
     type PresetLoopDraft,
   } from "./preset-model";
   import {
     LatestValueDispatcher,
     sameControlSnapshot,
   } from "./realtime-controls";
+  import {
+    currentlyPlayingReadout,
+    createDeckSourceTruthState,
+    deckSourceResolutionRetryDelay,
+    deckSourceDraftDiffers,
+    describeCurrentlyPlayingSource,
+    markDeckSourceDraftEdited,
+    reconcileDeckSourceTruth,
+    resolvePlayingSourceView,
+    shouldShowNextLoadDraftReadout,
+    type DeckSourceTruthState,
+  } from "./deck-source-truth";
+  import {
+    canSetDeckFullscreen,
+    shouldExitFullscreenForHiddenDeck,
+  } from "./deck-fullscreen-policy";
+  import type { DeckFullscreenCoordinator } from "./deck-fullscreen-coordinator";
+  import {
+    EMBEDDED_VIEWPORT_RETRY_DELAYS_MS,
+    buildEmbeddedViewportBounds,
+    embeddedViewportFullyInsideClient,
+    hiddenEmbeddedViewportBounds,
+    nextEmbeddedViewportRevision,
+    observeEmbeddedViewportReflow,
+    sameEmbeddedViewportGeometry,
+    type EmbeddedViewportBounds,
+  } from "./embedded-viewport";
+
+  export let active = false;
+  export let fullscreenCoordinator: DeckFullscreenCoordinator;
 
   type HostState = "checking" | "ready" | "pending" | "error";
 
@@ -86,6 +118,14 @@
   let controlsDraft: D2Controls = copyD2Controls(DEFAULT_D2_CONTROLS);
   let sourceAHash = "";
   let sourceBHash = "";
+  let sourceTruth: DeckSourceTruthState = createDeckSourceTruthState();
+  let loadedSourceViews: (CartridgeView | null)[] = [];
+  let loadedSourceResolutionKey = "";
+  let loadedSourceResolutionRequest = 0;
+  let loadedSourceResolutionRetryTimer: ReturnType<
+    typeof globalThis.setTimeout
+  > | null = null;
+  let loadedSourceResolutionRetryAttempt = 0;
   let seedDraft = "0";
   let controlsDirty = false;
   let seedDirty = false;
@@ -117,11 +157,30 @@
   let controlsDispatchPending = false;
   let controlsValidation: string | null = null;
   let fullscreenBusy = false;
+  let fullscreenStatusPending = false;
   let outputFullscreen: boolean | null = null;
+  let fullscreenAutoExitAttempted = false;
+  let faceplateRoot: HTMLElement | null = null;
+  let viewportAnchor: HTMLDivElement | null = null;
+  let viewportFrame: number | null = null;
+  let viewportDesired: EmbeddedViewportBounds | null = null;
+  let viewportApplied: EmbeddedViewportBounds | null = null;
+  let viewportQueued: EmbeddedViewportBounds | null = null;
+  let viewportSyncPending = false;
+  let viewportRetryTimer: ReturnType<typeof globalThis.setTimeout> | null =
+    null;
+  let viewportRetryAttempt = 0;
+  let viewportMounted = false;
+  let viewportEpoch: number | null = null;
+  let viewportClientRevision = 0;
+  let viewportError = "";
+  let viewportReady = false;
 
   let activeBank: CollectionView | undefined;
   let sourceA: CartridgeView | undefined;
   let sourceB: CartridgeView | undefined;
+  let loadedSourceA: CartridgeView | undefined;
+  let loadedSourceB: CartridgeView | undefined;
   let sourceOptions: CartridgeView[] = [];
   let presentCount = 0;
   let captureActive = false;
@@ -129,6 +188,7 @@
   let spoutState = describeSpout(null);
   let selectedCompatibilityReasons: readonly string[] = [];
   let selectedSourcesCompatible = false;
+  let sourceDraftDiffers = false;
   let captureUi = deckCaptureUiPolicy(capture.mode, capture.state);
   let captureActions = deckCaptureActions(capture.mode, capture.state, {
     loaded: status.loaded,
@@ -170,7 +230,7 @@
   );
   $: sourceOptions = mergePresetSourceOptions(
     bankView.cartridges,
-    presetResolvedSources.filter(
+    [...presetResolvedSources, ...loadedSourceViews].filter(
       (source) =>
         source !== null &&
         (source.archiveSha256 === sourceAHash ||
@@ -183,12 +243,30 @@
   $: sourceB = sourceOptions.find(
     (cartridge) => cartridge.archiveSha256 === sourceBHash,
   );
+  $: loadedSourceA =
+    status.sources === null
+      ? undefined
+      : resolvePlayingSourceView(status.sources.sourceA, [
+          ...sourceOptions,
+          ...loadedSourceViews,
+        ]);
+  $: loadedSourceB =
+    status.sources === null
+      ? undefined
+      : resolvePlayingSourceView(status.sources.sourceB, [
+          ...sourceOptions,
+          ...loadedSourceViews,
+        ]);
   $: selectedCompatibilityReasons = compatibilityReasons.get(sourceBHash) ?? [];
   $: selectedSourcesCompatible =
     compatibilityReady &&
     sourceA !== undefined &&
     sourceB !== undefined &&
     selectedCompatibilityReasons.length === 0;
+  $: sourceDraftDiffers = deckSourceDraftDiffers(
+    [sourceAHash, sourceBHash],
+    sourceTruth.loadedArchiveSha256s,
+  );
   $: presentCount = bankView.cartridges.filter(
     (cartridge) => cartridge.availability === "present",
   ).length;
@@ -208,12 +286,60 @@
   $: controlsValidation = d2ControlsValidationError(controlsDraft);
   $: spoutControls = spoutControlsFor(spout, hostBusy || spoutBusy);
   $: spoutState = describeSpout(spout);
+  $: viewportReady =
+    active && viewportEpoch !== null && viewportApplied?.visible === true;
+  $: {
+    const deckActive = active;
+    if (deckActive) fullscreenAutoExitAttempted = false;
+    if (
+      shouldExitFullscreenForHiddenDeck(
+        deckActive,
+        outputFullscreen,
+        fullscreenBusy || fullscreenStatusPending,
+      ) &&
+      !fullscreenAutoExitAttempted
+    ) {
+      fullscreenAutoExitAttempted = true;
+      void setFullscreenState(false);
+    } else if (!deckActive && outputFullscreen !== true) {
+      outputFullscreen = null;
+    }
+  }
+  $: if (viewportMounted) void syncViewportAfterSurfaceChange(active);
 
   onMount(() => {
     let disposed = false;
     const stopListeners: StopD2Listener[] = [];
-
+    viewportMounted = true;
+    const viewportObserver = new ResizeObserver(scheduleViewportSync);
+    if (viewportAnchor !== null) viewportObserver.observe(viewportAnchor);
+    const disconnectViewportReflow =
+      faceplateRoot === null
+        ? undefined
+        : observeEmbeddedViewportReflow(faceplateRoot, scheduleViewportSync);
+    globalThis.addEventListener("resize", scheduleViewportSync);
+    globalThis.addEventListener("scroll", scheduleViewportSync, true);
+    globalThis.visualViewport?.addEventListener("resize", scheduleViewportSync);
     void (async () => {
+      try {
+        const session = await d2Client.viewportSessionBegin();
+        if (!disposed) {
+          viewportEpoch = session.epoch;
+          viewportClientRevision = 0;
+          viewportDesired = null;
+          viewportApplied = null;
+          viewportQueued = null;
+          clearViewportRetry(true);
+          await tick();
+          if (!disposed) scheduleViewportSync();
+        }
+      } catch (error) {
+        if (!disposed) {
+          viewportError = describeCommandError(error);
+          markHostFailure(error);
+        }
+      }
+
       try {
         const listeners = await Promise.all([
           d2Client.onStatus((incoming) => {
@@ -254,11 +380,168 @@
 
     return () => {
       disposed = true;
+      viewportMounted = false;
+      viewportObserver.disconnect();
+      disconnectViewportReflow?.();
+      globalThis.removeEventListener("resize", scheduleViewportSync);
+      globalThis.removeEventListener("scroll", scheduleViewportSync, true);
+      globalThis.visualViewport?.removeEventListener(
+        "resize",
+        scheduleViewportSync,
+      );
+      if (viewportFrame !== null) {
+        globalThis.cancelAnimationFrame(viewportFrame);
+        viewportFrame = null;
+      }
+      clearViewportRetry();
+      clearLoadedSourceResolutionRetry();
+      viewportQueued = null;
+      const epoch = viewportEpoch;
+      const revision = nextEmbeddedViewportRevision(viewportClientRevision);
+      if (epoch !== null && revision !== null) {
+        const hidden = hiddenEmbeddedViewportBounds(
+          epoch,
+          revision,
+          globalThis.devicePixelRatio,
+        );
+        if (hidden !== null) {
+          viewportClientRevision = revision;
+          viewportDesired = hidden;
+          void d2Client.viewportSetBounds(hidden).catch(() => undefined);
+        }
+      }
+      viewportEpoch = null;
       globalThis.clearInterval(spoutTimer);
       controlsDispatcher.dispose();
       for (const stop of stopListeners) stop();
     };
   });
+
+  function scheduleViewportSync(): void {
+    if (!viewportMounted || viewportFrame !== null) return;
+    viewportFrame = globalThis.requestAnimationFrame(() => {
+      viewportFrame = null;
+      measureViewport();
+    });
+  }
+
+  async function syncViewportAfterSurfaceChange(
+    deckActive: boolean,
+  ): Promise<void> {
+    await tick();
+    scheduleViewportSync();
+    if (deckActive) await refreshFullscreenStatus();
+  }
+
+  function clearViewportRetry(resetAttempt = false): void {
+    if (viewportRetryTimer !== null) {
+      globalThis.clearTimeout(viewportRetryTimer);
+      viewportRetryTimer = null;
+    }
+    if (resetAttempt) viewportRetryAttempt = 0;
+  }
+
+  function scheduleViewportRetry(
+    bounds: EmbeddedViewportBounds,
+    error: unknown,
+  ): void {
+    if (
+      !viewportMounted ||
+      viewportDesired?.epoch !== bounds.epoch ||
+      viewportDesired?.revision !== bounds.revision ||
+      sameEmbeddedViewportGeometry(viewportApplied, bounds)
+    ) {
+      return;
+    }
+    viewportError = describeCommandError(error);
+    if (viewportRetryTimer !== null) return;
+    const delay = EMBEDDED_VIEWPORT_RETRY_DELAYS_MS[viewportRetryAttempt];
+    if (delay === undefined) return;
+    viewportRetryAttempt += 1;
+    viewportRetryTimer = globalThis.setTimeout(() => {
+      viewportRetryTimer = null;
+      if (
+        !viewportMounted ||
+        viewportDesired?.epoch !== bounds.epoch ||
+        viewportDesired?.revision !== bounds.revision ||
+        sameEmbeddedViewportGeometry(viewportApplied, bounds)
+      ) {
+        return;
+      }
+      viewportQueued = bounds;
+      void flushViewportSync();
+    }, delay);
+  }
+
+  function measureViewport(): void {
+    const epoch = viewportEpoch;
+    const anchor = viewportAnchor;
+    if (epoch === null || anchor === null || !anchor.isConnected) return;
+    const rect = anchor.getBoundingClientRect();
+    const style = globalThis.getComputedStyle(anchor);
+    const scaleFactor = globalThis.devicePixelRatio;
+    const fullyInsideClient = embeddedViewportFullyInsideClient(
+      rect,
+      document.documentElement.clientWidth,
+      document.documentElement.clientHeight,
+      scaleFactor,
+    );
+    const visible =
+      active &&
+      !document.hidden &&
+      anchor.offsetParent !== null &&
+      style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      style.opacity !== "0" &&
+      fullyInsideClient;
+    const revision = nextEmbeddedViewportRevision(viewportClientRevision);
+    if (revision === null) {
+      viewportError =
+        "LatentDeck exhausted the embedded LD-D2 video-area revision counter.";
+      return;
+    }
+    const bounds =
+      visible && rect.width >= 1 && rect.height >= 1
+        ? buildEmbeddedViewportBounds(epoch, revision, rect, scaleFactor, true)
+        : hiddenEmbeddedViewportBounds(epoch, revision, scaleFactor);
+    if (bounds === null) {
+      viewportError =
+        "LatentDeck could not measure a safe LD-D2 video area. Resize the window and retry.";
+      return;
+    }
+    if (sameEmbeddedViewportGeometry(viewportDesired, bounds)) return;
+    viewportClientRevision = revision;
+    viewportDesired = bounds;
+    clearViewportRetry(true);
+    viewportQueued = bounds;
+    void flushViewportSync();
+  }
+
+  async function flushViewportSync(): Promise<void> {
+    if (viewportSyncPending || viewportQueued === null) return;
+    const bounds = viewportQueued;
+    viewportQueued = null;
+    viewportSyncPending = true;
+    try {
+      await d2Client.viewportSetBounds(bounds);
+      viewportApplied = bounds;
+      if (
+        viewportDesired?.epoch === bounds.epoch &&
+        viewportDesired.revision === bounds.revision
+      ) {
+        clearViewportRetry(true);
+        viewportError = "";
+      }
+    } catch (error) {
+      // A monitor-DPI transition can invalidate the in-flight scale. Re-read
+      // the DOM immediately; the bounded retry remains for transient host IO.
+      scheduleViewportSync();
+      scheduleViewportRetry(bounds, error);
+    } finally {
+      viewportSyncPending = false;
+      if (viewportQueued !== null) void flushViewportSync();
+    }
+  }
 
   async function refreshBank(): Promise<void> {
     if (presetBusy) return;
@@ -278,11 +561,11 @@
         bankView.cartridges,
         presetResolvedSources,
       );
-      const choices = chooseD2Sources(
-        availableSources,
-        sourceAHash,
-        sourceBHash,
-      );
+      const choices =
+        sourceTruth.loadedArchiveSha256s !== null &&
+        !sourceTruth.draftEditedAfterLoad
+          ? { sourceAHash, sourceBHash }
+          : chooseD2Sources(availableSources, sourceAHash, sourceBHash);
       if (
         choices.sourceAHash !== sourceAHash ||
         choices.sourceBHash !== sourceBHash
@@ -319,6 +602,7 @@
       discardPresetLoopDraft();
       sourceAHash = choices.sourceAHash;
       sourceBHash = choices.sourceBHash;
+      markSourceDraftEdited();
       await tick();
       await refreshSpatialCompatibility();
     } catch (error) {
@@ -414,6 +698,7 @@
       bankView = incoming;
       presetResolvedSources = globallyResolved;
       [sourceAHash, sourceBHash] = resolution.hashes;
+      markSourceDraftEdited();
       controlsDirty = true;
       seedDirty = true;
       controlsDraft = d2ControlsFromPreset(preset);
@@ -480,6 +765,7 @@
     if (presetBusy) return;
     discardPresetLoopDraft();
     sourceAHash = (event.currentTarget as HTMLSelectElement).value;
+    markSourceDraftEdited();
     await tick();
     await refreshSpatialCompatibility();
   }
@@ -488,6 +774,7 @@
     if (presetBusy) return;
     discardPresetLoopDraft();
     sourceBHash = (event.currentTarget as HTMLSelectElement).value;
+    markSourceDraftEdited();
   }
 
   async function refreshHostStatus(): Promise<void> {
@@ -646,7 +933,6 @@
       hostMessage = controlsValidation;
       return;
     }
-    outputFullscreen = null;
     await runHostAction(async () => {
       const pendingLoops = presetLoopDraft?.loops;
       const transport =
@@ -724,7 +1010,7 @@
   async function restart(): Promise<void> {
     if (!captureUi.transport || captureBusy) return;
     await runHostAction(async () => {
-      resetMessage = "Restart requested · waiting for causal reset barrier.";
+      resetMessage = "Restarting playback…";
       applyHostStatus(await d2Client.restart());
     });
   }
@@ -778,25 +1064,133 @@
     }
   }
 
+  function currentSourceDraft(): readonly [string, string] {
+    return [sourceAHash, sourceBHash];
+  }
+
+  function markSourceDraftEdited(): void {
+    sourceTruth = markDeckSourceDraftEdited(sourceTruth, currentSourceDraft());
+  }
+
+  function reconcileSourceTruth(incoming: D2Status): void {
+    const loadedHashes =
+      incoming.loaded && incoming.sources !== null
+        ? ([
+            incoming.sources.sourceA.archiveSha256,
+            incoming.sources.sourceB.archiveSha256,
+          ] as const)
+        : null;
+    const reconciliation = reconcileDeckSourceTruth(
+      sourceTruth,
+      currentSourceDraft(),
+      loadedHashes,
+    );
+    sourceTruth = reconciliation.state;
+    [sourceAHash, sourceBHash] = reconciliation.draftArchiveSha256s;
+    resolveLoadedSourceViews(incoming.loaded ? incoming.sources : null);
+    if (reconciliation.synchronized) {
+      void tick().then(() => refreshSpatialCompatibility());
+    }
+  }
+
+  function clearLoadedSourceResolutionRetry(resetAttempt = false): void {
+    if (loadedSourceResolutionRetryTimer !== null) {
+      globalThis.clearTimeout(loadedSourceResolutionRetryTimer);
+      loadedSourceResolutionRetryTimer = null;
+    }
+    if (resetAttempt) loadedSourceResolutionRetryAttempt = 0;
+  }
+
+  function resolveLoadedSourceViews(
+    sources: D2LoadedSources | null,
+    retry = false,
+  ): void {
+    if (sources === null) {
+      clearLoadedSourceResolutionRetry(true);
+      loadedSourceResolutionKey = "";
+      loadedSourceResolutionRequest += 1;
+      loadedSourceViews = [];
+      return;
+    }
+    const identities: PresetCartridgeIdentity[] = [
+      {
+        cartridge_id: sources.sourceA.cartridgeId,
+        archive_sha256: sources.sourceA.archiveSha256,
+      },
+      {
+        cartridge_id: sources.sourceB.cartridgeId,
+        archive_sha256: sources.sourceB.archiveSha256,
+      },
+    ];
+    const key = JSON.stringify(identities);
+    const identityChanged = key !== loadedSourceResolutionKey;
+    if (!retry && !identityChanged) return;
+    if (identityChanged) clearLoadedSourceResolutionRetry(true);
+    loadedSourceResolutionKey = key;
+    const request = ++loadedSourceResolutionRequest;
+
+    if (identityChanged) {
+      loadedSourceViews = identities.map((identity) => {
+        const candidate = sourceOptions.find(
+          (source) =>
+            source.cartridgeId === identity.cartridge_id &&
+            source.archiveSha256 === identity.archive_sha256,
+        );
+        return candidate ?? null;
+      });
+    }
+    void invoke<(CartridgeView | null)[]>("library_resolve_preset_sources", {
+      identities,
+    })
+      .then((resolved) => {
+        if (
+          request !== loadedSourceResolutionRequest ||
+          key !== loadedSourceResolutionKey
+        )
+          return;
+        loadedSourceViews = resolved;
+        clearLoadedSourceResolutionRetry(true);
+        void tick().then(() => refreshSpatialCompatibility());
+      })
+      .catch(() => {
+        if (
+          request !== loadedSourceResolutionRequest ||
+          key !== loadedSourceResolutionKey
+        )
+          return;
+        // Runtime IDs/hashes remain authoritative even when the friendly
+        // Library lookup is unavailable. Retry only a bounded number of times.
+        const delay = deckSourceResolutionRetryDelay(
+          loadedSourceResolutionRetryAttempt,
+        );
+        if (delay === null) return;
+        loadedSourceResolutionRetryAttempt += 1;
+        clearLoadedSourceResolutionRetry();
+        loadedSourceResolutionRetryTimer = globalThis.setTimeout(() => {
+          loadedSourceResolutionRetryTimer = null;
+          if (key !== loadedSourceResolutionKey) return;
+          resolveLoadedSourceViews(sources, true);
+        }, delay);
+      });
+  }
+
   function applyHostStatus(incoming: D2Status): void {
+    reconcileSourceTruth(incoming);
     status = incoming;
     hostState = "ready";
     hostMessage = incoming.loaded
-      ? "D2 stream online · host status is authoritative."
-      : "D2 host ready · load A and B to begin.";
+      ? "D2 ready."
+      : "D2 ready · load A and B to begin.";
     if (incoming.pendingReset) {
-      resetMessage = `Causal reset pending · ${incoming.pendingResetReasons.join(" · ")}`;
-    } else if (resetMessage !== "") {
-      resetMessage = `Causal state ready · generation ${incoming.streamGeneration}`;
-    }
+      resetMessage = "Restarting playback…";
+    } else resetMessage = "";
     if (!controlsDirty) controlsDraft = copyD2Controls(incoming.controls);
     if (!seedDirty) seedDraft = String(incoming.seed);
-    if (!incoming.loaded) outputFullscreen = null;
   }
 
   function applyHostError(incoming: D2ErrorEvent): void {
     hostState = "error";
-    hostMessage = `${incoming.code}: ${incoming.detail}`;
+    hostMessage = incoming.detail;
   }
 
   function applyCaptureStatus(incoming: D2CaptureView): void {
@@ -818,7 +1212,7 @@
     capture = {
       ...capture,
       state: "error",
-      detail: `${incoming.code}: ${incoming.detail}`,
+      detail: incoming.detail,
     };
   }
 
@@ -886,33 +1280,79 @@
   }
 
   async function refreshFullscreenStatus(): Promise<void> {
-    if (!status.loaded) {
-      outputFullscreen = null;
+    if (!active) {
+      if (outputFullscreen !== true) outputFullscreen = null;
       return;
     }
-    if (fullscreenBusy) return;
+    if (fullscreenBusy || fullscreenStatusPending) return;
+    fullscreenStatusPending = true;
+    try {
+      outputFullscreen = await fullscreenCoordinator.run(() =>
+        d2Client.fullscreenStatusGet(),
+      );
+    } catch (error) {
+      // A status failure can mean a partially mutated host with retained
+      // recovery state. Keep an Exit route visible instead of assuming the
+      // HWND is safely windowed.
+      if (outputFullscreen === null) outputFullscreen = true;
+      markHostFailure(error);
+    } finally {
+      fullscreenStatusPending = false;
+    }
+  }
+
+  async function toggleFullscreen(): Promise<void> {
+    if (outputFullscreen === null) return;
+    await setFullscreenState(!outputFullscreen);
+  }
+
+  async function setFullscreenState(enabled: boolean): Promise<void> {
+    if (
+      !canSetDeckFullscreen(
+        {
+          active,
+          runtimeLoaded: status.loaded,
+          viewportReady,
+          busy: fullscreenBusy || fullscreenStatusPending,
+          current: outputFullscreen,
+        },
+        enabled,
+      )
+    ) {
+      return;
+    }
+    const previous = outputFullscreen;
     fullscreenBusy = true;
     try {
-      outputFullscreen = await d2Client.fullscreenStatusGet();
+      outputFullscreen = await fullscreenCoordinator.run(() =>
+        d2Client.fullscreenSet(enabled),
+      );
+      await tick();
+      scheduleViewportSync();
     } catch (error) {
-      outputFullscreen = null;
       markHostFailure(error);
+      try {
+        outputFullscreen = await fullscreenCoordinator.run(() =>
+          d2Client.fullscreenStatusGet(),
+        );
+      } catch {
+        outputFullscreen = enabled || previous === true;
+      }
     } finally {
       fullscreenBusy = false;
     }
   }
 
-  async function toggleFullscreen(): Promise<void> {
-    if (!status.loaded || fullscreenBusy || outputFullscreen === null) return;
-    fullscreenBusy = true;
-    try {
-      outputFullscreen = await d2Client.fullscreenSet(!outputFullscreen);
-    } catch (error) {
-      outputFullscreen = null;
-      markHostFailure(error);
-    } finally {
-      fullscreenBusy = false;
-    }
+  function handleWindowKeydown(event: KeyboardEvent): void {
+    if (
+      event.key !== "Escape" ||
+      outputFullscreen !== true ||
+      fullscreenBusy ||
+      fullscreenStatusPending
+    )
+      return;
+    event.preventDefault();
+    void setFullscreenState(false);
   }
 
   function updateSeedDraft(event: Event): void {
@@ -943,17 +1383,42 @@
     return `${fileName} · ${format.aspectLabel} · ${format.decodedGeometry}${latentGrid} · ${shortHash(cartridge.archiveSha256)}${unavailable}`;
   }
 
-  function compatibilityLabel(cartridge: CartridgeView): string {
-    const reasons = compatibilityReasons.get(cartridge.archiveSha256) ?? [];
+  function compatibilityReasonsFor(
+    cartridge: CartridgeView,
+    referenceArchiveSha256: string,
+    reasonsByHash: ReadonlyMap<string, readonly string[]>,
+  ): readonly string[] {
+    return referenceArchiveSha256 === ""
+      ? []
+      : (reasonsByHash.get(cartridge.archiveSha256) ?? []);
+  }
+
+  function compatibilityLabel(
+    cartridge: CartridgeView,
+    referenceArchiveSha256: string,
+    reasonsByHash: ReadonlyMap<string, readonly string[]>,
+  ): string {
+    const reasons = compatibilityReasonsFor(
+      cartridge,
+      referenceArchiveSha256,
+      reasonsByHash,
+    );
     return reasons.length === 0
       ? cartridgeLabel(cartridge)
       : `${cartridgeLabel(cartridge)} · INCOMPATIBLE: ${reasons.join("; ")}`;
   }
 
-  function isIncompatibleCandidate(cartridge: CartridgeView): boolean {
+  function isIncompatibleCandidate(
+    cartridge: CartridgeView,
+    referenceArchiveSha256: string,
+    ready: boolean,
+    reasonsByHash: ReadonlyMap<string, readonly string[]>,
+  ): boolean {
     return (
-      !compatibilityReady ||
-      (compatibilityReasons.get(cartridge.archiveSha256)?.length ?? 0) > 0
+      referenceArchiveSha256 === "" ||
+      !ready ||
+      compatibilityReasonsFor(cartridge, referenceArchiveSha256, reasonsByHash)
+        .length > 0
     );
   }
 
@@ -965,8 +1430,14 @@
   }
 </script>
 
+<svelte:window onkeydown={handleWindowKeydown} />
+
 <section
+  bind:this={faceplateRoot}
   class="d2-faceplate"
+  class:fullscreen-faceplate={active &&
+    outputFullscreen === true &&
+    status.loaded}
   aria-labelledby="d2-title"
   aria-busy={presetBusy || captureBusy}
   inert={presetBusy || captureBusy}
@@ -986,11 +1457,7 @@
       <span class="d2-state-lamp"></span>
       <div>
         <strong>{hostState}</strong>
-        <small
-          >{status.loaded
-            ? `GEN ${status.streamGeneration} · SEQ ${status.streamSequence}`
-            : "NO STREAM"}</small
-        >
+        <small>{status.loaded ? "STREAM ACTIVE" : "NO STREAM"}</small>
       </div>
     </div>
   </header>
@@ -1097,9 +1564,9 @@
       is performed.
     </p>
     <p>
-      Realtime acceptance target: 448×800 at 24 fps. Other intrinsic grids
-      remain playable but are not yet Deck benchmark-certified and are never
-      downscaled implicitly.
+      Portrait and landscape sources are supported at their intrinsic geometry.
+      Direct synthesis requires the same compatible spatial grid; LatentDeck
+      never performs a hidden resize or re-encode.
     </p>
     <div class="d2-preset-controls">
       <span>DECK PRESET · JSON</span>
@@ -1127,16 +1594,65 @@
     </div>
   </section>
 
+  <section class="d2-output-monitor" aria-label="LD-D2 native video output">
+    <header>
+      <div>
+        <span>NATIVE DX12 OUTPUT</span>
+        <strong>{status.loaded ? "POST-OPERATOR STREAM" : "STANDBY"}</strong>
+      </div>
+      <small>
+        {spout?.width && spout?.height
+          ? `${spout.width}×${spout.height} intrinsic`
+          : sourceA === undefined
+            ? "Awaiting compatible sources"
+            : `${sourceA.decodedWidth}×${sourceA.decodedHeight} intrinsic`}
+      </small>
+    </header>
+    <div class="d2-viewport-frame" class:live={status.loaded}>
+      <div
+        bind:this={viewportAnchor}
+        class="d2-native-viewport-anchor"
+        data-native-viewport="d2"
+        aria-hidden="true"
+      ></div>
+      {#if !status.loaded}
+        <div class="d2-output-placeholder" aria-live="polite">
+          <span>EMBEDDED PRESENTATION</span>
+          <strong>Load A + B to start the native output</strong>
+          <small>Intrinsic aspect-fit · no hidden resize or re-encode</small>
+        </div>
+      {/if}
+    </div>
+    <footer>
+      <span>
+        {status.loaded
+          ? "Embedded stream active"
+          : "Native child surface reserved inside LD-D2"}
+      </span>
+      <small class:error={viewportError !== ""}>
+        {viewportError ||
+          "Viewport follows resize, scroll and fullscreen changes."}
+      </small>
+    </footer>
+  </section>
+
   <div class="d2-signal-grid">
+    {#if status.loaded && sourceDraftDiffers}<p
+        class="d2-next-load-notice"
+        role="status"
+      >
+        NEXT LOAD DRAFT differs from CURRENTLY PLAYING. Runtime playback is
+        unchanged until Load A + B succeeds.
+      </p>{/if}
     <section class="source-module source-a" aria-labelledby="source-a-title">
       <header>
         <span>A</span>
         <div>
-          <p>Source load draft</p>
+          <p>NEXT LOAD DRAFT</p>
           <h3 id="source-a-title">Cartridge A</h3>
         </div>
       </header>
-      <label for="d2-source-a">Bank cartridge</label>
+      <label for="d2-source-a">Next load cartridge</label>
       <select
         id="d2-source-a"
         value={sourceAHash}
@@ -1153,27 +1669,67 @@
       </select>
       {#if status.loaded && status.sources !== null}<p
           class="loaded-source-label"
+          title={status.sources.sourceA.archiveSha256}
         >
-          LOADED {shortHash(status.sources.sourceA.archiveSha256)} · {status
-            .sources.sourceA.latentSlotCount} LATENT SLOTS{status.sources
-            .sourceA.archiveSha256 !== sourceAHash
-            ? " · DRAFT DIFFERS"
+          CURRENTLY PLAYING · {describeCurrentlyPlayingSource(
+            status.sources.sourceA,
+            loadedSourceA,
+          )}{status.sources.sourceA.archiveSha256 !== sourceAHash
+            ? " · NEXT LOAD DRAFT DIFFERS"
             : ""}
         </p>{/if}
-      <div class="source-readout">
-        <span>{sourceA?.codecProfile ?? "NO SOURCE"}</span>
-        <strong
-          >{sourceA === undefined
-            ? "—"
-            : `${sourceA.decodedWidth}×${sourceA.decodedHeight}`}</strong
+      {#if status.loaded && status.sources !== null}{@const runtimeReadoutA =
+          currentlyPlayingReadout(status.sources.sourceA, loadedSourceA)}
+        <div class="source-readout runtime-source-readout">
+          <span>CURRENTLY PLAYING · {runtimeReadoutA.codecLabel}</span>
+          <strong>{runtimeReadoutA.geometryLabel}</strong>
+          <small>{runtimeReadoutA.frameLabel}</small>
+          <small>{runtimeReadoutA.latentLabel}</small>
+        </div>{:else if status.loaded}<div
+          class="source-readout runtime-source-readout"
         >
-        <small>{sourceA?.decodedFrameCount ?? 0} decoded frames</small>
-        {#if sourceA !== undefined}<small
-            >{describeIntrinsicFormat(sourceA).aspectLabel} · LATENT {describeIntrinsicFormat(
-              sourceA,
-            ).latentGrid ?? "N/A"}</small
-          >{/if}
-      </div>
+          <span>CURRENTLY PLAYING</span>
+          <strong>RUNTIME STATUS PENDING</strong>
+          <small>SOURCE IDENTITY PENDING</small>
+        </div>{:else}<div class="source-readout draft-primary-readout">
+          <span>NEXT LOAD DRAFT · {sourceA?.codecProfile ?? "NO SOURCE"}</span>
+          <strong
+            >{sourceA === undefined
+              ? "NO DRAFT SOURCE"
+              : `${sourceA.decodedWidth}×${sourceA.decodedHeight}`}</strong
+          >
+          <small
+            >{sourceA === undefined
+              ? "SELECT A CARTRIDGE"
+              : `${sourceA.decodedFrameCount} DECODED FRAMES`}</small
+          >
+          {#if sourceA !== undefined}<small
+              >{describeIntrinsicFormat(sourceA).aspectLabel} · LATENT {describeIntrinsicFormat(
+                sourceA,
+              ).latentGrid ?? "N/A"}</small
+            >{/if}
+        </div>{/if}
+      {#if status.loaded && status.sources !== null && shouldShowNextLoadDraftReadout(status.sources.sourceA, sourceAHash, sourceA)}<div
+          class="draft-source-readout"
+        >
+          <span
+            >NEXT LOAD DRAFT · {sourceA === undefined
+              ? "UNRESOLVED"
+              : "DIFFERS"}</span
+          >
+          <strong
+            >{sourceA === undefined
+              ? "DRAFT UNRESOLVED"
+              : `${sourceA.decodedWidth}×${sourceA.decodedHeight}`}</strong
+          >
+          <small
+            >{sourceA === undefined
+              ? "CURRENTLY PLAYING IS UNCHANGED"
+              : `${sourceA.decodedFrameCount} DECODED FRAMES · ${
+                  describeIntrinsicFormat(sourceA).aspectLabel
+                }`}</small
+          >
+        </div>{/if}
       <div class="source-transport">
         <button
           type="button"
@@ -1531,11 +2087,11 @@
       <header>
         <span>B</span>
         <div>
-          <p>Source load draft</p>
+          <p>NEXT LOAD DRAFT</p>
           <h3 id="source-b-title">Cartridge B</h3>
         </div>
       </header>
-      <label for="d2-source-b">Bank cartridge</label>
+      <label for="d2-source-b">Next load cartridge</label>
       <select
         id="d2-source-b"
         value={sourceBHash}
@@ -1546,41 +2102,92 @@
           <option
             value={cartridge.archiveSha256}
             disabled={cartridge.availability !== "present" ||
-              isIncompatibleCandidate(cartridge)}
-            >{compatibilityLabel(cartridge)}</option
+              isIncompatibleCandidate(
+                cartridge,
+                sourceAHash,
+                compatibilityReady,
+                compatibilityReasons,
+              )}
+            >{compatibilityLabel(
+              cartridge,
+              sourceAHash,
+              compatibilityReasons,
+            )}</option
           >
         {/each}
       </select>
       {#if status.loaded && status.sources !== null}<p
           class="loaded-source-label"
+          title={status.sources.sourceB.archiveSha256}
         >
-          LOADED {shortHash(status.sources.sourceB.archiveSha256)} · {status
-            .sources.sourceB.latentSlotCount} LATENT SLOTS{status.sources
-            .sourceB.archiveSha256 !== sourceBHash
-            ? " · DRAFT DIFFERS"
+          CURRENTLY PLAYING · {describeCurrentlyPlayingSource(
+            status.sources.sourceB,
+            loadedSourceB,
+          )}{status.sources.sourceB.archiveSha256 !== sourceBHash
+            ? " · NEXT LOAD DRAFT DIFFERS"
             : ""}
         </p>{/if}
       {#if selectedCompatibilityReasons.length > 0}<p
-          class="d2-bank-error"
+          class="draft-compatibility-note"
           role="status"
         >
-          B cannot mix with A: {selectedCompatibilityReasons.join("; ")}. Use an
-          explicit Toolkit Align/Crop node to create a compatible `.lc`.
+          NEXT LOAD DRAFT ONLY · B cannot mix with draft A: {selectedCompatibilityReasons.join(
+            "; ",
+          )}. The currently playing stream is unchanged. Use an explicit Toolkit
+          Align/Crop node to create a compatible `.lc`.
         </p>{/if}
-      <div class="source-readout">
-        <span>{sourceB?.codecProfile ?? "NO SOURCE"}</span>
-        <strong
-          >{sourceB === undefined
-            ? "—"
-            : `${sourceB.decodedWidth}×${sourceB.decodedHeight}`}</strong
+      {#if status.loaded && status.sources !== null}{@const runtimeReadoutB =
+          currentlyPlayingReadout(status.sources.sourceB, loadedSourceB)}
+        <div class="source-readout runtime-source-readout">
+          <span>CURRENTLY PLAYING · {runtimeReadoutB.codecLabel}</span>
+          <strong>{runtimeReadoutB.geometryLabel}</strong>
+          <small>{runtimeReadoutB.frameLabel}</small>
+          <small>{runtimeReadoutB.latentLabel}</small>
+        </div>{:else if status.loaded}<div
+          class="source-readout runtime-source-readout"
         >
-        <small>{sourceB?.decodedFrameCount ?? 0} decoded frames</small>
-        {#if sourceB !== undefined}<small
-            >{describeIntrinsicFormat(sourceB).aspectLabel} · LATENT {describeIntrinsicFormat(
-              sourceB,
-            ).latentGrid ?? "N/A"}</small
-          >{/if}
-      </div>
+          <span>CURRENTLY PLAYING</span>
+          <strong>RUNTIME STATUS PENDING</strong>
+          <small>SOURCE IDENTITY PENDING</small>
+        </div>{:else}<div class="source-readout draft-primary-readout">
+          <span>NEXT LOAD DRAFT · {sourceB?.codecProfile ?? "NO SOURCE"}</span>
+          <strong
+            >{sourceB === undefined
+              ? "NO DRAFT SOURCE"
+              : `${sourceB.decodedWidth}×${sourceB.decodedHeight}`}</strong
+          >
+          <small
+            >{sourceB === undefined
+              ? "SELECT A CARTRIDGE"
+              : `${sourceB.decodedFrameCount} DECODED FRAMES`}</small
+          >
+          {#if sourceB !== undefined}<small
+              >{describeIntrinsicFormat(sourceB).aspectLabel} · LATENT {describeIntrinsicFormat(
+                sourceB,
+              ).latentGrid ?? "N/A"}</small
+            >{/if}
+        </div>{/if}
+      {#if status.loaded && status.sources !== null && shouldShowNextLoadDraftReadout(status.sources.sourceB, sourceBHash, sourceB)}<div
+          class="draft-source-readout"
+        >
+          <span
+            >NEXT LOAD DRAFT · {sourceB === undefined
+              ? "UNRESOLVED"
+              : "DIFFERS"}</span
+          >
+          <strong
+            >{sourceB === undefined
+              ? "DRAFT UNRESOLVED"
+              : `${sourceB.decodedWidth}×${sourceB.decodedHeight}`}</strong
+          >
+          <small
+            >{sourceB === undefined
+              ? "CURRENTLY PLAYING IS UNCHANGED"
+              : `${sourceB.decodedFrameCount} DECODED FRAMES · ${
+                  describeIntrinsicFormat(sourceB).aspectLabel
+                }`}</small
+          >
+        </div>{/if}
       <div class="source-transport">
         <button
           type="button"
@@ -1622,6 +2229,7 @@
         disabled={hostBusy ||
           captureBusy ||
           !captureUi.load ||
+          !viewportReady ||
           backend.state !== "ready" ||
           bankBusy ||
           sourceA === undefined ||
@@ -1712,13 +2320,22 @@
       class:active={outputFullscreen === true}
       aria-pressed={outputFullscreen ?? false}
       type="button"
-      disabled={!status.loaded || fullscreenBusy || outputFullscreen === null}
+      disabled={!canSetDeckFullscreen(
+        {
+          active,
+          runtimeLoaded: status.loaded,
+          viewportReady,
+          busy: fullscreenBusy || fullscreenStatusPending,
+          current: outputFullscreen,
+        },
+        !(outputFullscreen ?? false),
+      )}
       onclick={() => void toggleFullscreen()}
       >{fullscreenBusy
         ? "Switching…"
         : outputFullscreen
           ? "Exit fullscreen"
-          : "Fullscreen output"}</button
+          : "Fullscreen deck output"}</button
     >
     <small>
       {spout === null
@@ -1748,6 +2365,153 @@
       linear-gradient(120deg, rgb(255 255 255 / 2.5%), transparent 28%), #131914;
     box-shadow: 0 16px 38px rgb(0 0 0 / 30%);
     color: #dbe3dc;
+  }
+
+  .d2-output-monitor {
+    position: sticky;
+    z-index: 20;
+    top: 0;
+    display: grid;
+    height: clamp(280px, 44vh, 560px);
+    min-width: 0;
+    min-height: 0;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    overflow: hidden;
+    border-bottom: 1px solid var(--d2-line-bright);
+    background: #030504;
+  }
+
+  .d2-output-monitor > header,
+  .d2-output-monitor > footer {
+    display: flex;
+    min-width: 0;
+    min-height: 31px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 6px 12px;
+    background: #0d120e;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+
+  .d2-output-monitor > header {
+    border-bottom: 1px solid #29332b;
+  }
+
+  .d2-output-monitor > footer {
+    border-top: 1px solid #29332b;
+  }
+
+  .d2-output-monitor > header > div {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 9px;
+  }
+
+  .d2-output-monitor > header span,
+  .d2-output-monitor > footer span,
+  .d2-output-monitor > header small,
+  .d2-output-monitor > footer small {
+    overflow: hidden;
+    color: #77837a;
+    font-size: 0.55rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .d2-output-monitor > header strong {
+    color: var(--d2-green);
+    font-size: 0.62rem;
+    letter-spacing: 0.07em;
+  }
+
+  .d2-output-monitor > footer small.error {
+    color: var(--d2-red);
+  }
+
+  .d2-viewport-frame {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    background: #000;
+    isolation: isolate;
+  }
+
+  .d2-native-viewport-anchor {
+    position: absolute;
+    inset: 0;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    contain: layout paint;
+    background: #000;
+  }
+
+  .d2-output-placeholder {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    display: grid;
+    padding: 20px;
+    place-content: center;
+    place-items: center;
+    color: #748178;
+    background:
+      linear-gradient(rgb(41 54 44 / 28%) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(41 54 44 / 28%) 1px, transparent 1px), #050806;
+    background-size: 40px 40px;
+    pointer-events: none;
+    text-align: center;
+  }
+
+  .d2-output-placeholder span,
+  .d2-output-placeholder small {
+    font:
+      700 0.56rem/1.35 ui-monospace,
+      "Cascadia Mono",
+      Consolas,
+      monospace;
+    letter-spacing: 0.1em;
+  }
+
+  .d2-output-placeholder strong {
+    margin: 7px 0 5px;
+    color: #c8d8ca;
+    font-size: clamp(0.88rem, 1.6vw, 1.2rem);
+  }
+
+  .d2-faceplate.fullscreen-faceplate {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: grid;
+    width: 100vw;
+    height: 100dvh;
+    min-height: 0;
+    margin: 0;
+    grid-template-rows: minmax(0, 1fr);
+    overflow: hidden;
+    border: 0;
+    background: #000;
+  }
+
+  .fullscreen-faceplate > :not(.d2-output-monitor) {
+    display: none;
+  }
+
+  .fullscreen-faceplate .d2-output-monitor {
+    position: static;
+    height: auto;
+    min-height: 0;
+    grid-template-rows: minmax(0, 1fr);
+    border: 0;
+  }
+
+  .fullscreen-faceplate .d2-output-monitor > header,
+  .fullscreen-faceplate .d2-output-monitor > footer {
+    display: none;
   }
 
   .d2-header {
@@ -1991,6 +2755,15 @@
       monospace;
   }
 
+  .draft-compatibility-note {
+    margin: 0;
+    border-left: 2px solid var(--d2-amber);
+    padding: 6px 8px;
+    background: #211d10;
+    color: #d8c989;
+    font-size: 0.61rem;
+  }
+
   .d2-bank-meter {
     display: grid;
     gap: 2px;
@@ -2055,6 +2828,18 @@
       );
     gap: 7px;
     padding: 7px;
+  }
+
+  .d2-next-load-notice {
+    grid-column: 1 / -1;
+    margin: 0;
+    border: 1px solid #665f30;
+    padding: 7px 10px;
+    background: #211d10;
+    color: #d8c989;
+    font-size: 0.62rem;
+    font-weight: 750;
+    letter-spacing: 0.04em;
   }
 
   .source-module,
@@ -2129,10 +2914,49 @@
     font-size: 0.55rem;
   }
 
+  .source-readout > span {
+    color: var(--d2-green);
+    font-weight: 800;
+    letter-spacing: 0.08em;
+  }
+
   .source-readout strong {
     color: #c8d8ca;
     font-size: 1.05rem;
     font-weight: 500;
+  }
+
+  .runtime-source-readout {
+    border-color: #4b7559;
+    background:
+      linear-gradient(135deg, rgb(70 168 102 / 8%), transparent 50%), #0a120d;
+  }
+
+  .draft-source-readout {
+    display: grid;
+    gap: 3px;
+    border: 1px dashed #665f30;
+    padding: 7px 8px;
+    background: #17160e;
+    color: #b8ad78;
+    font-family: ui-monospace, monospace;
+  }
+
+  .draft-source-readout span {
+    color: var(--d2-amber);
+    font-size: 0.54rem;
+    font-weight: 800;
+    letter-spacing: 0.07em;
+  }
+
+  .draft-source-readout strong {
+    color: #d2c993;
+    font-size: 0.72rem;
+  }
+
+  .draft-source-readout small {
+    color: #8c8665;
+    font-size: 0.55rem;
   }
 
   .source-transport {

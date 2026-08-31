@@ -47,7 +47,8 @@ pub enum SpoutFormat {
 ///
 /// The pinned official `SpoutDX12::WrapDX12Resource` hardcodes an output state
 /// of `PRESENT`, which would desynchronize a reused wgpu texture tracked as
-/// `PIXEL_SHADER_RESOURCE`. The bridge therefore uses the official
+/// wgpu's combined pixel/non-pixel shader-resource state. The bridge therefore
+/// uses the official
 /// `ID3D11On12Device` with identical input/output states, then calls official
 /// `SendDX11Resource`. The application must synchronize the direct queue and
 /// provide the actual state; the bridge returns the resource to that same state.
@@ -60,6 +61,12 @@ pub enum Dx12ResourceState {
     RenderTarget = 0x4,
     /// `D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE`.
     PixelShaderResource = 0x80,
+    /// `D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+    /// D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE`.
+    ///
+    /// This is the exact state used by pinned wgpu-hal 30 for a sampled
+    /// `TextureUses::RESOURCE` texture.
+    ShaderResource = 0xc0,
     /// `D3D12_RESOURCE_STATE_COPY_DEST`.
     CopyDestination = 0x400,
     /// `D3D12_RESOURCE_STATE_COPY_SOURCE`.
@@ -748,5 +755,15 @@ mod tests {
         assert!(source.contains("GetD3D11context"));
         assert!(!source.contains("spout.WrapDX12Resource"));
         assert!(!source.contains("SendImage"));
+    }
+
+    #[test]
+    fn shader_resource_state_matches_the_pinned_wgpu_dx12_mapping() {
+        assert_eq!(Dx12ResourceState::ShaderResource as u32, 0xc0);
+        let source = include_str!("../native/spout_bridge.cpp");
+        assert!(source.contains(
+            "D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |\n    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE"
+        ));
+        assert!(source.contains("state == kShaderResourceState"));
     }
 }

@@ -31,12 +31,15 @@ use latentdeck_core::{
 };
 use latentdeck_library::ResolvedDeckSource;
 #[cfg(not(target_os = "windows"))]
-use latentdeck_native_output::NativeSpoutStatus;
+use latentdeck_native_output::{NativeSpoutStatus, ResizeOutcome};
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
+use tauri::{AppHandle, WebviewWindow};
 
-use crate::library_state::{DeckSessionLease, LibraryImporter};
+use crate::{
+    embedded_viewport::EmbeddedViewport,
+    library_state::{DeckSessionLease, LibraryImporter},
+};
 
 #[cfg(not(target_os = "windows"))]
 use crate::q4_capture_host::Q4CaptureView;
@@ -891,15 +894,6 @@ impl Q4RuntimeError {
         )
     }
 
-    fn session_rotation_required() -> Self {
-        Self::owned(
-            "worker.session_rotation_required",
-            "The bounded worker session is near its message limit; open the Deck again.",
-            true,
-            true,
-        )
-    }
-
     fn codec_runtime() -> Self {
         Self::owned(
             "codec.runtime_incompatible",
@@ -1144,8 +1138,7 @@ mod platform {
         windows_ring::{WindowsRgbRingConsumer, WindowsRgbRingOwner},
     };
     use latentdeck_native_output::{
-        NativeOutput, NativeOutputConfig, NativeOutputError, NativeSpoutStatus, PresentOutcome,
-        ResizeOutcome,
+        NativeOutput, NativeOutputConfig, NativeSpoutStatus, ResizeOutcome,
     };
     use serde::Deserialize as _;
     use tauri::{Emitter as _, Manager as _, async_runtime::JoinHandle as TauriJoinHandle};
@@ -1165,13 +1158,13 @@ mod platform {
     };
 
     use super::{
-        AppHandle, Arc, CausalResetPlan, DeckSessionLease, Duration, INITIAL_GENERATION,
-        LibraryImporter, MAX_Q4_SAFE_INTEGER, Mutex, Path, PathBuf, Q4_DECK_ID, Q4_OPERATOR_ID,
-        Q4_OPERATOR_VERSION, Q4_OUTPUT_WINDOW_LABEL, Q4_OUTPUT_WINDOW_TITLE, Q4Controls,
-        Q4ControlsAckView, Q4DiagnosticIdentity, Q4LaunchBackend, Q4LaunchConfig, Q4ResetReason,
-        Q4Roles, Q4RolesAckView, Q4RuntimeDiagnostics, Q4RuntimeError, Q4SeedAckView, Q4Slot,
-        Q4Status, Q4StatusView, Q4Transport, Q4TransportAckView, TrustedQ4Source,
-        ValidatedCodecPack,
+        AppHandle, Arc, CausalResetPlan, DeckSessionLease, Duration, EmbeddedViewport,
+        INITIAL_GENERATION, LibraryImporter, MAX_Q4_SAFE_INTEGER, Mutex, Path, PathBuf, Q4_DECK_ID,
+        Q4_OPERATOR_ID, Q4_OPERATOR_VERSION, Q4_OUTPUT_WINDOW_LABEL, Q4_OUTPUT_WINDOW_TITLE,
+        Q4Controls, Q4ControlsAckView, Q4DiagnosticIdentity, Q4LaunchBackend, Q4LaunchConfig,
+        Q4ResetReason, Q4Roles, Q4RolesAckView, Q4RuntimeDiagnostics, Q4RuntimeError,
+        Q4SeedAckView, Q4Slot, Q4Status, Q4StatusView, Q4Transport, Q4TransportAckView,
+        TrustedQ4Source, ValidatedCodecPack, WebviewWindow,
     };
 
     const CHANNEL_CAPACITY: usize = 8;
@@ -1182,7 +1175,7 @@ mod platform {
     const SCHEDULER_POLL: Duration = Duration::from_millis(2);
     const MAX_FRAMES_PER_Q4_SLOT: u32 = 4;
     // Preserve space for the final authenticated reply and orderly shutdown.
-    // Reopening the Deck is the explicit session-rotation boundary in 0.1.
+    // The actor rotates to a fresh authenticated worker before entering it.
     const SESSION_SHUTDOWN_MESSAGE_RESERVE: usize = 1_024;
     const CODEC_FAMILY: &str = "minimax_h3";
     const PROFILE_ID: &str = "h3_av_latent";
@@ -1201,6 +1194,8 @@ mod platform {
         #[allow(clippy::too_many_lines)] // Closed startup ownership and cleanup sequence.
         pub(crate) async fn start(
             app: AppHandle,
+            parent: WebviewWindow,
+            viewport: EmbeddedViewport,
             shared_status: Arc<Mutex<Q4StatusView>>,
             shared_capture_status: Arc<Mutex<Q4CaptureView>>,
             config: Q4LaunchConfig,
@@ -1217,7 +1212,8 @@ mod platform {
                 .await
                 .map_err(|_| Q4RuntimeError::worker_start())?;
             let mut client = WorkerClient::new(session);
-            let initialized = initialize_session(&app, &config, &mut client).await;
+            let initialized =
+                initialize_session(&app, &parent, viewport, &config, &mut client).await;
             let InitializedSession {
                 status,
                 owner,
@@ -1270,6 +1266,7 @@ mod platform {
             let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
             let started_at = Instant::now();
             let presentation_diagnostics = PresentationDiagnosticState::new(&output.spout_status());
+            let session_config = Box::new(config.clone());
             let actor = RuntimeActor {
                 app,
                 client,
@@ -1277,6 +1274,7 @@ mod platform {
                 consumer,
                 output,
                 status,
+                session_config,
                 shared_status,
                 shared_capture_status,
                 deck_session,
@@ -1284,6 +1282,11 @@ mod platform {
                 pending_frame: None,
                 presented_sequence: 0,
                 frame_clock,
+                // Startup keeps the child hidden until q4_state publishes the
+                // runtime and re-applies the authoritative latest viewport.
+                // This prevents a stale pre-worker measurement from briefly
+                // covering controls after a long codec launch.
+                viewport_revision: 0,
                 presentation_diagnostics,
                 sources: [
                     config.source_a,
@@ -1440,44 +1443,15 @@ mod platform {
             receive_owned(receiver).await?
         }
 
-        pub(crate) async fn resize(
+        pub(crate) async fn set_viewport(
             &self,
-            width: u32,
-            height: u32,
+            viewport: EmbeddedViewport,
         ) -> Result<ResizeOutcome, Q4RuntimeError> {
             self.ensure_open()?;
             let (reply, receiver) = oneshot::channel();
             send_bounded(
                 &self.sender,
-                RuntimeCommand::Resize {
-                    width,
-                    height,
-                    reply,
-                },
-                ACTOR_REPLY_TIMEOUT,
-            )
-            .await?;
-            receive_owned(receiver).await?
-        }
-
-        pub(crate) async fn fullscreen_status(&self) -> Result<bool, Q4RuntimeError> {
-            self.ensure_open()?;
-            let (reply, receiver) = oneshot::channel();
-            send_bounded(
-                &self.sender,
-                RuntimeCommand::FullscreenStatus { reply },
-                ACTOR_REPLY_TIMEOUT,
-            )
-            .await?;
-            receive_owned(receiver).await?
-        }
-
-        pub(crate) async fn set_fullscreen(&self, enabled: bool) -> Result<bool, Q4RuntimeError> {
-            self.ensure_open()?;
-            let (reply, receiver) = oneshot::channel();
-            send_bounded(
-                &self.sender,
-                RuntimeCommand::SetFullscreen { enabled, reply },
+                RuntimeCommand::SetViewport { viewport, reply },
                 ACTOR_REPLY_TIMEOUT,
             )
             .await?;
@@ -1615,11 +1589,62 @@ mod platform {
         output: NativeOutput,
     }
 
+    struct LoadedWorkerSession {
+        status: Q4Status,
+        owner: WindowsRgbRingOwner,
+        consumer: WindowsRgbRingConsumer,
+    }
+
     async fn initialize_session(
         app: &AppHandle,
+        parent: &WebviewWindow,
+        viewport: EmbeddedViewport,
         config: &Q4LaunchConfig,
         client: &mut WorkerClient,
     ) -> Result<InitializedSession, Q4RuntimeError> {
+        let LoadedWorkerSession {
+            status,
+            owner,
+            consumer,
+        } = initialize_worker_session(config, client).await?;
+
+        // All four sources already passed the exact compatibility gate, so A
+        // is only a geometry representative; it is not an implicit carrier.
+        let width = config.source_a.profile.visual.decoded_width;
+        let height = config.source_a.profile.visual.decoded_height;
+        let bounds = viewport
+            .bounds()
+            .ok_or_else(|| Q4RuntimeError::output("output.viewport_not_ready"))?;
+        let output = NativeOutput::new_embedded(
+            app,
+            parent,
+            NativeOutputConfig::new(
+                width,
+                height,
+                Q4_OUTPUT_WINDOW_LABEL,
+                Q4_OUTPUT_WINDOW_TITLE,
+            ),
+            bounds,
+        )
+        .await
+        .map_err(|error| Q4RuntimeError::output(error.code()))?;
+        if output.frame_dimensions() != (width, height) {
+            let error = Q4RuntimeError::output("output.contract_invalid");
+            let _ = destroy_output(&output);
+            return Err(error);
+        }
+        Ok(InitializedSession {
+            status,
+            owner,
+            consumer,
+            output,
+        })
+    }
+
+    async fn initialize_worker_session(
+        config: &Q4LaunchConfig,
+        client: &mut WorkerClient,
+    ) -> Result<LoadedWorkerSession, Q4RuntimeError> {
         configure_session(client).await?;
         let profile = h3_profile();
         let inspection = inspect_codec(client).await?;
@@ -1637,33 +1662,33 @@ mod platform {
         let owner = WindowsRgbRingOwner::create(descriptor).map_err(|_| Q4RuntimeError::ring())?;
         let consumer = owner.open_consumer().map_err(|_| Q4RuntimeError::ring())?;
         let owner = bind_ring(client, owner).await?;
-        let output = NativeOutput::new(
-            app,
-            NativeOutputConfig::new(
-                width,
-                height,
-                Q4_OUTPUT_WINDOW_LABEL,
-                Q4_OUTPUT_WINDOW_TITLE,
-            ),
-        )
-        .await
-        .map_err(|error| Q4RuntimeError::output(error.code()))?;
-        if output.frame_dimensions() != (width, height) {
-            let error = Q4RuntimeError::output("output.contract_invalid");
-            let _ = destroy_output(&output);
-            return Err(error);
-        }
-        if let Err(error) = output.show() {
-            let error = Q4RuntimeError::output(error.code());
-            let _ = destroy_output(&output);
-            return Err(error);
-        }
-        Ok(InitializedSession {
+        Ok(LoadedWorkerSession {
             status,
             owner,
             consumer,
-            output,
         })
+    }
+
+    async fn spawn_loaded_worker_session(
+        config: &Q4LaunchConfig,
+    ) -> Result<(WorkerClient, LoadedWorkerSession), Q4RuntimeError> {
+        let launch = ValidatedWorkerLaunch::from_codec_pack_q4(&config.backend.codec_pack)
+            .map_err(|_| Q4RuntimeError::q4_entrypoint_missing())?;
+        let pending = spawn_worker(launch)
+            .await
+            .map_err(|_| Q4RuntimeError::worker_start())?;
+        let session = pending
+            .connect()
+            .await
+            .map_err(|_| Q4RuntimeError::worker_start())?;
+        let mut client = WorkerClient::new(session);
+        match initialize_worker_session(config, &mut client).await {
+            Ok(loaded) => Ok((client, loaded)),
+            Err(error) => {
+                let _ = stop_worker(&mut client, ShutdownReason::Recovery).await;
+                Err(error)
+            }
+        }
     }
 
     async fn cleanup_pre_actor_start(output: NativeOutput, client: &mut WorkerClient) {
@@ -1992,6 +2017,7 @@ mod platform {
         consumer: WindowsRgbRingConsumer,
         output: NativeOutput,
         status: Q4Status,
+        session_config: Box<Q4LaunchConfig>,
         shared_status: Arc<Mutex<Q4StatusView>>,
         shared_capture_status: Arc<Mutex<Q4CaptureView>>,
         deck_session: DeckSessionLease,
@@ -1999,6 +2025,7 @@ mod platform {
         pending_frame: Option<latentdeck_gpu::ring::RgbaFrame>,
         presented_sequence: u64,
         frame_clock: FrameClock,
+        viewport_revision: u64,
         presentation_diagnostics: PresentationDiagnosticState,
         sources: [TrustedQ4Source; 4],
         app_local_data: PathBuf,
@@ -2181,15 +2208,31 @@ mod platform {
             }
         }
 
-        fn fullscreen_reply(&self, requested: Option<bool>) -> Result<bool, Q4RuntimeError> {
-            if let Some(enabled) = requested {
-                self.output
-                    .set_fullscreen(enabled)
-                    .map_err(|error| Q4RuntimeError::output(error.code()))?;
+        fn set_viewport_reply(
+            &mut self,
+            viewport: EmbeddedViewport,
+        ) -> Result<ResizeOutcome, Q4RuntimeError> {
+            if viewport.revision() <= self.viewport_revision {
+                return Ok(ResizeOutcome::Unchanged);
             }
-            self.output
-                .fullscreen()
-                .map_err(|error| Q4RuntimeError::output(error.code()))
+            let outcome = match viewport.bounds() {
+                Some(bounds) => self
+                    .output
+                    .set_embedded_bounds(bounds)
+                    .map_err(|error| Q4RuntimeError::output(error.code()))?,
+                None => self
+                    .output
+                    .resize(0, 0)
+                    .map_err(|error| Q4RuntimeError::output(error.code()))?,
+            };
+            if viewport.visible() {
+                self.output.show()
+            } else {
+                self.output.hide()
+            }
+            .map_err(|error| Q4RuntimeError::output(error.code()))?;
+            self.viewport_revision = viewport.revision();
+            Ok(outcome)
         }
 
         async fn handle_command(&mut self, command: RuntimeCommand) -> bool {
@@ -2231,23 +2274,8 @@ mod platform {
                     let result = self.refresh_status().await;
                     self.finish_command(result, reply).await
                 }
-                RuntimeCommand::Resize {
-                    width,
-                    height,
-                    reply,
-                } => {
-                    let result = self
-                        .output
-                        .resize(width, height)
-                        .map_err(|error| Q4RuntimeError::output(error.code()));
-                    self.finish_command(result, reply).await
-                }
-                RuntimeCommand::FullscreenStatus { reply } => {
-                    let result = self.fullscreen_reply(None);
-                    self.finish_command(result, reply).await
-                }
-                RuntimeCommand::SetFullscreen { enabled, reply } => {
-                    let result = self.fullscreen_reply(Some(enabled));
+                RuntimeCommand::SetViewport { viewport, reply } => {
+                    let result = self.set_viewport_reply(viewport);
                     self.finish_command(result, reply).await
                 }
                 RuntimeCommand::SpoutStatus { reply } => {
@@ -2316,7 +2344,7 @@ mod platform {
             controls
                 .validate()
                 .map_err(|_| Q4RuntimeError::invalid_controls())?;
-            self.ensure_worker_session_budget()?;
+            self.ensure_worker_session_ready().await?;
             let ack = self
                 .client
                 .deck_q4_controls_set(
@@ -2348,7 +2376,7 @@ mod platform {
             roles
                 .validate()
                 .map_err(|_| Q4RuntimeError::invalid_roles())?;
-            self.ensure_worker_session_budget()?;
+            self.ensure_worker_session_ready().await?;
             let ack = self
                 .client
                 .deck_q4_roles_set(
@@ -2381,7 +2409,7 @@ mod platform {
             transport: Q4Transport,
         ) -> Result<Q4TransportAckView, Q4RuntimeError> {
             let was_active = transport_active(self.status.transport);
-            self.ensure_worker_session_budget()?;
+            self.ensure_worker_session_ready().await?;
             let ack = self
                 .client
                 .deck_q4_transport_set(
@@ -2420,7 +2448,7 @@ mod platform {
             if seed > MAX_Q4_SAFE_INTEGER {
                 return Err(Q4RuntimeError::invalid_seed());
             }
-            self.ensure_worker_session_budget()?;
+            self.ensure_worker_session_ready().await?;
             let ack = self
                 .client
                 .deck_q4_seed_set(
@@ -2449,7 +2477,7 @@ mod platform {
         }
 
         async fn restart(&mut self) -> Result<Q4StatusView, Q4RuntimeError> {
-            self.ensure_worker_session_budget()?;
+            self.ensure_worker_session_ready().await?;
             let barrier = self
                 .client
                 .deck_q4_restart(
@@ -2542,7 +2570,7 @@ mod platform {
                 }));
             }
             let output = validate_q4_output_path(output).map_err(Q4RuntimeError::capture_host)?;
-            self.ensure_worker_session_budget()?;
+            self.ensure_worker_session_ready().await?;
             let capture_id = WireUuid::new_v4();
             let binding = Q4CaptureSpoolBinding::create(&self.app_local_data, capture_id)
                 .map_err(Q4RuntimeError::capture_host)?;
@@ -2606,7 +2634,7 @@ mod platform {
                 &[Q4ResetReason::TransportRestart],
             )?;
             self.apply_reset(plan).await?;
-            self.ensure_worker_session_budget()?;
+            self.ensure_reserved_message_capacity()?;
             let active_status = self
                 .client
                 .deck_q4_capture_status(
@@ -2632,6 +2660,16 @@ mod platform {
             &mut self,
             reply: oneshot::Sender<Result<Q4CaptureView, Q4RuntimeError>>,
         ) -> bool {
+            let had_active_capture = self.capture.is_some();
+            if let Err(error) = self.ensure_worker_session_ready().await {
+                let _ = reply.send(Err(error.clone()));
+                self.fail(error).await;
+                return true;
+            }
+            if had_active_capture && self.capture.is_none() {
+                let _ = reply.send(Err(session_rotation_capture_aborted_error()));
+                return false;
+            }
             let Some(capture) = self.capture.as_ref() else {
                 let error = Q4RuntimeError::capture_host(Q4CaptureHostError {
                     code: "capture.not_active",
@@ -2649,11 +2687,6 @@ mod platform {
                 return false;
             }
             let capture_id = capture.binding.capture_id();
-            if let Err(error) = self.ensure_worker_session_budget() {
-                let _ = reply.send(Err(error.clone()));
-                self.fail(error).await;
-                return true;
-            }
             let stopped = self
                 .client
                 .deck_q4_capture_stop(
@@ -2708,10 +2741,14 @@ mod platform {
         }
 
         async fn capture_status_command(&mut self) -> Result<Q4CaptureView, Q4RuntimeError> {
+            let had_active_capture = self.capture.is_some();
+            self.ensure_worker_session_ready().await?;
+            if had_active_capture && self.capture.is_none() {
+                return Err(session_rotation_capture_aborted_error());
+            }
             let Some(capture) = self.capture.as_ref() else {
                 return Ok(self.capture_coordinator.view());
             };
-            self.ensure_worker_session_budget()?;
             let capture_id = capture.binding.capture_id();
             let status = self
                 .client
@@ -2837,7 +2874,7 @@ mod platform {
         }
 
         async fn refresh_status(&mut self) -> Result<Q4StatusView, Q4RuntimeError> {
-            self.ensure_worker_session_budget()?;
+            self.ensure_worker_session_ready().await?;
             let status = self
                 .client
                 .deck_q4_status(COMMAND_TIMEOUT)
@@ -2857,11 +2894,11 @@ mod platform {
             if !transport_active(self.status.transport) {
                 return Ok(());
             }
+            self.ensure_worker_session_ready().await?;
             let before = self.owner.state().map_err(|_| Q4RuntimeError::ring())?;
             if !before.can_publish(MAX_FRAMES_PER_Q4_SLOT) {
                 return Ok(());
             }
-            self.ensure_worker_session_budget()?;
             let result = self
                 .client
                 .deck_q4_process_slot(
@@ -2889,7 +2926,7 @@ mod platform {
             // only an explicit Stop or the bounded spool limit may finish it.
             self.handle_process_ack(ack, before).await?;
             if let Some(capture) = self.capture.as_ref() {
-                self.ensure_worker_session_budget()?;
+                self.ensure_reserved_message_capacity()?;
                 let capture_id = capture.binding.capture_id();
                 let status = self
                     .client
@@ -2913,15 +2950,85 @@ mod platform {
             Ok(())
         }
 
-        fn ensure_worker_session_budget(&self) -> Result<(), Q4RuntimeError> {
-            if session_rotation_required(
+        async fn ensure_worker_session_ready(&mut self) -> Result<(), Q4RuntimeError> {
+            if !session_rotation_required(
                 self.client.remaining_inbound_message_budget(),
                 self.client.remaining_outbound_message_budget(),
             ) {
-                Err(Q4RuntimeError::session_rotation_required())
-            } else {
-                Ok(())
+                return Ok(());
             }
+            self.rotate_worker_session().await
+        }
+
+        fn ensure_reserved_message_capacity(&self) -> Result<(), Q4RuntimeError> {
+            // Follow-up reset/status commands belong to the session that
+            // issued their barrier or capture id. They use the admitted
+            // reserve instead of rotating midway through the transaction.
+            if reserved_message_capacity_available(
+                self.client.remaining_inbound_message_budget(),
+                self.client.remaining_outbound_message_budget(),
+            ) {
+                Ok(())
+            } else {
+                Err(Q4RuntimeError::worker_protocol())
+            }
+        }
+
+        fn rotation_config(&self) -> Result<Q4LaunchConfig, Q4RuntimeError> {
+            validate_rotation_source_identity(
+                &self.status.source_a,
+                &self.session_config.source_a,
+            )?;
+            validate_rotation_source_identity(
+                &self.status.source_b,
+                &self.session_config.source_b,
+            )?;
+            validate_rotation_source_identity(
+                &self.status.source_c,
+                &self.session_config.source_c,
+            )?;
+            validate_rotation_source_identity(
+                &self.status.source_d,
+                &self.session_config.source_d,
+            )?;
+            let state = SessionRotationState::from(&self.status);
+            let mut config = (*self.session_config).clone();
+            config.roles = state.roles;
+            config.controls = state.controls;
+            config.transport = state.transport;
+            config.seed = state.seed;
+            Ok(config)
+        }
+
+        async fn rotate_worker_session(&mut self) -> Result<(), Q4RuntimeError> {
+            let config = Box::new(self.rotation_config()?);
+            let capture_disposition = session_rotation_capture_disposition(
+                self.capture.is_some(),
+                self.capture_finalizer.is_some(),
+                self.capture_coordinator.is_active(),
+            );
+
+            self.pending_frame = None;
+            self.presentation_diagnostics.cut_interval();
+            stop_worker(&mut self.client, ShutdownReason::Recovery).await?;
+            if matches!(
+                capture_disposition,
+                SessionRotationCaptureDisposition::AbortActive
+            ) {
+                self.abort_active_capture(&session_rotation_capture_aborted_error());
+            }
+
+            let (client, loaded) = spawn_loaded_worker_session(&config).await?;
+            self.client = client;
+            self.owner = loaded.owner;
+            self.consumer = loaded.consumer;
+            self.status = loaded.status;
+            self.session_config = config;
+            self.presented_sequence = 0;
+            self.frame_clock.restart();
+            self.publish_status()?;
+            record_global(LogLevel::Info, "deck.q4.worker_session_rotated", None);
+            Ok(())
         }
 
         async fn handle_process_ack(
@@ -3033,7 +3140,7 @@ mod platform {
             // No stale decoded frame may survive the causal reset handshake.
             self.pending_frame = None;
             self.presentation_diagnostics.cut_interval();
-            self.ensure_worker_session_budget()?;
+            self.ensure_reserved_message_capacity()?;
             let ack = self
                 .client
                 .deck_q4_reset(
@@ -3111,21 +3218,16 @@ mod platform {
             let status = self.output.spout_status();
             self.presentation_diagnostics.observe_spout(&status);
             let outcome = outcome?;
-            if matches!(
-                outcome,
-                PresentOutcome::Presented | PresentOutcome::PresentedAndReconfigured
-            ) {
-                self.presentation_diagnostics
-                    .record_presented(Instant::now().into())
-                    .map_err(|_| Q4RuntimeError::diagnostics_contract())?;
-                self.presented_sequence = expected;
-                self.pending_frame = None;
-            }
+            self.presentation_diagnostics
+                .observe_local_outcome(outcome, Instant::now().into())
+                .map_err(|_| Q4RuntimeError::diagnostics_contract())?;
+            self.presented_sequence = expected;
+            self.pending_frame = None;
             Ok(())
         }
 
         async fn diagnostics(&mut self) -> Result<RuntimeDiagnosticSnapshot, Q4RuntimeError> {
-            self.ensure_worker_session_budget()?;
+            self.ensure_worker_session_ready().await?;
             let Ack::MetricsGet(worker) = self
                 .client
                 .call(
@@ -3276,17 +3378,9 @@ mod platform {
         Status {
             reply: oneshot::Sender<Result<Q4StatusView, Q4RuntimeError>>,
         },
-        Resize {
-            width: u32,
-            height: u32,
+        SetViewport {
+            viewport: EmbeddedViewport,
             reply: oneshot::Sender<Result<ResizeOutcome, Q4RuntimeError>>,
-        },
-        FullscreenStatus {
-            reply: oneshot::Sender<Result<bool, Q4RuntimeError>>,
-        },
-        SetFullscreen {
-            enabled: bool,
-            reply: oneshot::Sender<Result<bool, Q4RuntimeError>>,
         },
         SpoutStatus {
             reply: oneshot::Sender<Result<NativeSpoutStatus, Q4RuntimeError>>,
@@ -3315,10 +3409,7 @@ mod platform {
                 Self::CaptureStart { reply, .. }
                 | Self::CaptureStop { reply }
                 | Self::CaptureStatus { reply } => reply.is_closed(),
-                Self::Resize { reply, .. } => reply.is_closed(),
-                Self::FullscreenStatus { reply } | Self::SetFullscreen { reply, .. } => {
-                    reply.is_closed()
-                }
+                Self::SetViewport { reply, .. } => reply.is_closed(),
                 Self::SpoutStatus { reply } | Self::ConfigureSpout { reply, .. } => {
                     reply.is_closed()
                 }
@@ -3377,6 +3468,90 @@ mod platform {
     ) -> bool {
         inbound_remaining <= SESSION_SHUTDOWN_MESSAGE_RESERVE
             || outbound_remaining <= SESSION_SHUTDOWN_MESSAGE_RESERVE
+    }
+
+    const fn reserved_message_capacity_available(
+        inbound_remaining: usize,
+        outbound_remaining: usize,
+    ) -> bool {
+        // The admitted follow-up consumes one command/reply and must leave one
+        // authenticated command/reply pair for orderly WorkerShutdown.
+        inbound_remaining > 1 && outbound_remaining > 1
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct SessionRotationState {
+        roles: Q4Roles,
+        controls: Q4Controls,
+        transport: Q4Transport,
+        seed: u64,
+    }
+
+    impl From<&Q4Status> for SessionRotationState {
+        fn from(status: &Q4Status) -> Self {
+            Self {
+                roles: status.roles,
+                controls: status.controls.clone(),
+                transport: status.transport,
+                seed: status.seed,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum SessionRotationCaptureDisposition {
+        Clear,
+        PreserveFinalizer,
+        AbortActive,
+    }
+
+    const fn session_rotation_capture_disposition(
+        capture_active: bool,
+        finalizer_active: bool,
+        coordinator_active: bool,
+    ) -> SessionRotationCaptureDisposition {
+        if finalizer_active {
+            SessionRotationCaptureDisposition::PreserveFinalizer
+        } else if capture_active || coordinator_active {
+            SessionRotationCaptureDisposition::AbortActive
+        } else {
+            SessionRotationCaptureDisposition::Clear
+        }
+    }
+
+    fn rotation_source_identity_matches(
+        status: &latentdeck_control::Q4SourceStatus,
+        cartridge_id: WireUuid,
+        archive_sha256: &str,
+        latent_slot_count: u64,
+    ) -> bool {
+        status.cartridge_id == cartridge_id
+            && status.archive_sha256 == archive_sha256
+            && status.latent_slot_count == latent_slot_count
+    }
+
+    fn validate_rotation_source_identity(
+        status: &latentdeck_control::Q4SourceStatus,
+        source: &TrustedQ4Source,
+    ) -> Result<(), Q4RuntimeError> {
+        let cartridge_id = parse_wire_uuid(&source.cartridge_id)?;
+        if rotation_source_identity_matches(
+            status,
+            cartridge_id,
+            &source.archive_sha256,
+            source.profile.visual.latent_slots,
+        ) {
+            Ok(())
+        } else {
+            Err(Q4RuntimeError::worker_protocol())
+        }
+    }
+
+    fn session_rotation_capture_aborted_error() -> Q4RuntimeError {
+        Q4RuntimeError::capture_host(Q4CaptureHostError {
+            code: "capture.session_rotation_aborted",
+            message: "The active LD-Q4 capture was ended before bounded worker-session rotation; no cartridge was produced.",
+        })
     }
 
     async fn receive_owned<T>(receiver: oneshot::Receiver<T>) -> Result<T, Q4RuntimeError> {
@@ -3528,9 +3703,8 @@ mod platform {
     fn destroy_output(output: &NativeOutput) -> Result<(), Q4RuntimeError> {
         let _ = output.hide();
         output
-            .window()
             .destroy()
-            .map_err(|_| Q4RuntimeError::output(NativeOutputError::WindowVisibility.code()))
+            .map_err(|error| Q4RuntimeError::output(error.code()))
     }
 
     async fn stop_worker(
@@ -3890,25 +4064,6 @@ mod platform {
         }
 
         #[test]
-        fn fullscreen_actor_contract_is_explicit_and_queryable() {
-            let (status_reply, _status_receiver) = oneshot::channel();
-            assert!(matches!(
-                RuntimeCommand::FullscreenStatus {
-                    reply: status_reply
-                },
-                RuntimeCommand::FullscreenStatus { .. }
-            ));
-            let (set_reply, _set_receiver) = oneshot::channel();
-            assert!(matches!(
-                RuntimeCommand::SetFullscreen {
-                    enabled: true,
-                    reply: set_reply
-                },
-                RuntimeCommand::SetFullscreen { enabled: true, .. }
-            ));
-        }
-
-        #[test]
         fn spout_commands_observe_cancelled_callers() {
             let (status_reply, status_receiver) = oneshot::channel();
             drop(status_receiver);
@@ -3953,6 +4108,62 @@ mod platform {
                 above,
                 SESSION_SHUTDOWN_MESSAGE_RESERVE
             ));
+            assert!(reserved_message_capacity_available(2, 2));
+            assert!(!reserved_message_capacity_available(1, 2));
+            assert!(!reserved_message_capacity_available(2, 1));
+        }
+
+        #[test]
+        fn session_rotation_preserves_runtime_state_and_validated_source_identity() {
+            let status = actor_status();
+            let state = SessionRotationState::from(&status);
+            assert_eq!(state.roles, status.roles);
+            assert_eq!(state.controls, status.controls);
+            assert_eq!(state.transport, status.transport);
+            assert_eq!(state.seed, status.seed);
+
+            for source in [
+                &status.source_a,
+                &status.source_b,
+                &status.source_c,
+                &status.source_d,
+            ] {
+                assert!(rotation_source_identity_matches(
+                    source,
+                    source.cartridge_id,
+                    &source.archive_sha256,
+                    source.latent_slot_count,
+                ));
+            }
+            assert!(!rotation_source_identity_matches(
+                &status.source_d,
+                status.source_d.cartridge_id,
+                &"b".repeat(64),
+                status.source_d.latent_slot_count,
+            ));
+        }
+
+        #[test]
+        fn session_rotation_capture_policy_is_explicit_and_non_terminal() {
+            assert_eq!(
+                session_rotation_capture_disposition(false, false, false),
+                SessionRotationCaptureDisposition::Clear
+            );
+            assert_eq!(
+                session_rotation_capture_disposition(true, false, true),
+                SessionRotationCaptureDisposition::AbortActive
+            );
+            assert_eq!(
+                session_rotation_capture_disposition(false, true, true),
+                SessionRotationCaptureDisposition::PreserveFinalizer
+            );
+
+            let error = session_rotation_capture_aborted_error();
+            assert_eq!(error.code, "capture.session_rotation_aborted");
+            assert!(error.recoverable);
+            assert!(!error.terminal);
+            assert!(!error.message.contains('\\'));
+            assert!(!error.message.contains(':'));
         }
 
         #[tokio::test]
@@ -4166,6 +4377,8 @@ pub(crate) struct Q4Runtime;
 impl Q4Runtime {
     pub(crate) async fn start(
         _app: AppHandle,
+        _parent: WebviewWindow,
+        _viewport: EmbeddedViewport,
         _shared_status: Arc<Mutex<Q4StatusView>>,
         _shared_capture_status: Arc<Mutex<Q4CaptureView>>,
         _config: Q4LaunchConfig,
@@ -4223,19 +4436,14 @@ impl Q4Runtime {
         Err(Q4RuntimeError::unsupported())
     }
 
-    pub(crate) async fn resize(&self, _width: u32, _height: u32) -> Result<(), Q4RuntimeError> {
-        Err(Q4RuntimeError::unsupported())
-    }
-
     pub(crate) async fn shutdown(&self) -> Result<(), Q4RuntimeError> {
         Ok(())
     }
 
-    pub(crate) async fn fullscreen_status(&self) -> Result<bool, Q4RuntimeError> {
-        Err(Q4RuntimeError::unsupported())
-    }
-
-    pub(crate) async fn set_fullscreen(&self, _enabled: bool) -> Result<bool, Q4RuntimeError> {
+    pub(crate) async fn set_viewport(
+        &self,
+        _viewport: EmbeddedViewport,
+    ) -> Result<ResizeOutcome, Q4RuntimeError> {
         Err(Q4RuntimeError::unsupported())
     }
 

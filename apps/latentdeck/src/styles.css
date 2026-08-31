@@ -226,6 +226,14 @@ input::placeholder {
   display: none;
 }
 
+.deck-surface {
+  display: none;
+}
+
+.deck-surface.active {
+  display: block;
+}
+
 .identity {
   display: flex;
   flex: 1;

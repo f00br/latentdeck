@@ -12,7 +12,7 @@ use latentdeck_core::realtime_diagnostics::{
     SanitizedToken, Sha256Token, StableErrorRecord, StableErrorSource, TimingDistribution,
     WorkerDiagnosticCounters,
 };
-use latentdeck_native_output::{NativeDeviceIdentity, NativeSpoutStatus};
+use latentdeck_native_output::{NativeDeviceIdentity, NativeSpoutStatus, PresentOutcome};
 
 const MAX_TIMING_SAMPLES: usize = 4_096;
 
@@ -58,6 +58,19 @@ impl PresentationDiagnosticState {
 
     pub(crate) fn cut_interval(&mut self) {
         self.last_presented_at = None;
+    }
+
+    pub(crate) fn observe_local_outcome(
+        &mut self,
+        outcome: PresentOutcome,
+        observed_at: Instant,
+    ) -> Result<(), RealtimeDiagnosticError> {
+        if outcome.locally_presented() {
+            self.record_presented(observed_at)
+        } else {
+            self.cut_interval();
+            Ok(())
+        }
     }
 
     pub(crate) fn observe_spout(&mut self, status: &NativeSpoutStatus) {
@@ -306,6 +319,44 @@ mod tests {
         assert_eq!(snapshot.frames_presented, 3);
         assert_eq!(value["sample_count"], 1);
         assert_eq!(value["min_ms"], 40.0);
+    }
+
+    #[test]
+    fn every_locally_skipped_outcome_cuts_the_visible_frame_interval() {
+        let skipped = [
+            PresentOutcome::SkippedZeroSized,
+            PresentOutcome::SkippedTimeout,
+            PresentOutcome::SkippedOccluded,
+            PresentOutcome::SkippedOutdated,
+            PresentOutcome::SkippedSurfaceRecreated,
+        ];
+
+        for outcome in skipped {
+            let mut state = PresentationDiagnosticState::new(&spout_status(None, 0));
+            let first = Instant::now();
+            state
+                .observe_local_outcome(PresentOutcome::Presented, first)
+                .expect("first visible frame");
+            state
+                .observe_local_outcome(outcome, first + Duration::from_secs(5))
+                .expect("local skip");
+            state
+                .observe_local_outcome(PresentOutcome::Presented, first + Duration::from_secs(10))
+                .expect("first restored frame");
+            state
+                .observe_local_outcome(
+                    PresentOutcome::Presented,
+                    first + Duration::from_millis(10_040),
+                )
+                .expect("second restored frame");
+
+            let snapshot = state.snapshot(&spout_status(None, 0)).expect("snapshot");
+            let intervals = serde_json::to_value(snapshot.frame_intervals).expect("distribution");
+            assert_eq!(snapshot.frames_presented, 3);
+            assert_eq!(intervals["sample_count"], 1);
+            assert_eq!(intervals["min_ms"], 40.0);
+            assert_eq!(intervals["max_ms"], 40.0);
+        }
     }
 
     #[test]

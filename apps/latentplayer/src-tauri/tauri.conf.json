@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "LatentPlayer",
         "width": 960,
         "height": 600,
