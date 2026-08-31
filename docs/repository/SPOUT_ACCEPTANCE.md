@@ -25,5 +25,25 @@ Status: **verified on the development machine**.
 
 This proves interoperability for the tested adapter, GPU, driver, sender, and
 official receiver combination. It does not replace the separate clean-machine
-Windows 11 release gate or the 30-minute performance soak defined by the 0.1
-release plan.
+Windows 11 release gate or the owner-approved six-minute pre-master stability
+suite recorded in the acceptance status.
+
+## 2026-08-31 — final application-surface walkthrough
+
+Status: **verified on the development machine**.
+
+- LatentPlayer, LD-D2, and LD-Q4 kept their native output inside the owning
+  application window and published the same stream through Spout2.
+- A portrait `448x800` cartridge and landscape `1344x768` cartridges retained
+  their intrinsic geometry. The receiver reported the matching sender
+  dimensions, and presentation used aspect fit without hidden stretch or crop.
+- Fullscreen displayed the active stream and returned to the embedded surface.
+- Sender sequences advanced during playback and receiver shutdown remained
+  responsive.
+- Visible cartridge identity remained attached to the selected source through
+  Player and Deck playback; private cartridge names and hashes are omitted from
+  this public record.
+
+This closes the local application-surface replay requested after the embedded
+presentation changes. Clean-machine, signing, and publication gates remain
+separate.

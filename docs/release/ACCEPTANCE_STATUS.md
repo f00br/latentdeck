@@ -6,10 +6,11 @@ publication credentials. It does not authorize a remote, push, tag, upload, or
 public release.
 
 Status recorded on 2026-08-31: the `0.1.0` source candidate contains the planned
-product surfaces. The current installer set predates later source commits and
-must be rebuilt. Final-binary Spout, clean-machine, publisher-trust, signing,
-and publication gates listed below remain separate until their exact evidence
-is recorded.
+product surfaces. The owner-led application and Spout walkthrough is complete.
+Application installers must still be generated from the final clean tracked
+commit; their ignored local receipt is the authority for exact commit, source
+snapshot, file sizes, and hashes. Clean-machine, publisher-trust, signing, and
+publication gates remain separate until their exact evidence is recorded.
 
 ## Verified locally
 
@@ -56,6 +57,18 @@ is recorded.
   at the declared sender name, 448 by 800 frame size, and RGBA8 format. Sender
   shutdown remained responsive. See
   [Spout acceptance](../repository/SPOUT_ACCEPTANCE.md).
+- The owner-led final application walkthrough passed after the embedded-output,
+  source-identity, and fullscreen fixes. It exercised Library and Collections,
+  LatentPlayer, LD-D2, and LD-Q4 with private portrait `448x800` and landscape
+  `1344x768` cartridges. The visible source names and immutable hashes remained
+  bound to the selected cartridges, Q4 disclosed all four role assignments,
+  incompatible geometry remained an explicit refusal, and changing a draft
+  selection did not replace the already playing sources. Native output stayed
+  inside the owning application window, fullscreen displayed and restored the
+  same stream, and both geometries used aspect-fit presentation without hidden
+  stretching or cropping. Spout published the matching portrait and landscape
+  dimensions to the local receiver and stopped responsively. Private media,
+  cartridge names, and machine-local paths are intentionally omitted.
 - `tools/Test-ReleasePackaging.ps1` passed the independent-application and H3
   Codec Pack lifecycle contract. The current source contract additionally
   generates and rejects drift from the pinned upstream Spout2 CycloneDX
@@ -103,12 +116,15 @@ is recorded.
   performance gate was exercised. The path-free suite receipt SHA-256 is
   `e2aff6b59939772f395f75de62b97252f31cb35ec01adb9809e3411dd29b64ca`.
 
-## Open external acceptance gates
+## Local artifact handoff
 
-- **Current application artifacts and Spout replay:** rebuild the two unsigned
-  installers and SBOM from the final clean commit. The recorded Spout proof is
-  valid historical evidence, but the receiver/shutdown check must be repeated
-  with the final LatentPlayer binary after later presentation changes.
+- Generate the two unsigned application installers and fresh lock-bound SBOM
+  only after the final tracked acceptance commit. The ignored schema-3 receipt
+  must name that exact clean commit and bind both installers, all three lock
+  hashes, the SBOM, and third-party notices. Do not treat an older installer
+  directory as the current candidate merely because its binaries launch.
+
+## Open external acceptance gates
 - **Clean-machine lifecycle:** the two installers and a real Codec Pack have not
   completed the full install, upgrade, downgrade, uninstall, recovery, and
   Spout matrix on a separate clean Windows 11 x64 NVIDIA machine without
