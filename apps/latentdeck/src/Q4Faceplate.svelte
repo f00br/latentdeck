@@ -1154,9 +1154,7 @@
       loadDraftAndPlay: () => openDeck(slot),
       toggleCurrent: async () => {
         const playing = status.transport[`playing${slot}`];
-        await setTransport(
-          setQ4SlotPlaying(status.transport, slot, !playing),
-        );
+        await setTransport(setQ4SlotPlaying(status.transport, slot, !playing));
       },
     });
   }

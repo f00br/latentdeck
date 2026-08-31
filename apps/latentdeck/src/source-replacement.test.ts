@@ -47,9 +47,7 @@ describe("explicit captured-source replacement", () => {
       loopA: false,
       loopB: true,
     };
-    expect(
-      transportForDraftLoad(d2Transport, "A", setSlotPlaying),
-    ).toEqual({
+    expect(transportForDraftLoad(d2Transport, "A", setSlotPlaying)).toEqual({
       playingA: true,
       playingB: true,
       loopA: false,
@@ -66,9 +64,7 @@ describe("explicit captured-source replacement", () => {
       loopC: false,
       loopD: true,
     };
-    expect(
-      transportForDraftLoad(q4Transport, "C", setQ4SlotPlaying),
-    ).toEqual({
+    expect(transportForDraftLoad(q4Transport, "C", setQ4SlotPlaying)).toEqual({
       ...q4Transport,
       playingC: true,
     });

@@ -1133,9 +1133,7 @@
       loadDraftAndPlay: () => openDeck(slot),
       toggleCurrent: async () => {
         const playing =
-          slot === "A"
-            ? status.transport.playingA
-            : status.transport.playingB;
+          slot === "A" ? status.transport.playingA : status.transport.playingB;
         await setTransport(setSlotPlaying(status.transport, slot, !playing));
       },
     });
@@ -1934,18 +1932,15 @@
           onclick={() => void togglePlaying("A")}
           disabled={slotDraftRequiresLoad("A")
             ? draftLoadBlocked()
-            : !status.loaded ||
-              hostBusy ||
-              captureBusy ||
-              !captureUi.transport}
+            : !status.loaded || hostBusy || captureBusy || !captureUi.transport}
         >
           {slotDraftRequiresLoad("A")
             ? "Load + Play A"
             : !status.loaded
-            ? "Play A"
-            : status.transport.playingA
-              ? "Pause A"
-              : "Play A"}
+              ? "Play A"
+              : status.transport.playingA
+                ? "Pause A"
+                : "Play A"}
         </button>
         <label
           ><input
@@ -2396,18 +2391,15 @@
           onclick={() => void togglePlaying("B")}
           disabled={slotDraftRequiresLoad("B")
             ? draftLoadBlocked()
-            : !status.loaded ||
-              hostBusy ||
-              captureBusy ||
-              !captureUi.transport}
+            : !status.loaded || hostBusy || captureBusy || !captureUi.transport}
         >
           {slotDraftRequiresLoad("B")
             ? "Load + Play B"
             : !status.loaded
-            ? "Play B"
-            : status.transport.playingB
-              ? "Pause B"
-              : "Play B"}
+              ? "Play B"
+              : status.transport.playingB
+                ? "Pause B"
+                : "Play B"}
         </button>
         <label
           ><input
