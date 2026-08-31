@@ -3,6 +3,13 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import { onMount, tick } from "svelte";
   import {
+    conversionCancelledCount,
+    conversionControls,
+    conversionIsActive,
+    conversionProgressLabel,
+    type ConversionSnapshot,
+  } from "./conversion-model";
+  import {
     EMPTY_PLAYER_VIEW,
     acceptTrustedSnapshot,
     buildNativeViewportBounds,
@@ -33,7 +40,11 @@
   } from "./player-model";
   import { product } from "./product";
 
+  type WorkspaceMode = "play" | "prepare";
+  type ConversionSelection = { path: string; kind: "file" | "folder" };
+
   let player = $state<PlayerView>(EMPTY_PLAYER_VIEW);
+  let workspaceMode = $state<WorkspaceMode>("play");
   let busy = $state(false);
   let operation = $state<PlayerOperation | null>(null);
   let transientError = $state<PlayerError | null>(null);
@@ -50,6 +61,13 @@
   let diagnosticStatus = $state(
     "Save a path-free support bundle from the current Player lifecycle state.",
   );
+  let conversionInputs = $state<ConversionSelection[]>([]);
+  let conversionOutputDirectory = $state<string | null>(null);
+  let conversionRecursive = $state(false);
+  let conversion = $state<ConversionSnapshot | null>(null);
+  let conversionBusy = $state(false);
+  let conversionError = $state<PlayerError | null>(null);
+  let conversionSnapshotPending = false;
   const VIEWPORT_RETRY_DELAYS_MS = [250, 1000, 2500] as const;
   let viewportAnchor: HTMLDivElement | null = null;
   let viewportEpoch: number | null = null;
@@ -75,6 +93,16 @@
   );
   const spoutControls = $derived(spoutControlsFor(spout, busy || spoutBusy));
   const canSaveDiagnostics = $derived(diagnosticSaveEnabled(diagnosticBusy));
+  const conversionControlState = $derived(
+    conversionControls(
+      conversion,
+      conversionInputs.length,
+      conversionOutputDirectory !== null,
+      conversionBusy,
+    ),
+  );
+  const conversionStatus = $derived(conversionProgressLabel(conversion));
+  const conversionCancelled = $derived(conversionCancelledCount(conversion));
   const spoutState = $derived(
     spout === null
       ? "Output inactive"
@@ -123,6 +151,160 @@
       "recoverable" in error &&
       error.recoverable === true
     );
+  }
+
+  function displayPathName(path: string): string {
+    const segments = path.replaceAll("\\", "/").split("/");
+    return segments.at(-1) || "selected folder";
+  }
+
+  function invalidateConversionPlan(): void {
+    conversion = null;
+    conversionError = null;
+  }
+
+  function addSelections(
+    paths: string[],
+    kind: ConversionSelection["kind"],
+  ): void {
+    const existing = new Set(
+      conversionInputs.map((selection) => selection.path.toLocaleLowerCase()),
+    );
+    let changed = false;
+    for (const path of paths) {
+      const key = path.toLocaleLowerCase();
+      if (!existing.has(key)) {
+        conversionInputs.push({ path, kind });
+        existing.add(key);
+        changed = true;
+      }
+    }
+    if (changed) invalidateConversionPlan();
+  }
+
+  async function selectRawFiles(): Promise<void> {
+    conversionError = null;
+    try {
+      const selected = await open({
+        multiple: true,
+        directory: false,
+        filters: [{ name: "Raw H3 Safetensors", extensions: ["safetensors"] }],
+      });
+      const paths = Array.isArray(selected)
+        ? selected
+        : typeof selected === "string"
+          ? [selected]
+          : [];
+      addSelections(paths, "file");
+    } catch (error) {
+      conversionError = playerError(error, "conversion.selection_failed");
+    }
+  }
+
+  async function selectRawFolder(): Promise<void> {
+    conversionError = null;
+    try {
+      const selected = await open({ multiple: false, directory: true });
+      if (typeof selected === "string") addSelections([selected], "folder");
+    } catch (error) {
+      conversionError = playerError(error, "conversion.selection_failed");
+    }
+  }
+
+  async function selectConversionOutput(): Promise<void> {
+    conversionError = null;
+    try {
+      const selected = await open({ multiple: false, directory: true });
+      if (typeof selected === "string") {
+        conversionOutputDirectory = selected;
+        invalidateConversionPlan();
+      }
+    } catch (error) {
+      conversionError = playerError(
+        error,
+        "conversion.output_selection_failed",
+      );
+    }
+  }
+
+  async function prepareConversion(): Promise<void> {
+    if (conversionOutputDirectory === null) return;
+    conversionBusy = true;
+    conversionError = null;
+    try {
+      conversion = await invoke<ConversionSnapshot>("player_conversion_plan", {
+        inputs: conversionInputs.map((selection) => selection.path),
+        outputDirectory: conversionOutputDirectory,
+        recursive: conversionRecursive,
+      });
+    } catch (error) {
+      conversion = null;
+      conversionError = playerError(error, "conversion.preflight_failed");
+    } finally {
+      conversionBusy = false;
+    }
+  }
+
+  async function refreshConversion(reportError = false): Promise<void> {
+    if (conversionSnapshotPending) return;
+    conversionSnapshotPending = true;
+    try {
+      const snapshot = await invoke<ConversionSnapshot | null>(
+        "player_conversion_snapshot",
+      );
+      if (snapshot !== null) conversion = snapshot;
+    } catch (error) {
+      if (reportError) {
+        conversionError = playerError(error, "conversion.snapshot_failed");
+      }
+    } finally {
+      conversionSnapshotPending = false;
+    }
+  }
+
+  function startConversion(): void {
+    if (conversion?.phase !== "planned") return;
+    conversionError = null;
+    conversion = { ...conversion, phase: "running" };
+    void invoke("player_conversion_start")
+      .then((snapshot) => {
+        conversion = snapshot as ConversionSnapshot;
+      })
+      .catch((error) => {
+        conversionError = playerError(error, "conversion.task_failed");
+        void refreshConversion();
+      });
+  }
+
+  async function stopConversion(): Promise<void> {
+    conversionError = null;
+    try {
+      conversion = await invoke<ConversionSnapshot>("player_conversion_stop");
+    } catch (error) {
+      conversionError = playerError(error, "conversion.stop_failed");
+    }
+  }
+
+  async function openConverted(index: number): Promise<void> {
+    busy = true;
+    conversionError = null;
+    try {
+      const snapshot = await invoke<PlayerView>("player_open_converted", {
+        index,
+      });
+      player = acceptTrustedSnapshot(player, snapshot);
+      await setWorkspaceMode("play");
+    } catch (error) {
+      conversionError = playerError(error, "conversion.output_unavailable");
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function setWorkspaceMode(mode: WorkspaceMode): Promise<void> {
+    workspaceMode = mode;
+    await tick();
+    scheduleViewportSync();
   }
 
   async function command(
@@ -503,6 +685,7 @@
     void refreshSnapshot(true);
     void refreshFullscreen();
     void refreshSpout();
+    void refreshConversion();
     const snapshotTimer = globalThis.setInterval(() => {
       void refreshSnapshot();
     }, 100);
@@ -510,6 +693,9 @@
       void refreshSpout();
       void refreshFullscreen();
     }, 250);
+    const conversionTimer = globalThis.setInterval(() => {
+      if (conversionIsActive(conversion)) void refreshConversion();
+    }, 200);
     return () => {
       disposed = true;
       viewportMounted = false;
@@ -551,6 +737,7 @@
       viewportEpoch = null;
       globalThis.clearInterval(snapshotTimer);
       globalThis.clearInterval(spoutTimer);
+      globalThis.clearInterval(conversionTimer);
     };
   });
 </script>
@@ -563,24 +750,48 @@
 
 <main
   class="player-shell"
-  class:fullscreen-shell={fullscreen?.active && player.outputAvailable}
-  aria-busy={busy}
+  class:fullscreen-shell={workspaceMode === "play" &&
+    fullscreen?.active &&
+    player.outputAvailable}
+  aria-busy={busy || conversionBusy}
 >
   <header class="masthead">
     <div class="brand-lockup">
-      <p class="eyebrow">Latent cartridge playback</p>
+      <p class="eyebrow">Latent cartridge playback and preparation</p>
       <h1>{product.name}</h1>
     </div>
-    <div class="masthead-actions">
-      <span class="phase-badge">{player.phase}</span>
-      <button class="open" disabled={!controls.open} onclick={openCartridge}
-        >{operation === "open" ? "Opening…" : "Open cartridge"}</button
+    <nav class="mode-switch" aria-label="LatentPlayer workspace">
+      <button
+        class:active={workspaceMode === "play"}
+        aria-pressed={workspaceMode === "play"}
+        onclick={() => setWorkspaceMode("play")}>Play</button
       >
+      <button
+        class:active={workspaceMode === "prepare"}
+        aria-pressed={workspaceMode === "prepare"}
+        onclick={() => setWorkspaceMode("prepare")}>Prepare</button
+      >
+    </nav>
+    <div class="masthead-actions">
+      <span class="phase-badge"
+        >{workspaceMode === "play"
+          ? player.phase
+          : (conversion?.phase ?? "selection")}</span
+      >
+      {#if workspaceMode === "play"}
+        <button class="open" disabled={!controls.open} onclick={openCartridge}
+          >{operation === "open" ? "Opening…" : "Open cartridge"}</button
+        >
+      {/if}
       <p class="version">v{product.version}</p>
     </div>
   </header>
 
-  <div class="player-workspace">
+  <div
+    class="player-workspace"
+    class:workspace-hidden={workspaceMode !== "play"}
+    aria-hidden={workspaceMode !== "play"}
+  >
     <section class="output-monitor" aria-label="Native video output">
       <header class="monitor-header">
         <p class="monitor-state">
@@ -757,7 +968,202 @@
     </aside>
   </div>
 
-  <section class="control-dock" aria-label="Playback and position">
+  <section
+    class="prepare-workspace"
+    class:workspace-hidden={workspaceMode !== "prepare"}
+    aria-hidden={workspaceMode !== "prepare"}
+    aria-label="Prepare raw H3 cartridges"
+  >
+    <header class="prepare-heading">
+      <div>
+        <p class="eyebrow">Raw H3 → Latent Cartridge</p>
+        <h2>Prepare performance files</h2>
+      </div>
+      <p>
+        Validate and convert locally. Existing <code>.lc</code> files are never overwritten,
+        and playback codecs or a GPU are not required.
+      </p>
+    </header>
+
+    <div class="prepare-grid">
+      <section class="source-builder" aria-label="Conversion inputs">
+        <header>
+          <span>1 · Sources</span>
+          <strong>{conversionInputs.length} selected</strong>
+        </header>
+        <div class="prepare-actions">
+          <button
+            disabled={!conversionControlState.changeSelection}
+            onclick={selectRawFiles}>Add raw files</button
+          >
+          <button
+            disabled={!conversionControlState.changeSelection}
+            onclick={selectRawFolder}>Add folder</button
+          >
+          <button
+            disabled={!conversionControlState.changeSelection ||
+              conversionInputs.length === 0}
+            onclick={() => {
+              conversionInputs = [];
+              invalidateConversionPlan();
+            }}>Clear selection</button
+          >
+        </div>
+        <label class="recursive-option">
+          <input
+            type="checkbox"
+            checked={conversionRecursive}
+            disabled={!conversionControlState.changeSelection}
+            onchange={(event) => {
+              conversionRecursive = event.currentTarget.checked;
+              invalidateConversionPlan();
+            }}
+          />
+          <span>
+            Include nested folders
+            <small>Off by default; applies only to selected folders.</small>
+          </span>
+        </label>
+        <div class="selection-list">
+          {#if conversionInputs.length === 0}
+            <p>No raw H3 Safetensors selected.</p>
+          {:else}
+            {#each conversionInputs as selection (selection.path)}
+              <article>
+                <span>{selection.kind}</span>
+                <strong title={displayPathName(selection.path)}
+                  >{displayPathName(selection.path)}</strong
+                >
+                <button
+                  aria-label={`Remove ${displayPathName(selection.path)}`}
+                  disabled={!conversionControlState.changeSelection}
+                  onclick={() => {
+                    conversionInputs = conversionInputs.filter(
+                      (candidate) => candidate.path !== selection.path,
+                    );
+                    invalidateConversionPlan();
+                  }}>Remove</button
+                >
+              </article>
+            {/each}
+          {/if}
+        </div>
+      </section>
+
+      <section class="output-builder" aria-label="Conversion output">
+        <header>
+          <span>2 · Destination</span>
+          <strong
+            >{conversionOutputDirectory === null
+              ? "Not selected"
+              : displayPathName(conversionOutputDirectory)}</strong
+          >
+        </header>
+        <button
+          disabled={!conversionControlState.changeSelection}
+          onclick={selectConversionOutput}>Choose output folder</button
+        >
+        <p>
+          Folder structure is preserved for recursive sources. Preflight blocks
+          duplicate names and every existing output before the batch starts.
+        </p>
+        <div class="conversion-primary-actions">
+          <button
+            disabled={!conversionControlState.preflight}
+            onclick={prepareConversion}
+            >{conversionBusy ? "Validating…" : "Validate batch"}</button
+          >
+          <button
+            class="convert"
+            disabled={!conversionControlState.start}
+            onclick={startConversion}>Convert to .lc</button
+          >
+          <button
+            class="stop"
+            disabled={!conversionControlState.stopAfterCurrent}
+            onclick={stopConversion}>Stop after current</button
+          >
+        </div>
+        <small>
+          Stop is cooperative: the file currently being written finishes and
+          validates atomically; queued files do not start.
+        </small>
+      </section>
+    </div>
+
+    <section class="conversion-results" aria-label="Conversion queue">
+      <header>
+        <div>
+          <span>3 · Preflight and progress</span>
+          <strong aria-live="polite">{conversionStatus}</strong>
+        </div>
+        {#if conversion !== null}
+          <small
+            >{conversion.completed} complete · {conversion.failed} failed ·
+            {conversionCancelled} cancelled · {conversion.items.length} total</small
+          >
+        {/if}
+      </header>
+      {#if conversionError}
+        <section class="error-panel conversion-error" role="alert">
+          <strong>{conversionError.code}</strong>
+          <span>{conversionError.message}</span>
+        </section>
+      {/if}
+      <div class="conversion-queue">
+        {#if conversion === null}
+          <div class="queue-placeholder">
+            Choose sources and an output folder, then validate the batch.
+          </div>
+        {:else}
+          {#each conversion.items as item, index (item.relativeOutput)}
+            <article class:failed={item.status === "failed"}>
+              <div class="queue-item-heading">
+                <span class={`conversion-state ${item.status}`}
+                  >{item.status}</span
+                >
+                <strong>{item.sourceName}</strong>
+                <code>→ {item.relativeOutput}</code>
+              </div>
+              {#if item.metadata}
+                <p>
+                  {item.metadata.decodedWidth} × {item.metadata.decodedHeight} ·
+                  {item.metadata.decodedFrames} frames ·
+                  {item.metadata.storageDtype} · {formatBytes(
+                    item.metadata.payloadBytes,
+                  )} · {item.metadata.audioPresent ? "AV" : "visual-only"}
+                </p>
+                <p class="item-fingerprint">
+                  latent {item.metadata.latentSlots} ×
+                  {item.metadata.latentHeight} × {item.metadata.latentWidth} · SHA-256
+                  <code title={item.metadata.payloadSha256}
+                    >{item.metadata.payloadSha256}</code
+                  >
+                </p>
+              {/if}
+              {#if item.error}
+                <p class="item-error">
+                  {item.error.code} · {item.error.message}
+                </p>
+              {/if}
+              {#if item.status === "complete"}
+                <button onclick={() => openConverted(index)}
+                  >Open in Player</button
+                >
+              {/if}
+            </article>
+          {/each}
+        {/if}
+      </div>
+    </section>
+  </section>
+
+  <section
+    class="control-dock"
+    class:workspace-hidden={workspaceMode !== "play"}
+    aria-hidden={workspaceMode !== "play"}
+    aria-label="Playback and position"
+  >
     <div class="transport" role="group" aria-label="Playback controls">
       <div class="transport-group">
         <button
@@ -817,7 +1223,11 @@
     </div>
   </section>
 
-  <footer class="status-strip">
+  <footer
+    class="status-strip"
+    class:workspace-hidden={workspaceMode !== "play"}
+    aria-hidden={workspaceMode !== "play"}
+  >
     <div>
       <span class:ready={player.codec.state === "ready"} class="status-dot"
       ></span>

@@ -5,12 +5,17 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use latentdeck_core::diagnostics::{LogLevel, record_global};
 use latentdeck_library::{CartridgeKey, DeckSourceIdentity, ResolvedDeckSource};
 use latentdeck_native_output::{HostFullscreenController, NativeSpoutStatus};
+use latentdeck_output_mp4::RecorderStatus;
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter as _, Manager as _, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt as _;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
+    decoded_recording::{
+        DecodedRecordingController, DecodedRecordingError, ensure_latent_capture_idle,
+        normalize_mp4_destination,
+    },
     diagnostic_state::DeckDiagnosticLifecycle,
     embedded_viewport::{
         EmbeddedViewportStore, ViewportBoundsRequest, ViewportSessionAck, validate_viewport_bounds,
@@ -24,6 +29,7 @@ use crate::{
         Q4RuntimeDiagnostics, Q4RuntimeError, Q4SeedAckView, Q4StatusView, Q4TransportAckView,
         Q4TransportInput, validate_selected_decoder,
     },
+    runtime_replacement::preflight_before_shutdown,
 };
 
 #[derive(Clone, Debug, Deserialize)]
@@ -39,6 +45,8 @@ pub(crate) struct Q4AppState {
     lifecycle: AsyncMutex<()>,
     status: Arc<Mutex<Q4StatusView>>,
     capture_status: Arc<Mutex<Q4CaptureView>>,
+    recording: DecodedRecordingController,
+    capture_gate: AsyncMutex<()>,
     viewport: EmbeddedViewportStore,
 }
 
@@ -50,13 +58,33 @@ impl Q4AppState {
             lifecycle: AsyncMutex::new(()),
             status: Arc::new(Mutex::new(Q4StatusView::default())),
             capture_status: Arc::new(Mutex::new(Q4CaptureView::default())),
+            recording: DecodedRecordingController::new(),
+            capture_gate: AsyncMutex::new(()),
             viewport: EmbeddedViewportStore::new(),
         }
     }
 
     pub(crate) async fn shutdown_runtime(&self) -> Result<(), Q4RuntimeError> {
         let _lifecycle = self.lifecycle.lock().await;
-        shutdown_runtime_slot(&self.runtime).await
+        // Keep exit ordered with a blocking destination picker and recorder
+        // arm so no new writer can appear after shutdown has drained it.
+        let _capture_gate = self.capture_gate.lock().await;
+        let runtime_result = shutdown_runtime_slot(&self.runtime).await;
+        let recording = self.recording.clone();
+        match tauri::async_runtime::spawn_blocking(move || recording.stop()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => record_global(
+                LogLevel::Error,
+                "deck.q4.recording_shutdown_failed",
+                Some(error.code()),
+            ),
+            Err(_) => record_global(
+                LogLevel::Error,
+                "deck.q4.recording_shutdown_failed",
+                Some("recording.worker_stopped"),
+            ),
+        }
+        runtime_result
     }
 
     pub(crate) async fn runtime_diagnostics(
@@ -209,10 +237,6 @@ pub(crate) async fn deck_q4_open(
     let identity_c = source_identity(source_c)?;
     let identity_d = source_identity(source_d)?;
     let _lifecycle = state.lifecycle.lock().await;
-    if let Err(error) = shutdown_runtime_slot(&state.runtime).await {
-        Q4AppState::emit_error(&app, &error);
-        return Err(command_error(error));
-    }
     let backend = match lock_backend(&state.backend).and_then(|backend| backend.launch_backend()) {
         Ok(value) => value,
         Err(error) => {
@@ -263,6 +287,18 @@ pub(crate) async fn deck_q4_open(
     };
     let parent = main_window(&app)?;
     let viewport = state.viewport.current_visible()?;
+    // Resolving identities and building the launch config are the complete
+    // candidate preflight. Keep the current good runtime alive until all of
+    // that succeeds, then transfer runtime ownership at one explicit boundary.
+    let config = preflight_before_shutdown(async { Ok::<_, CommandError>(config) }, async {
+        shutdown_runtime_slot(&state.runtime)
+            .await
+            .map_err(|error| {
+                Q4AppState::emit_error(&app, &error);
+                command_error(error)
+            })
+    })
+    .await?;
     let deck_session = library.begin_deck_session(DeckKind::Q4)?;
     let started = Q4Runtime::start(
         app.clone(),
@@ -270,6 +306,7 @@ pub(crate) async fn deck_q4_open(
         viewport,
         Arc::clone(&state.status),
         Arc::clone(&state.capture_status),
+        state.recording.clone(),
         config,
         deck_session.clone(),
     )
@@ -384,6 +421,8 @@ pub(crate) async fn deck_q4_capture_snapshot(
     app: AppHandle,
     state: State<'_, Q4AppState>,
 ) -> Result<Option<Q4CaptureView>, CommandError> {
+    let _capture_gate = state.capture_gate.lock().await;
+    ensure_recording_idle_for_capture(&state.recording)?;
     let Some(output) = capture_output_path(&app, "LatentDeck Q4 Snapshot.lc")? else {
         return Ok(None);
     };
@@ -405,6 +444,8 @@ pub(crate) async fn deck_q4_capture_live_start(
     app: AppHandle,
     state: State<'_, Q4AppState>,
 ) -> Result<Option<Q4CaptureView>, CommandError> {
+    let _capture_gate = state.capture_gate.lock().await;
+    ensure_recording_idle_for_capture(&state.recording)?;
     let Some(output) = capture_output_path(&app, "LatentDeck Q4 Live Capture.lc")? else {
         return Ok(None);
     };
@@ -444,6 +485,67 @@ pub(crate) async fn deck_q4_capture_status_get(
         }
         Err(error) => Err(command_error(error)),
     }
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) async fn deck_q4_recording_start(
+    app: AppHandle,
+    state: State<'_, Q4AppState>,
+) -> Result<RecorderStatus, CommandError> {
+    let _capture_gate = state.capture_gate.lock().await;
+    if clone_slot(&state.runtime).await.is_none() {
+        return Err(runtime_inactive());
+    }
+    let capture = state.shared_capture_status().map_err(command_error)?;
+    ensure_latent_capture_idle(&capture.state).map_err(recording_command_error)?;
+    if state.recording.is_active() {
+        return Err(recording_command_error(DecodedRecordingError::Active));
+    }
+    let selected = app
+        .dialog()
+        .file()
+        .add_filter("H.264 MP4 Video", &["mp4"])
+        .set_file_name("LatentDeck Q4 Output.mp4")
+        .blocking_save_file();
+    let Some(selected) = selected else {
+        return Ok(state.recording.status());
+    };
+    let destination = selected.into_path().map_err(|_| {
+        recording_command_error(DecodedRecordingError::Recorder(
+            latentdeck_output_mp4::RecorderError::InvalidDestination,
+        ))
+    })?;
+    let destination = normalize_mp4_destination(destination).map_err(recording_command_error)?;
+    if clone_slot(&state.runtime).await.is_none() {
+        return Err(runtime_inactive());
+    }
+    state
+        .recording
+        .arm(destination)
+        .map_err(recording_command_error)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) async fn deck_q4_recording_stop(
+    state: State<'_, Q4AppState>,
+) -> Result<RecorderStatus, CommandError> {
+    let recording = state.recording.clone();
+    tauri::async_runtime::spawn_blocking(move || recording.stop())
+        .await
+        .map_err(|_| {
+            recording_command_error(DecodedRecordingError::Recorder(
+                latentdeck_output_mp4::RecorderError::WorkerStopped,
+            ))
+        })?
+        .map_err(recording_command_error)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn deck_q4_recording_status_get(state: State<'_, Q4AppState>) -> RecorderStatus {
+    state.recording.status()
 }
 
 #[tauri::command]
@@ -677,6 +779,28 @@ fn runtime_inactive() -> CommandError {
         "deck.runtime_unavailable",
         "Open four validated Library cartridges before controlling LD-Q4.",
     )
+}
+
+fn ensure_recording_idle_for_capture(
+    recording: &DecodedRecordingController,
+) -> Result<(), CommandError> {
+    if recording.is_active() {
+        Err(CommandError::new(
+            "capture.recording_conflict",
+            "Stop decoded MP4 recording before starting latent Snapshot or Live Capture.",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn recording_command_error(error: DecodedRecordingError) -> CommandError {
+    record_global(
+        LogLevel::Error,
+        "deck.q4.recording_failed",
+        Some(error.code()),
+    );
+    CommandError::new(error.code(), error.message())
 }
 
 fn main_window(app: &AppHandle) -> Result<WebviewWindow, CommandError> {

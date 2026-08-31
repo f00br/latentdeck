@@ -6,12 +6,14 @@ stable contracts remain authoritative over replaceable implementations.
 | Path | Intended responsibility |
 | --- | --- |
 | `apps/latentdeck/` | Standalone Library, LD-D2, and LD-Q4 application with embedded native output. |
-| `apps/latentplayer/` | Standalone lightweight cartridge player with embedded native output. |
+| `apps/latentplayer/` | Standalone cartridge player and raw-H3 preparation workspace with embedded native output. |
 | `crates/core/` | Realtime coordination and stable signal contracts. |
 | `crates/cartridge/` | Codec-neutral `.lc` reader, writer, validator, hashing, and metadata. |
 | `crates/cartridge-python/` | PyO3 adapter over the single Rust Cartridge SDK implementation. |
 | `crates/gpu/` | Native GPU presentation and shared frame transport. |
 | `crates/control/` | UI-independent controls and state commands. |
+| `crates/native-output/` | Embedded native presentation host and shared fullscreen surface. |
+| `crates/output-mp4/` | Bounded video-only H.264 MP4 recording of intrinsic decoded Deck frames. |
 | `crates/output-spout/` | Required Windows Spout2 native texture output. |
 | `codec-host/python/` | Isolated Python/PyTorch worker host. |
 | `codec-host/codecs/h3/` | H3 codec adapter code; never H3 weights. |

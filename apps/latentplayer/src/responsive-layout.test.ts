@@ -71,4 +71,29 @@ describe("LatentPlayer single-window layout contract", () => {
     expect(appSource).toContain("await tick();");
     expect(appSource).toContain('code.startsWith("output.viewport_")');
   });
+
+  it("offers a complete PLAY and PREPARE workflow without codec dependency", () => {
+    expect(appSource).toContain('type WorkspaceMode = "play" | "prepare"');
+    expect(appSource).toContain("Add raw files");
+    expect(appSource).toContain("Add folder");
+    expect(appSource).toContain("Include nested folders");
+    expect(appSource).toContain("Choose output folder");
+    expect(appSource).toContain("Stop after current");
+    expect(appSource).toContain("Open in Player");
+    expect(appSource).toContain(
+      'invoke<ConversionSnapshot>("player_conversion_plan"',
+    );
+    expect(appSource).toContain('invoke("player_conversion_start")');
+    expect(stylesSource).toContain(".prepare-workspace {");
+    expect(stylesSource).toContain(".conversion-queue {");
+  });
+
+  it("renders every preflight identity and latent-shape field promised by UAT", () => {
+    expect(appSource).toContain("item.metadata.latentSlots");
+    expect(appSource).toContain("item.metadata.latentHeight");
+    expect(appSource).toContain("item.metadata.latentWidth");
+    expect(appSource).toContain("item.metadata.payloadSha256");
+    expect(appSource).toContain('class="item-fingerprint"');
+    expect(appSource).toContain("conversionCancelledCount(conversion)");
+  });
 });

@@ -6,8 +6,8 @@ tag, upload, signing action, or public release.
 
 Status on 2026-08-31: the complete `0.1.0` product surface is in owner-UAT
 closeout. The owner reports that the current experience is generally working
-well. No open P0 or P1 defect is recorded; new findings are expected to be minor
-or cosmetic unless a reproducible regression shows otherwise.
+well. Four post-baseline release findings now have a local source candidate;
+affected owner-UAT and a fresh clean RC remain open.
 
 ## Current owner-UAT binary baseline
 
@@ -29,6 +29,34 @@ and a CycloneDX 1.5 SBOM with 740 components.
 The documentation handoff was written after this binary set. The existing RC
 remains the current behavior baseline for owner UAT, but any accepted source
 change requires a fresh clean RC before publication review.
+
+### Post-baseline source candidate (owner acceptance open)
+
+The source commit containing this status adds the following behavior after
+`2f00a4b`; none of it is represented by the artifact hashes above:
+
+- D2 Live Capture survives expected automatic source-loop reset barriers and
+  remains bounded by explicit Stop and the existing validated spool limits.
+- D2/Q4 decoded output can be saved as no-clobber, video-only H.264 MP4 at
+  intrinsic geometry and 24 fps. Synthetic Windows Media Foundation output was
+  finalized and checked as an H.264 MP4 with no audio stream or partial residue.
+- Library invalidation refreshes active Deck source options without an Active
+  Collection toggle, while preserving loaded and edited draft identities.
+- Finished captures can be inserted explicitly into D2 A/B or Q4 A/B/C/D by a
+  preflighted bounded worker replacement; unrelated runtime settings and an
+  active decoded recorder are retained.
+- LatentPlayer exposes a PLAY/PREPARE workflow for bounded raw-H3 preflight and
+  `.lc` authoring with explicit recursion, no-clobber collision checks,
+  per-item metadata/errors, sequential progress, stop-after-current, and direct
+  open of a completed cartridge. Conversion is bound to the preflight payload
+  SHA-256; a subsequently changed source fails without writing its destination.
+
+Focused Rust, Python, and frontend contract tests cover these boundaries. The
+accepted CUDA, Spout, fullscreen, and six-minute stability suites were not
+repeated: latent math and the Spout/native-presentation implementation did not
+change, while the new post-presentation MP4 handoff has its own focused tests
+and affected owner-UAT slice. Live application behavior remains **owner-UAT
+pending**, not verified by those synthetic checks.
 
 ## Verified locally
 
@@ -136,6 +164,9 @@ Use the [master-user test guide](MASTER_USER_TEST.md). At this handoff:
 
 - the owner is testing the applications and reports the overall result as good;
 - minor and cosmetic findings will be fixed as they are reported;
+- the post-baseline candidate must pass D2 multi-loop capture, D2/Q4 decoded
+  MP4, Library auto-refresh, captured-source insertion, and LatentPlayer Prepare
+  tests before the four findings are closed;
 - already accepted heavy CUDA, six-minute stability, embedded-output,
   fullscreen, aspect, source-identity, and Spout paths should be repeated only
   when a relevant change or concrete regression requires it;

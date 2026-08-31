@@ -13,6 +13,7 @@ import type {
   D2CaptureView,
 } from "./d2-model";
 import type { SpoutConfigure, SpoutStatus } from "./output-model";
+import type { DecodedRecordingStatus } from "./recording-model";
 import type {
   DeckEmbeddedOutputHost,
   EmbeddedViewportSession,
@@ -41,6 +42,9 @@ export interface D2Client extends DeckEmbeddedOutputHost {
   captureLiveStart(): Promise<D2CaptureView | null>;
   captureLiveStop(): Promise<D2CaptureView>;
   captureStatusGet(): Promise<D2CaptureView>;
+  recordingStart(): Promise<DecodedRecordingStatus>;
+  recordingStop(): Promise<DecodedRecordingStatus>;
+  recordingStatusGet(): Promise<DecodedRecordingStatus>;
   statusGet(): Promise<D2Status>;
   spoutStatusGet(): Promise<SpoutStatus | null>;
   spoutConfigure(configure: SpoutConfigure): Promise<SpoutStatus>;
@@ -69,6 +73,9 @@ export const D2_COMMANDS = Object.freeze({
   captureLiveStart: "deck_d2_capture_live_start",
   captureLiveStop: "deck_d2_capture_live_stop",
   captureStatusGet: "deck_d2_capture_status_get",
+  recordingStart: "deck_d2_recording_start",
+  recordingStop: "deck_d2_recording_stop",
+  recordingStatusGet: "deck_d2_recording_status_get",
   statusGet: "deck_d2_status_get",
   spoutStatusGet: "deck_d2_spout_status_get",
   spoutConfigure: "deck_d2_spout_configure",
@@ -122,6 +129,12 @@ export function createD2Client(host: D2HostAdapter = tauriHost): D2Client {
       host.invoke<D2CaptureView>(D2_COMMANDS.captureLiveStop, {}),
     captureStatusGet: () =>
       host.invoke<D2CaptureView>(D2_COMMANDS.captureStatusGet, {}),
+    recordingStart: () =>
+      host.invoke<DecodedRecordingStatus>(D2_COMMANDS.recordingStart, {}),
+    recordingStop: () =>
+      host.invoke<DecodedRecordingStatus>(D2_COMMANDS.recordingStop, {}),
+    recordingStatusGet: () =>
+      host.invoke<DecodedRecordingStatus>(D2_COMMANDS.recordingStatusGet, {}),
     statusGet: () => host.invoke<D2Status>(D2_COMMANDS.statusGet, {}),
     spoutStatusGet: () =>
       host.invoke<SpoutStatus | null>(D2_COMMANDS.spoutStatusGet, {}),

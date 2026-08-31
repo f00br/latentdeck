@@ -38,6 +38,7 @@ use tauri::{AppHandle, WebviewWindow};
 
 use crate::{
     d2_capture_host::CaptureHostError,
+    decoded_recording::DecodedRecordingController,
     embedded_viewport::EmbeddedViewport,
     library_state::{DeckSessionLease, LibraryImporter},
 };
@@ -1051,8 +1052,9 @@ mod platform {
         D2_OUTPUT_WINDOW_LABEL, D2_OUTPUT_WINDOW_TITLE, D2Controls, D2ControlsAckView,
         D2DiagnosticIdentity, D2LaunchBackend, D2LaunchConfig, D2ResetReason, D2RuntimeDiagnostics,
         D2RuntimeError, D2SeedAckView, D2Status, D2StatusView, D2Transport, D2TransportAckView,
-        DeckSessionLease, Duration, EmbeddedViewport, INITIAL_GENERATION, MAX_D2_SAFE_INTEGER,
-        Mutex, Path, PathBuf, TrustedD2Source, ValidatedCodecPack, WebviewWindow,
+        DeckSessionLease, DecodedRecordingController, Duration, EmbeddedViewport,
+        INITIAL_GENERATION, MAX_D2_SAFE_INTEGER, Mutex, Path, PathBuf, TrustedD2Source,
+        ValidatedCodecPack, WebviewWindow,
     };
 
     const CHANNEL_CAPACITY: usize = 8;
@@ -1088,12 +1090,13 @@ mod platform {
     }
 
     impl D2Runtime {
-        #[allow(clippy::too_many_lines)] // Closed startup ownership and cleanup sequence.
+        #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Explicit startup owners and closed cleanup sequence.
         pub(crate) async fn start(
             app: AppHandle,
             parent: WebviewWindow,
             shared_status: Arc<Mutex<D2StatusView>>,
             shared_capture_status: Arc<Mutex<D2CaptureView>>,
+            recording: DecodedRecordingController,
             config: D2LaunchConfig,
             deck_session: DeckSessionLease,
             viewport: EmbeddedViewport,
@@ -1174,6 +1177,7 @@ mod platform {
                 session_config,
                 shared_status,
                 shared_capture_status,
+                recording,
                 deck_session,
                 closed: Arc::clone(&closed),
                 pending_frame: None,
@@ -1860,6 +1864,7 @@ mod platform {
         session_config: Box<D2LaunchConfig>,
         shared_status: Arc<Mutex<D2StatusView>>,
         shared_capture_status: Arc<Mutex<D2CaptureView>>,
+        recording: DecodedRecordingController,
         deck_session: DeckSessionLease,
         closed: Arc<AtomicBool>,
         pending_frame: Option<latentdeck_gpu::ring::RgbaFrame>,
@@ -2715,9 +2720,9 @@ mod platform {
                 }
                 Err(error) => return Err(map_worker_error(error)),
             };
-            // A loop boundary may finish Live Capture in the same worker turn
-            // that returns a ResetBarrier. Adopt that reset (and its new ring)
-            // before observing Finished and allowing any spool finalization.
+            // Live Capture may retain its spool across an automatic loop barrier.
+            // Adopt that reset (and its new ring) before polling capture status so
+            // the worker can resume under the strictly newer stream generation.
             self.handle_process_ack(ack, before).await?;
             if let Some(capture) = self.capture.as_ref() {
                 self.ensure_reserved_message_capacity()?;
@@ -2991,6 +2996,12 @@ mod platform {
             self.presentation_diagnostics
                 .observe_local_outcome(outcome, Instant::now().into())
                 .map_err(|_| D2RuntimeError::diagnostics_contract())?;
+            let _ = self.recording.submit_if_active(
+                frame.width(),
+                frame.height(),
+                frame.row_stride(),
+                frame.padded_rgba(),
+            );
             self.presented_sequence = expected;
             self.pending_frame = None;
             Ok(())
@@ -4089,11 +4100,13 @@ pub(crate) struct D2Runtime;
 
 #[cfg(not(target_os = "windows"))]
 impl D2Runtime {
+    #[allow(clippy::too_many_arguments)] // Mirrors the Windows startup ownership boundary.
     pub(crate) async fn start(
         _app: AppHandle,
         _parent: WebviewWindow,
         _shared_status: Arc<Mutex<D2StatusView>>,
         _shared_capture_status: Arc<Mutex<D2CaptureView>>,
+        _recording: DecodedRecordingController,
         _config: D2LaunchConfig,
         _deck_session: DeckSessionLease,
         _viewport: EmbeddedViewport,

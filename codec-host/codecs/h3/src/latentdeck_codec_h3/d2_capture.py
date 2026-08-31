@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from latentdeck_operator_d2 import D2ProcessedSlot
@@ -58,9 +58,7 @@ class D2CaptureSession:
         self._frozen_seed = seed
         slot_bytes = 24 * source_a.shape[3] * source_a.shape[4] * 2
         bounded_slots = min(max_latent_slots, max_visual_bytes // slot_bytes)
-        self._live_max_valid_slots = (
-            2 + 5 * ((bounded_slots - 2) // 5) if bounded_slots >= 2 else 0
-        )
+        self._live_max_valid_slots = 2 + 5 * ((bounded_slots - 2) // 5) if bounded_slots >= 2 else 0
         if mode == "live_capture" and self._live_max_valid_slots < 2:
             raise D2CaptureError(
                 "capture.limit_exceeded",
@@ -77,6 +75,8 @@ class D2CaptureSession:
         self._current_generation = current_generation
         self._minimum_new_generation = minimum_new_generation
         self._stream_generation: int | None = None
+        self._expected_carrier_playhead = 0
+        self._loop_reset_pending = False
         self._state = "awaiting_reset"
         self._abort_reason: str | None = None
         self._receipt: dict[str, object] | None = None
@@ -131,6 +131,10 @@ class D2CaptureSession:
         return self._state in {"capturing", "stop_armed"}
 
     @property
+    def is_awaiting_loop_reset(self) -> bool:
+        return self.is_active and self._loop_reset_pending
+
+    @property
     def is_snapshot_locked(self) -> bool:
         return self.mode == "snapshot" and self._state in {
             "awaiting_reset",
@@ -170,6 +174,8 @@ class D2CaptureSession:
                 "capture.boundary_invalid", "capture reset did not reach the stream origin"
             )
         self._stream_generation = generation
+        self._expected_carrier_playhead = 0
+        self._loop_reset_pending = False
         self._state = "capturing"
 
     def before_decode(self, step: D2ProcessedSlot) -> None:
@@ -177,10 +183,15 @@ class D2CaptureSession:
 
         if self._state not in {"capturing", "stop_armed"}:
             return
+        if self._loop_reset_pending:
+            self.abort("reset_not_applied")
+            raise D2CaptureError(
+                "capture.boundary_invalid", "capture received a slot before its loop reset"
+            )
         playhead = step.playhead_a if self.structural_carrier == "A" else step.playhead_b
         if (
             step.stream_generation != self._stream_generation
-            or playhead != self._spool.latent_slots
+            or playhead != self._expected_carrier_playhead
         ):
             self.abort("stream_mapping_changed")
             raise D2CaptureError(
@@ -193,6 +204,7 @@ class D2CaptureSession:
             raise D2CaptureError(
                 "capture.write_failed", "post-operator slot could not be persisted"
             ) from error
+        self._expected_carrier_playhead += 1
         should_finish = (
             self.mode == "snapshot" and self._spool.latent_slots == self._target_latent_slots
         ) or (
@@ -238,19 +250,51 @@ class D2CaptureSession:
         self._finalize_after_latent_slots = target
         self._state = "stop_armed"
 
-    def finish_at_reset_boundary(self) -> bool:
-        """Finish Live Capture after its last decoded slot when reset is unavoidable."""
+    def prepare_loop_reset(self, reasons: Sequence[str]) -> None:
+        """Retain Live Capture ownership across one automatic loop barrier."""
 
-        if (
-            self.mode != "live_capture"
-            or self._state not in {"capturing", "stop_armed"}
-            or self._spool.latent_slots < 2
-            or (self._spool.latent_slots - 2) % 5 != 0
+        if self.mode != "live_capture" or not self.is_active:
+            raise D2CaptureError(
+                "capture.boundary_invalid", "only active Live Capture may cross a loop reset"
+            )
+        if self._loop_reset_pending:
+            raise D2CaptureError(
+                "capture.boundary_invalid", "a Live Capture loop reset is already pending"
+            )
+        if not reasons or any(
+            not isinstance(reason, str)
+            or not reason.startswith("slot_")
+            or not reason.endswith(".loop")
+            for reason in reasons
         ):
-            return False
-        self._finish_after = None
-        self._finish()
-        return True
+            raise D2CaptureError(
+                "capture.boundary_invalid", "Live Capture may cross only automatic slot loops"
+            )
+        self._loop_reset_pending = True
+
+    def resume_after_loop_reset(self, reset_result: Mapping[str, object]) -> None:
+        if not self.is_awaiting_loop_reset or self._stream_generation is None:
+            raise D2CaptureError(
+                "capture.boundary_invalid", "Live Capture has no pending loop reset"
+            )
+        generation = reset_result.get("stream_generation")
+        playhead = reset_result.get(f"playhead_{self.structural_carrier.lower()}")
+        carrier = self._sources[self.structural_carrier]
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation <= self._stream_generation
+            or isinstance(playhead, bool)
+            or not isinstance(playhead, int)
+            or not 0 <= playhead < carrier.latent_slot_count
+        ):
+            self.abort("loop_reset_invalid")
+            raise D2CaptureError(
+                "capture.boundary_invalid", "Live Capture loop reset mapping is invalid"
+            )
+        self._stream_generation = generation
+        self._expected_carrier_playhead = playhead
+        self._loop_reset_pending = False
 
     def ensure_event_capacity(self) -> None:
         if self.accepts_live_events and len(self._control_events) >= MAX_CAPTURE_CONTROL_EVENTS:
@@ -306,6 +350,7 @@ class D2CaptureSession:
         self._receipt = None
         self._finish_after = None
         self._finalize_after_latent_slots = None
+        self._loop_reset_pending = False
 
     def _finish(self) -> None:
         carrier = self._sources[self.structural_carrier]
@@ -372,10 +417,17 @@ class D2CaptureSession:
             receipt["frozen_seed"] = self._frozen_seed
             receipt["frozen_controls"] = copy.deepcopy(self._frozen_controls)
         else:
-            receipt["control_events"] = copy.deepcopy(self._control_events)
+            receipt["control_events"] = copy.deepcopy(
+                [
+                    event
+                    for event in self._control_events
+                    if int(event["slot_offset"]) < self._spool.latent_slots
+                ]
+            )
         _bounded_json(receipt, "capture receipt")
         self._receipt = receipt
         self._finalize_after_latent_slots = None
+        self._loop_reset_pending = False
         self._state = "finished"
 
 

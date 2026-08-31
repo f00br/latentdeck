@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, WebviewWindow};
 
 use crate::{
+    decoded_recording::DecodedRecordingController,
     embedded_viewport::EmbeddedViewport,
     library_state::{DeckSessionLease, LibraryImporter},
 };
@@ -1158,13 +1159,13 @@ mod platform {
     };
 
     use super::{
-        AppHandle, Arc, CausalResetPlan, DeckSessionLease, Duration, EmbeddedViewport,
-        INITIAL_GENERATION, LibraryImporter, MAX_Q4_SAFE_INTEGER, Mutex, Path, PathBuf, Q4_DECK_ID,
-        Q4_OPERATOR_ID, Q4_OPERATOR_VERSION, Q4_OUTPUT_WINDOW_LABEL, Q4_OUTPUT_WINDOW_TITLE,
-        Q4Controls, Q4ControlsAckView, Q4DiagnosticIdentity, Q4LaunchBackend, Q4LaunchConfig,
-        Q4ResetReason, Q4Roles, Q4RolesAckView, Q4RuntimeDiagnostics, Q4RuntimeError,
-        Q4SeedAckView, Q4Slot, Q4Status, Q4StatusView, Q4Transport, Q4TransportAckView,
-        TrustedQ4Source, ValidatedCodecPack, WebviewWindow,
+        AppHandle, Arc, CausalResetPlan, DeckSessionLease, DecodedRecordingController, Duration,
+        EmbeddedViewport, INITIAL_GENERATION, LibraryImporter, MAX_Q4_SAFE_INTEGER, Mutex, Path,
+        PathBuf, Q4_DECK_ID, Q4_OPERATOR_ID, Q4_OPERATOR_VERSION, Q4_OUTPUT_WINDOW_LABEL,
+        Q4_OUTPUT_WINDOW_TITLE, Q4Controls, Q4ControlsAckView, Q4DiagnosticIdentity,
+        Q4LaunchBackend, Q4LaunchConfig, Q4ResetReason, Q4Roles, Q4RolesAckView,
+        Q4RuntimeDiagnostics, Q4RuntimeError, Q4SeedAckView, Q4Slot, Q4Status, Q4StatusView,
+        Q4Transport, Q4TransportAckView, TrustedQ4Source, ValidatedCodecPack, WebviewWindow,
     };
 
     const CHANNEL_CAPACITY: usize = 8;
@@ -1191,13 +1192,14 @@ mod platform {
     }
 
     impl Q4Runtime {
-        #[allow(clippy::too_many_lines)] // Closed startup ownership and cleanup sequence.
+        #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Explicit startup owners and closed cleanup sequence.
         pub(crate) async fn start(
             app: AppHandle,
             parent: WebviewWindow,
             viewport: EmbeddedViewport,
             shared_status: Arc<Mutex<Q4StatusView>>,
             shared_capture_status: Arc<Mutex<Q4CaptureView>>,
+            recording: DecodedRecordingController,
             config: Q4LaunchConfig,
             deck_session: DeckSessionLease,
         ) -> Result<Self, Q4RuntimeError> {
@@ -1277,6 +1279,7 @@ mod platform {
                 session_config,
                 shared_status,
                 shared_capture_status,
+                recording,
                 deck_session,
                 closed: Arc::clone(&closed),
                 pending_frame: None,
@@ -2020,6 +2023,7 @@ mod platform {
         session_config: Box<Q4LaunchConfig>,
         shared_status: Arc<Mutex<Q4StatusView>>,
         shared_capture_status: Arc<Mutex<Q4CaptureView>>,
+        recording: DecodedRecordingController,
         deck_session: DeckSessionLease,
         closed: Arc<AtomicBool>,
         pending_frame: Option<latentdeck_gpu::ring::RgbaFrame>,
@@ -3221,6 +3225,12 @@ mod platform {
             self.presentation_diagnostics
                 .observe_local_outcome(outcome, Instant::now().into())
                 .map_err(|_| Q4RuntimeError::diagnostics_contract())?;
+            let _ = self.recording.submit_if_active(
+                frame.width(),
+                frame.height(),
+                frame.row_stride(),
+                frame.padded_rgba(),
+            );
             self.presented_sequence = expected;
             self.pending_frame = None;
             Ok(())
@@ -4375,12 +4385,14 @@ pub(crate) struct Q4Runtime;
 
 #[cfg(not(target_os = "windows"))]
 impl Q4Runtime {
+    #[allow(clippy::too_many_arguments)] // Mirrors the Windows startup ownership boundary.
     pub(crate) async fn start(
         _app: AppHandle,
         _parent: WebviewWindow,
         _viewport: EmbeddedViewport,
         _shared_status: Arc<Mutex<Q4StatusView>>,
         _shared_capture_status: Arc<Mutex<Q4CaptureView>>,
+        _recording: DecodedRecordingController,
         _config: Q4LaunchConfig,
         _deck_session: DeckSessionLease,
     ) -> Result<Self, Q4RuntimeError> {

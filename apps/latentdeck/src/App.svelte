@@ -20,6 +20,7 @@
     type LibraryView,
     type ReindexSummary,
   } from "./library-model";
+  import { notifyLibraryInvalidated } from "./library-refresh";
   import D2Faceplate from "./D2Faceplate.svelte";
   import Q4Faceplate from "./Q4Faceplate.svelte";
   import { d2Client } from "./d2-client";
@@ -120,6 +121,7 @@
   async function mutate(
     operation: () => Promise<string | void>,
     fallbackNotice: string,
+    invalidatesLibrary = true,
   ): Promise<void> {
     if (busy) return;
     busy = true;
@@ -128,6 +130,7 @@
     try {
       const operationNotice = await operation();
       await refresh();
+      if (invalidatesLibrary) notifyLibraryInvalidated();
       notice = operationNotice ?? fallbackNotice;
     } catch (error) {
       errorMessage = describeCommandError(error);
@@ -140,6 +143,7 @@
     await mutate(
       async () => undefined,
       search.trim() === "" ? "Showing full bank." : "Search applied.",
+      false,
     );
   }
 

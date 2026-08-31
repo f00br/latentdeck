@@ -42,6 +42,9 @@ describe("Q4 client boundary", () => {
     });
     await client.rolesSet(DEFAULT_Q4_ROLES);
     await client.captureSnapshot();
+    await client.recordingStart();
+    await client.recordingStatusGet();
+    await client.recordingStop();
     await client.viewportSessionBegin();
     await client.viewportSetBounds({
       epoch: 4,
@@ -63,6 +66,9 @@ describe("Q4 client boundary", () => {
       Q4_COMMANDS.open,
       Q4_COMMANDS.rolesSet,
       Q4_COMMANDS.captureSnapshot,
+      Q4_COMMANDS.recordingStart,
+      Q4_COMMANDS.recordingStatusGet,
+      Q4_COMMANDS.recordingStop,
       Q4_COMMANDS.viewportSessionBegin,
       Q4_COMMANDS.viewportSetBounds,
       Q4_COMMANDS.fullscreenStatusGet,

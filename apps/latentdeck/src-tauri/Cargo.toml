@@ -22,6 +22,7 @@ latentdeck-core = { path = "../../../crates/core" }
 latentdeck-gpu = { path = "../../../crates/gpu" }
 latentdeck-library = { path = "../../../crates/library" }
 latentdeck-native-output = { path = "../../../crates/native-output" }
+latentdeck-output-mp4 = { path = "../../../crates/output-mp4" }
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true

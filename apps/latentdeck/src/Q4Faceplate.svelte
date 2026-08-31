@@ -61,11 +61,22 @@
     type SignalCompatibilityReport,
   } from "./library-model";
   import {
+    createLibraryRefreshController,
+    notifyLibraryInvalidated,
+  } from "./library-refresh";
+  import {
     describeSpout,
     spoutControlsFor,
     type SpoutControls,
     type SpoutStatus,
   } from "./output-model";
+  import {
+    IDLE_DECODED_RECORDING,
+    decodedRecordingControls,
+    describeDecodedRecording,
+    type DecodedRecordingControls,
+    type DecodedRecordingStatus,
+  } from "./recording-model";
   import {
     buildQ4Preset,
     mergePresetSourceOptions,
@@ -97,6 +108,11 @@
     shouldShowNextLoadDraftReadout,
     type DeckSourceTruthState,
   } from "./deck-source-truth";
+  import {
+    createExclusiveOperationGate,
+    replaceDraftSource,
+    retainDraftSourceOptions,
+  } from "./source-replacement";
   import {
     canSetDeckFullscreen,
     shouldExitFullscreenForHiddenDeck,
@@ -140,6 +156,11 @@
   let rolesDirty = false;
   let seedDirty = false;
   let capture: Q4CaptureView = { ...DEFAULT_Q4_CAPTURE };
+  let sourceReplaceBusy = false;
+  let recording: DecodedRecordingStatus = { ...IDLE_DECODED_RECORDING };
+  let recordingBusy = false;
+  let recordingPending = false;
+  let recordingMessage = "";
   let spout: SpoutStatus | null = null;
   let spoutName = "LatentDeck LD-Q4 Output";
   let spoutNameDirty = false;
@@ -194,6 +215,12 @@
   let sourceOptions: CartridgeView[] = [];
   let presentCount = 0;
   let captureActive = false;
+  let recordingControls: DecodedRecordingControls = {
+    start: false,
+    stop: false,
+  };
+  let recordingActive = false;
+  let recordingStatusText = describeDecodedRecording(recording);
   let rolesValid = true;
   let resolvedWeights: readonly [number, number, number] = [
     1 / 3,
@@ -223,6 +250,9 @@
   let incompatibleSelectedSlots: Q4Slot[] = [];
   let selectedSourcesCompatible = false;
   let loadGateReason: string | null = "Preparing Q4…";
+  const sourceReplaceGate = createExclusiveOperationGate((active) => {
+    sourceReplaceBusy = active;
+  });
   let controlsValidation: string | null = null;
   let triangleXMinimum = 0;
   let triangleXMaximum = 1;
@@ -329,9 +359,19 @@
   ).length;
   $: captureUi = deckCaptureUiPolicy(capture.mode, capture.state);
   $: captureActive = captureUi.active;
+  $: recordingActive =
+    recording.state === "armed" ||
+    recording.state === "recording" ||
+    recording.state === "finalizing";
+  $: recordingControls = decodedRecordingControls(
+    recording,
+    status.loaded,
+    recordingBusy || captureBusy || captureActive,
+  );
+  $: recordingStatusText = describeDecodedRecording(recording);
   $: captureActions = deckCaptureActions(capture.mode, capture.state, {
     loaded: status.loaded,
-    hostBusy,
+    hostBusy: hostBusy || sourceReplaceBusy,
     captureBusy,
     controlsDirty,
     controlsDispatchRunning,
@@ -362,23 +402,25 @@
   $: spoutStateLabel = describeSpout(spout);
   $: viewportReady =
     active && viewportEpoch !== null && viewportApplied?.visible === true;
-  $: loadGateReason = hostBusy
-    ? "Q4 host is busy."
-    : captureBusy
-      ? "A capture operation is busy."
-      : !captureUi.load
-        ? "Finish or cancel the active capture before loading Q4."
-        : !viewportReady
-          ? "Embedded Q4 output is not ready. Keep this Deck visible."
-          : backend.state !== "ready"
-            ? (backend.detail ?? "Select a compatible TAEH3 decoder.")
-            : !allSourcesReady
-              ? "Assign a present cartridge to all four NEXT LOAD DRAFT slots."
-              : !compatibilityReady
-                ? "Signal compatibility is still being checked."
-                : incompatibleSelectedSlots.length > 0
-                  ? `Draft donor slots ${incompatibleSelectedSlots.join("/")} are incompatible with carrier ${rolesDraft.carrier}.`
-                  : controlsValidation;
+  $: loadGateReason = sourceReplaceBusy
+    ? "Captured source replacement is in progress."
+    : hostBusy
+      ? "Q4 host is busy."
+      : captureBusy
+        ? "A capture operation is busy."
+        : !captureUi.load
+          ? "Finish or cancel the active capture before loading Q4."
+          : !viewportReady
+            ? "Embedded Q4 output is not ready. Keep this Deck visible."
+            : backend.state !== "ready"
+              ? (backend.detail ?? "Select a compatible TAEH3 decoder.")
+              : !allSourcesReady
+                ? "Assign a present cartridge to all four NEXT LOAD DRAFT slots."
+                : !compatibilityReady
+                  ? "Signal compatibility is still being checked."
+                  : incompatibleSelectedSlots.length > 0
+                    ? `Draft donor slots ${incompatibleSelectedSlots.join("/")} are incompatible with carrier ${rolesDraft.carrier}.`
+                    : controlsValidation;
   $: {
     const deckActive = active;
     if (deckActive) fullscreenAutoExitAttempted = false;
@@ -397,11 +439,13 @@
     }
   }
   $: if (viewportMounted) void syncViewportAfterSurfaceChange(active);
+  $: bankRefresh.setActive(active);
 
   onMount(() => {
     let disposed = false;
     const stops: StopQ4Listener[] = [];
     let spoutPoll: ReturnType<typeof setInterval> | undefined;
+    let recordingPoll: ReturnType<typeof setInterval> | undefined;
     viewportMounted = true;
     const viewportObserver = new ResizeObserver(scheduleViewportSync);
     const intersectionObserver = new IntersectionObserver(scheduleViewportSync);
@@ -455,16 +499,19 @@
         if (!disposed) markFailure(error);
       }
       if (!disposed) {
-        await refreshBank();
         await refreshBackend();
         await refreshStatus();
         await refreshFullscreenStatus();
         await refreshCapture();
+        await refreshRecordingStatus();
         await refreshSpout();
         if (!disposed) {
           spoutPoll = setInterval(() => {
             void refreshSpout();
           }, 250);
+          recordingPoll = setInterval(() => {
+            void refreshRecordingStatus(false);
+          }, 500);
         }
       }
     })();
@@ -507,6 +554,8 @@
       }
       viewportEpoch = null;
       if (spoutPoll !== undefined) clearInterval(spoutPoll);
+      if (recordingPoll !== undefined) clearInterval(recordingPoll);
+      bankRefresh.dispose();
       controlsDispatcher.dispose();
       for (const stop of stops) stop();
     };
@@ -526,7 +575,10 @@
     return sourceOptions.find((cartridge) => cartridge.archiveSha256 === hash);
   }
 
-  function applySourceChoices(explicitDraftChange = false): void {
+  function applySourceChoices(
+    explicitDraftChange = false,
+    availableSources: readonly CartridgeView[] = bankView.cartridges,
+  ): void {
     if (
       !explicitDraftChange &&
       sourceTruth.loadedArchiveSha256s !== null &&
@@ -535,7 +587,7 @@
       return;
     }
     const choices = chooseQ4Sources(
-      bankView.cartridges,
+      availableSources,
       { sourceAHash, sourceBHash, sourceCHash, sourceDHash },
       { preserveExplicitDuplicates: true },
     );
@@ -556,12 +608,17 @@
 
   async function refreshBank(): Promise<void> {
     if (presetBusy) return;
-    bankBusy = true;
-    bankError = "";
-    try {
-      bankView = await invoke<LibraryView>("library_snapshot", {
-        search: null,
-      });
+    await bankRefresh.refresh();
+  }
+
+  const bankRefresh = createLibraryRefreshController<LibraryView>({
+    load: async () => {
+      bankBusy = true;
+      bankError = "";
+      return invoke<LibraryView>("library_snapshot", { search: null });
+    },
+    apply: async (nextView) => {
+      bankView = nextView;
       presetResolvedSources = presetResolvedSources.filter(
         (source) =>
           source !== null &&
@@ -569,15 +626,21 @@
             source.archiveSha256,
           ),
       );
-      applySourceChoices();
+      const availableSources = retainDraftSourceOptions(
+        bankView.cartridges,
+        [...presetResolvedSources, ...loadedSourceViews],
+        currentSourceDraft(),
+      );
+      applySourceChoices(false, availableSources);
       await tick();
       await refreshSpatialCompatibility();
-    } catch (error) {
-      bankError = describeCommandError(error);
-    } finally {
       bankBusy = false;
-    }
-  }
+    },
+    onError: (error) => {
+      bankError = describeCommandError(error);
+      bankBusy = false;
+    },
+  });
 
   async function changeBank(event: Event): Promise<void> {
     const collectionId = (event.currentTarget as HTMLSelectElement).value;
@@ -860,6 +923,21 @@
     }
   }
 
+  async function refreshRecordingStatus(reportError = true): Promise<void> {
+    if (recordingPending) return;
+    recordingPending = true;
+    try {
+      recording = await q4Client.recordingStatusGet();
+      if (recording.state === "failed" && recording.errorCode !== null) {
+        recordingMessage = recording.errorCode;
+      }
+    } catch (error) {
+      if (reportError) recordingMessage = describeCommandError(error);
+    } finally {
+      recordingPending = false;
+    }
+  }
+
   async function refreshSpout(): Promise<void> {
     if (spoutPending) return;
     spoutPending = true;
@@ -958,6 +1036,65 @@
       seedDirty = false;
     });
     await refreshFullscreenStatus();
+  }
+
+  async function useCapturedSource(slot: Q4Slot): Promise<void> {
+    await sourceReplaceGate.run(async () => {
+      if (
+        capture.state !== "finished" ||
+        capture.cartridgeId === null ||
+        capture.archiveSha256 === null
+      ) {
+        markFailure(new Error("The finished capture is not available yet."));
+        return;
+      }
+      const identity: PresetCartridgeIdentity = {
+        cartridge_id: capture.cartridgeId,
+        archive_sha256: capture.archiveSha256,
+      };
+      try {
+        const [captured] = await invoke<(CartridgeView | null)[]>(
+          "library_resolve_preset_sources",
+          { identities: [identity] },
+        );
+        if (captured === null || captured === undefined) {
+          throw new Error(
+            "The captured cartridge is not present in the Library.",
+          );
+        }
+        presetResolvedSources = [
+          ...presetResolvedSources.filter(
+            (source) => source?.archiveSha256 !== captured.archiveSha256,
+          ),
+          captured,
+        ];
+        discardPresetLoopDraft();
+        [sourceAHash, sourceBHash, sourceCHash, sourceDHash] =
+          replaceDraftSource(
+            currentSourceDraft(),
+            Q4_SLOTS.indexOf(slot),
+            captured.archiveSha256,
+          );
+        markSourceDraftEdited();
+        await tick();
+        await refreshSpatialCompatibility();
+        await tick();
+        if (!selectedSourcesCompatible) {
+          hostState = "error";
+          hostMessage = `Captured source ${slot} is incompatible with the current Q4 draft.`;
+          return;
+        }
+        const expectedHash = captured.archiveSha256;
+        await openDeck();
+        const loadedSource = loadedSourceBySlot(status.sources, slot);
+        if (status.loaded && loadedSource?.archiveSha256 === expectedHash) {
+          hostState = "ready";
+          hostMessage = `Capture inserted in ${slot}. The bounded worker restart preserved the other draft sources, controls, roles, seed and transport intent; causal state restarts at the replacement boundary.`;
+        }
+      } catch (error) {
+        markFailure(error);
+      }
+    });
   }
 
   async function applyControls(): Promise<void> {
@@ -1059,6 +1196,28 @@
       });
     } finally {
       captureBusy = false;
+    }
+  }
+
+  async function toggleDecodedRecording(): Promise<void> {
+    const action = recordingControls.stop
+      ? "stop"
+      : recordingControls.start
+        ? "start"
+        : null;
+    if (action === null || recordingBusy) return;
+    recordingBusy = true;
+    recordingMessage = "";
+    try {
+      recording =
+        action === "stop"
+          ? await q4Client.recordingStop()
+          : await q4Client.recordingStart();
+    } catch (error) {
+      recordingMessage = describeCommandError(error);
+      await refreshRecordingStatus(false);
+    } finally {
+      recordingBusy = false;
     }
   }
 
@@ -1263,7 +1422,7 @@
       incoming.captureId !== lastImportedCaptureId
     ) {
       lastImportedCaptureId = incoming.captureId;
-      void refreshBank();
+      notifyLibraryInvalidated();
     }
   }
 
@@ -2410,11 +2569,15 @@
       <span>POST-OPERATOR RESAMPLE</span><button
         type="button"
         onclick={() => void snapshot()}
-        disabled={!captureActions.snapshotEnabled}>Snapshot</button
+        disabled={!captureActions.snapshotEnabled ||
+          recordingActive ||
+          sourceReplaceBusy}>Snapshot</button
       ><button
         type="button"
         onclick={() => void toggleLiveCapture()}
-        disabled={captureActions.liveAction === null}
+        disabled={captureActions.liveAction === null ||
+          recordingActive ||
+          sourceReplaceBusy}
         >{captureActions.liveAction === "stop"
           ? "Stop Live"
           : "Start Live"}</button
@@ -2422,6 +2585,45 @@
         >{capture.detail ??
           `${capture.state} · ${capture.latentSlots} slots`}</small
       >
+      {#if capture.state === "finished" && capture.cartridgeId !== null && capture.archiveSha256 !== null}<div
+          class="captured-source-actions"
+        >
+          {#each Q4_SLOTS as slot (slot)}<button
+              type="button"
+              onclick={() => void useCapturedSource(slot)}
+              disabled={hostBusy ||
+                bankBusy ||
+                presetBusy ||
+                captureBusy ||
+                sourceReplaceBusy}>Use capture in {slot}</button
+            >{/each}
+          <small
+            >Explicit source insertion performs one bounded worker restart;
+            other draft settings are retained and causal state restarts.</small
+          >
+        </div>{/if}
+    </div>
+    <div class="recording" aria-label="Decoded MP4 recording">
+      <span>DECODED VIDEO</span>
+      <button
+        class:active={recordingControls.stop}
+        type="button"
+        onclick={() => void toggleDecodedRecording()}
+        disabled={!recordingControls.start && !recordingControls.stop}
+        >{recordingBusy
+          ? recordingControls.stop
+            ? "Finalizing…"
+            : "Opening…"
+          : recordingControls.stop
+            ? "Stop MP4"
+            : recording.state === "finalizing"
+              ? "Finalizing…"
+              : "Record MP4"}</button
+      >
+      <small class:error={recording.state === "failed"}
+        >{recordingMessage || recordingStatusText}</small
+      >
+      <small>Video-only H.264 · 24 fps · intrinsic decoded pixels</small>
     </div>
   </footer>
 </section>
@@ -3078,7 +3280,7 @@
   }
   .master-strip {
     display: grid;
-    grid-template-columns: 0.8fr 1fr 0.7fr 1.5fr;
+    grid-template-columns: 0.8fr 1fr 0.7fr 1.5fr 0.9fr;
     gap: 7px;
     padding: 7px;
     border-top: 1px solid #737491;
@@ -3118,9 +3320,36 @@
   .capture > small {
     grid-column: 1/-1;
   }
+  .captured-source-actions {
+    display: grid;
+    grid-column: 1/-1;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 5px;
+  }
+  .captured-source-actions small {
+    grid-column: 1/-1;
+  }
   .capture small {
     color: #777a90;
     font-size: 0.57rem;
+  }
+  .recording {
+    grid-template-columns: 1fr;
+  }
+  .recording > span,
+  .recording > small {
+    grid-column: 1 / -1;
+  }
+  .recording button.active {
+    border-color: #c28672;
+    background: linear-gradient(#6a3d32, #42251f);
+  }
+  .recording small {
+    color: #777a90;
+    font-size: 0.57rem;
+  }
+  .recording small.error {
+    color: #ec9aa2;
   }
   @media (max-width: 1180px) {
     .bank-strip {

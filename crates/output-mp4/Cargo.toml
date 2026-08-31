@@ -1,0 +1,24 @@
+[package]
+name = "latentdeck-output-mp4"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Bounded decoded-frame H.264 MP4 recording for LatentDeck"
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+  "Win32_Media_MediaFoundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Com",
+] }
+
+[lints]
+workspace = true

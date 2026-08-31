@@ -10,6 +10,7 @@ members = [
   "crates/gpu-python",
   "crates/library",
   "crates/native-output",
+  "crates/output-mp4",
   "crates/output-spout",
 ]
 resolver = "3"

@@ -6,6 +6,7 @@ use std::sync::{
 };
 use std::{path::PathBuf, time::SystemTime};
 
+mod conversion;
 mod diagnostic_state;
 mod native_output;
 mod playback_runtime;
@@ -23,6 +24,10 @@ use tauri::{AppHandle, Manager, RunEvent, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt as _;
 use tokio::sync::Mutex as AsyncMutex;
 
+use crate::conversion::{
+    ConversionCoordinator, ConversionError, ConversionPhase, ConversionPlanRequest,
+    ConversionSnapshot, plan_conversion,
+};
 use crate::diagnostic_state::{
     DiagnosticSaveResult, active_snapshot, inactive_snapshot, write_player_bundle,
 };
@@ -32,12 +37,14 @@ use crate::native_output::{
 };
 
 const MAIN_WINDOW_LABEL: &str = "main";
+type ConversionSlot = Arc<Mutex<Option<Arc<ConversionCoordinator>>>>;
 
 struct AppState {
     player: Arc<Mutex<PlayerCoordinator>>,
     runtime: Arc<AsyncMutex<Option<PlaybackRuntime>>>,
     viewport: PlayerViewportStore,
     fullscreen: HostFullscreenController,
+    conversion: ConversionSlot,
     exit_gate: ExitGate,
 }
 
@@ -52,6 +59,7 @@ impl AppState {
             runtime: Arc::new(AsyncMutex::new(None)),
             viewport: PlayerViewportStore::new(),
             fullscreen: HostFullscreenController::new(),
+            conversion: Arc::new(Mutex::new(None)),
             exit_gate: ExitGate::new(),
         }
     }
@@ -193,6 +201,12 @@ impl From<RealtimeDiagnosticError> for CommandError {
     }
 }
 
+impl From<ConversionError> for CommandError {
+    fn from(error: ConversionError) -> Self {
+        Self::with_recoverability(error.code, error.message, error.recoverable)
+    }
+}
+
 fn lock_player(
     player: &Arc<Mutex<PlayerCoordinator>>,
 ) -> Result<MutexGuard<'_, PlayerCoordinator>, CommandError> {
@@ -200,6 +214,28 @@ fn lock_player(
         CommandError::new(
             "player.state_poisoned",
             "Player state is unavailable; restart LatentPlayer.",
+        )
+    })
+}
+
+fn lock_conversion_slot(
+    conversion: &ConversionSlot,
+) -> Result<MutexGuard<'_, Option<Arc<ConversionCoordinator>>>, CommandError> {
+    conversion.lock().map_err(|_| {
+        CommandError::new(
+            "conversion.state_unavailable",
+            "Conversion state is unavailable; restart LatentPlayer.",
+        )
+    })
+}
+
+fn current_conversion(
+    conversion: &ConversionSlot,
+) -> Result<Arc<ConversionCoordinator>, CommandError> {
+    lock_conversion_slot(conversion)?.clone().ok_or_else(|| {
+        CommandError::new(
+            "conversion.not_prepared",
+            "Add raw H3 files and prepare a conversion first.",
         )
     })
 }
@@ -367,6 +403,113 @@ async fn player_open(state: State<'_, AppState>, path: String) -> Result<PlayerV
         CommandError::new(
             "player.validation_failed",
             "Cartridge validation task stopped unexpectedly.",
+        )
+    })?
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+async fn player_conversion_plan(
+    state: State<'_, AppState>,
+    inputs: Vec<String>,
+    output_directory: String,
+    recursive: bool,
+) -> Result<ConversionSnapshot, CommandError> {
+    let request = ConversionPlanRequest {
+        inputs: inputs.into_iter().map(PathBuf::from).collect(),
+        output_directory: PathBuf::from(output_directory),
+        recursive,
+    };
+    let plan = tauri::async_runtime::spawn_blocking(move || plan_conversion(request))
+        .await
+        .map_err(|_| {
+            CommandError::new(
+                "conversion.preflight_failed",
+                "Raw H3 preflight stopped unexpectedly.",
+            )
+        })??;
+    let coordinator = Arc::new(ConversionCoordinator::from_plan(plan));
+    let snapshot = coordinator.snapshot()?;
+    let mut slot = lock_conversion_slot(&state.conversion)?;
+    if let Some(current) = slot.as_ref() {
+        let phase = current.snapshot()?.phase;
+        if matches!(phase, ConversionPhase::Running | ConversionPhase::Stopping) {
+            return Err(CommandError::new(
+                "conversion.busy",
+                "Stop the active conversion after its current file before preparing another batch.",
+            ));
+        }
+    }
+    *slot = Some(coordinator);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+fn player_conversion_snapshot(
+    state: State<'_, AppState>,
+) -> Result<Option<ConversionSnapshot>, CommandError> {
+    lock_conversion_slot(&state.conversion)?
+        .as_ref()
+        .map(|coordinator| coordinator.snapshot().map_err(Into::into))
+        .transpose()
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+async fn player_conversion_start(
+    state: State<'_, AppState>,
+) -> Result<ConversionSnapshot, CommandError> {
+    let coordinator = {
+        let slot = lock_conversion_slot(&state.conversion)?;
+        let coordinator = slot.as_ref().cloned().ok_or_else(|| {
+            CommandError::new(
+                "conversion.not_prepared",
+                "Add raw H3 files and prepare a conversion first.",
+            )
+        })?;
+        coordinator.begin()?;
+        coordinator
+    };
+    tauri::async_runtime::spawn_blocking(move || coordinator.finish_started())
+        .await
+        .map_err(|_| {
+            CommandError::new(
+                "conversion.task_failed",
+                "Conversion stopped unexpectedly; completed outputs remain valid.",
+            )
+        })?
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+fn player_conversion_stop(state: State<'_, AppState>) -> Result<ConversionSnapshot, CommandError> {
+    current_conversion(&state.conversion)?
+        .request_stop()
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+async fn player_open_converted(
+    state: State<'_, AppState>,
+    index: usize,
+) -> Result<PlayerView, CommandError> {
+    let output = current_conversion(&state.conversion)?.completed_output(index)?;
+    let mut runtime = state.runtime.lock().await;
+    shutdown_runtime(&mut runtime).await?;
+    let player = Arc::clone(&state.player);
+    tauri::async_runtime::spawn_blocking(move || {
+        lock_player(&player)?
+            .open_cartridge(output)
+            .map_err(Into::into)
+    })
+    .await
+    .map_err(|_| {
+        CommandError::new(
+            "player.validation_failed",
+            "Converted cartridge validation task stopped unexpectedly.",
         )
     })?
 }
@@ -663,6 +806,11 @@ fn main() {
             player_viewport_session_begin,
             player_viewport_set_bounds,
             player_open,
+            player_conversion_plan,
+            player_conversion_snapshot,
+            player_conversion_start,
+            player_conversion_stop,
+            player_open_converted,
             player_select_decoder,
             player_set_loop,
             player_play,
@@ -685,10 +833,23 @@ fn main() {
                 ExitRequest::BeginShutdown => {
                     api.prevent_exit();
                     let runtime = Arc::clone(&state.runtime);
+                    let conversion = lock_conversion_slot(&state.conversion)
+                        .ok()
+                        .and_then(|slot| slot.clone());
+                    if let Some(coordinator) = conversion.as_ref() {
+                        let _ = coordinator.request_stop();
+                    }
                     let app_handle = app_handle.clone();
                     tauri::async_runtime::spawn(async move {
                         let mut runtime = runtime.lock().await;
                         let _ = shutdown_runtime(&mut runtime).await;
+                        drop(runtime);
+                        if let Some(coordinator) = conversion {
+                            let _ = tauri::async_runtime::spawn_blocking(move || {
+                                coordinator.wait_until_idle()
+                            })
+                            .await;
+                        }
                         app_handle.state::<AppState>().exit_gate.mark_ready();
                         record_global(LogLevel::Info, "app.exit_ready", None);
                         app_handle.exit(code.unwrap_or_default());

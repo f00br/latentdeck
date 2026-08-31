@@ -137,12 +137,15 @@ class FakeRing:
         self.capacity = 128
         self.closed = False
         self.fail_reset = False
+        self.publish_probe: Callable[[], None] | None = None
 
     def can_publish(self, frame_count: int) -> bool:
         return self.occupancy + frame_count <= self.capacity
 
     def publish_frames(self, frames: Sequence[bytes], *, stream_generation: int) -> tuple[int, int]:
         assert stream_generation == self.generation
+        if self.publish_probe is not None:
+            self.publish_probe()
         first = self.write_sequence + 1
         self.write_sequence += len(frames)
         self.occupancy += len(frames)
@@ -891,7 +894,7 @@ def test_worker_loop_requires_causal_reset_before_more_decode() -> None:
     assert (after["playhead_a"], after["playhead_b"]) == (0, 7)
 
 
-def test_default_loop_finishes_live_capture_at_valid_reset_boundary(tmp_path: Path) -> None:
+def test_live_capture_remains_active_at_automatic_loop_barrier(tmp_path: Path) -> None:
     state, _decoder, _rings = configured_state()
     state.handle("deck.d2.load", load_payload())
     state.handle("ring.bind", bind_payload())
@@ -909,20 +912,155 @@ def test_default_loop_finishes_live_capture_at_valid_reset_boundary(tmp_path: Pa
 
     barrier = state.handle("deck.d2.process_slot", identity(2))
     assert barrier["kind"] == "reset_barrier"
-    finished = state.handle(
+    status = state.handle(
         "deck.d2.capture.status",
         {"deck_id": "main-d2", "deck_revision": 1, "capture_id": capture_id},
     )
-    assert finished["state"] == "finished"
-    assert finished["latent_slots"] == 7
-    assert finished["receipt"]["visual_shape"] == [1, 24, 7, 3, 4]  # type: ignore[index]
+    assert status["state"] == "capturing"
+    assert status["latent_slots"] == 7
+
+
+def test_live_capture_resumes_after_automatic_loop_reset(tmp_path: Path) -> None:
+    state, _decoder, _rings = configured_state()
+    state.handle("deck.d2.load", load_payload())
+    state.handle("ring.bind", bind_payload())
+    capture_id = "14141414-1414-4414-8414-141414141414"
+    state.handle(
+        "deck.d2.capture.start",
+        capture_start_payload(tmp_path, capture_id=capture_id, mode="live_capture"),
+    )
+    state.handle(
+        "deck.d2.reset",
+        {"deck_id": "main-d2", "deck_revision": 1, "new_stream_generation": 2},
+    )
+    for _ in range(7):
+        state.handle("deck.d2.process_slot", identity(2))
+    assert state.handle("deck.d2.process_slot", identity(2))["kind"] == "reset_barrier"
 
     reset = state.handle(
         "deck.d2.reset",
         {"deck_id": "main-d2", "deck_revision": 1, "new_stream_generation": 3},
     )
-    assert reset["causal_state_cleared"] is True
-    assert list(tmp_path.glob(f"{capture_id}.safetensors.partial"))
+    assert reset["stream_generation"] == 3
+    assert state.handle("deck.d2.process_slot", identity(3))["kind"] == "decoded_slot"
+    status = state.handle(
+        "deck.d2.capture.status",
+        {"deck_id": "main-d2", "deck_revision": 1, "capture_id": capture_id},
+    )
+    assert status["state"] == "capturing"
+    assert status["stream_generation"] == 3
+    assert status["latent_slots"] == 8
+
+
+def test_live_capture_crosses_repeated_loop_resets_until_user_stop(tmp_path: Path) -> None:
+    state, _decoder, _rings = configured_state()
+    state.handle("deck.d2.load", load_payload())
+    state.handle("ring.bind", bind_payload())
+    capture_id = "15151515-1515-4515-8515-151515151515"
+    capture_identity = {
+        "deck_id": "main-d2",
+        "deck_revision": 1,
+        "capture_id": capture_id,
+    }
+    state.handle(
+        "deck.d2.capture.start",
+        capture_start_payload(tmp_path, capture_id=capture_id, mode="live_capture"),
+    )
+    state.handle(
+        "deck.d2.reset",
+        {"deck_id": "main-d2", "deck_revision": 1, "new_stream_generation": 2},
+    )
+
+    for _ in range(7):
+        state.handle("deck.d2.process_slot", identity(2))
+    assert state.handle("deck.d2.process_slot", identity(2))["reasons"] == ["slot_a.loop"]
+    state.handle(
+        "deck.d2.reset",
+        {"deck_id": "main-d2", "deck_revision": 1, "new_stream_generation": 3},
+    )
+    for _ in range(5):
+        state.handle("deck.d2.process_slot", identity(3))
+    assert state.handle("deck.d2.process_slot", identity(3))["reasons"] == ["slot_b.loop"]
+    state.handle(
+        "deck.d2.reset",
+        {"deck_id": "main-d2", "deck_revision": 1, "new_stream_generation": 4},
+    )
+    for _ in range(2):
+        state.handle("deck.d2.process_slot", identity(4))
+    assert state.handle("deck.d2.process_slot", identity(4))["reasons"] == ["slot_a.loop"]
+    state.handle(
+        "deck.d2.reset",
+        {"deck_id": "main-d2", "deck_revision": 1, "new_stream_generation": 5},
+    )
+    for _ in range(3):
+        state.handle("deck.d2.process_slot", identity(5))
+
+    stopped = state.handle("deck.d2.capture.stop", capture_identity)
+    assert stopped["state"] == "finished"
+    assert stopped["latent_slots"] == 17
+    assert stopped["receipt"]["visual_shape"] == [1, 24, 17, 3, 4]  # type: ignore[index]
+    assert Path(str(stopped["receipt"]["payload_path"])).is_file()  # type: ignore[index]
+
+
+def test_live_capture_receipt_excludes_event_at_final_slot_boundary(tmp_path: Path) -> None:
+    state, _decoder, _rings = configured_state()
+    state.handle("deck.d2.load", load_payload())
+    state.handle("ring.bind", bind_payload())
+    capture_id = "16161616-1616-4616-8616-161616161616"
+    capture_identity = {
+        "deck_id": "main-d2",
+        "deck_revision": 1,
+        "capture_id": capture_id,
+    }
+    state.handle(
+        "deck.d2.capture.start",
+        capture_start_payload(tmp_path, capture_id=capture_id, mode="live_capture"),
+    )
+    state.handle(
+        "deck.d2.reset",
+        {"deck_id": "main-d2", "deck_revision": 1, "new_stream_generation": 2},
+    )
+    for _ in range(2):
+        state.handle("deck.d2.process_slot", identity(2))
+    state.handle(
+        "deck.d2.seed.set",
+        {"deck_id": "main-d2", "deck_revision": 1, "seed": 99},
+    )
+
+    stopped = state.handle("deck.d2.capture.stop", capture_identity)
+    receipt = stopped["receipt"]
+    assert isinstance(receipt, dict)
+    assert receipt["visual_shape"] == [1, 24, 2, 3, 4]
+    assert [event["slot_offset"] for event in receipt["control_events"]] == [0]  # type: ignore[index]
+
+
+def test_capture_finishes_only_after_its_rgb_slot_is_published(tmp_path: Path) -> None:
+    state, _decoder, rings = configured_state()
+    state.handle("deck.d2.load", load_payload())
+    state.handle("ring.bind", bind_payload())
+    capture_id = "17171717-1717-4717-8717-171717171717"
+    capture_identity = {
+        "deck_id": "main-d2",
+        "deck_revision": 1,
+        "capture_id": capture_id,
+    }
+    start = capture_start_payload(tmp_path, capture_id=capture_id, mode="live_capture")
+    start["max_latent_slots"] = 2
+    state.handle("deck.d2.capture.start", start)
+    state.handle(
+        "deck.d2.reset",
+        {"deck_id": "main-d2", "deck_revision": 1, "new_stream_generation": 2},
+    )
+    states_during_publish: list[str] = []
+    rings["active"].publish_probe = lambda: states_during_publish.append(
+        str(state.handle("deck.d2.capture.status", capture_identity)["state"])
+    )
+
+    state.handle("deck.d2.process_slot", identity(2))
+    state.handle("deck.d2.process_slot", identity(2))
+
+    assert states_during_publish == ["capturing", "capturing"]
+    assert state.handle("deck.d2.capture.status", capture_identity)["state"] == "finished"
 
 
 def test_non_looping_eos_reports_authoritative_transport_until_clean_pause() -> None:

@@ -15,6 +15,7 @@ import type {
   Q4TransportAck,
 } from "./q4-model";
 import type { SpoutConfigure, SpoutStatus } from "./output-model";
+import type { DecodedRecordingStatus } from "./recording-model";
 import type {
   DeckEmbeddedOutputHost,
   EmbeddedViewportSession,
@@ -44,6 +45,9 @@ export interface Q4Client extends DeckEmbeddedOutputHost {
   captureLiveStart(): Promise<Q4CaptureView | null>;
   captureLiveStop(): Promise<Q4CaptureView>;
   captureStatusGet(): Promise<Q4CaptureView>;
+  recordingStart(): Promise<DecodedRecordingStatus>;
+  recordingStop(): Promise<DecodedRecordingStatus>;
+  recordingStatusGet(): Promise<DecodedRecordingStatus>;
   statusGet(): Promise<Q4Status>;
   spoutStatusGet(): Promise<SpoutStatus | null>;
   spoutConfigure(configure: SpoutConfigure): Promise<SpoutStatus>;
@@ -73,6 +77,9 @@ export const Q4_COMMANDS = Object.freeze({
   captureLiveStart: "deck_q4_capture_live_start",
   captureLiveStop: "deck_q4_capture_live_stop",
   captureStatusGet: "deck_q4_capture_status_get",
+  recordingStart: "deck_q4_recording_start",
+  recordingStop: "deck_q4_recording_stop",
+  recordingStatusGet: "deck_q4_recording_status_get",
   statusGet: "deck_q4_status_get",
   spoutStatusGet: "deck_q4_spout_status_get",
   spoutConfigure: "deck_q4_spout_configure",
@@ -128,6 +135,12 @@ export function createQ4Client(host: Q4HostAdapter = tauriHost): Q4Client {
       host.invoke<Q4CaptureView>(Q4_COMMANDS.captureLiveStop, {}),
     captureStatusGet: () =>
       host.invoke<Q4CaptureView>(Q4_COMMANDS.captureStatusGet, {}),
+    recordingStart: () =>
+      host.invoke<DecodedRecordingStatus>(Q4_COMMANDS.recordingStart, {}),
+    recordingStop: () =>
+      host.invoke<DecodedRecordingStatus>(Q4_COMMANDS.recordingStop, {}),
+    recordingStatusGet: () =>
+      host.invoke<DecodedRecordingStatus>(Q4_COMMANDS.recordingStatusGet, {}),
     statusGet: () => host.invoke<Q4Status>(Q4_COMMANDS.statusGet, {}),
     spoutStatusGet: () =>
       host.invoke<SpoutStatus | null>(Q4_COMMANDS.spoutStatusGet, {}),

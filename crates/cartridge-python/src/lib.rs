@@ -8,8 +8,9 @@ use std::{
 };
 
 use latentdeck_cartridge::{
+    authoring::{RawH3AuthoringOptions, inspect_raw_h3, pack_raw_h3_atomic},
     error::{CartridgeError as CoreError, ErrorCode, Result as CoreResult},
-    hash::{MeasuredHash, hash_path, hash_reader},
+    hash::{hash_path, hash_reader},
     limits::ValidationLimits,
     manifest::{
         AudioDisposition, CartridgeId, CodecDescriptor, DType, DecodedVideoDescriptor, Identifier,
@@ -257,41 +258,28 @@ fn hash_value(path: &str) -> CoreResult<Value> {
 }
 
 fn inspect_raw_h3_value(path: &str) -> CoreResult<Value> {
-    let limits = ValidationLimits::default();
-    let payload_path = PathBuf::from(path);
-    let (preflight, measured) = inspect_raw_h3_payload(&payload_path, &limits, true)?;
-    let payload_sha256 = measured.sha256.to_string();
-    let manifest = build_h3_manifest(
-        &preflight,
-        measured.byte_length,
-        &payload_sha256,
-        None,
-        AuthoringProvenance::default(),
-        None,
-        &limits,
-    )?;
-    let profile = h3::validate(&manifest, &limits)?;
+    let inspection = inspect_raw_h3(path)?;
 
     Ok(json!({
         "status": "ok",
         "command": "inspect_raw_h3",
-        "byte_length": measured.byte_length,
-        "sha256": measured.sha256,
+        "byte_length": inspection.payload_bytes,
+        "sha256": inspection.payload_sha256,
         "profile": {
             "codec_family": h3::CODEC_FAMILY,
             "profile": h3::PROFILE,
             "profile_version": h3::PROFILE_VERSION,
             "visual": {
-                "latent_slots": profile.visual.latent_slots,
-                "latent_height": profile.visual.latent_height,
-                "latent_width": profile.visual.latent_width,
-                "decoded_frames": profile.visual.decoded_frame_count,
-                "decoded_height": profile.visual.decoded_height,
-                "decoded_width": profile.visual.decoded_width,
+                "latent_slots": inspection.profile.visual.latent_slots,
+                "latent_height": inspection.profile.visual.latent_height,
+                "latent_width": inspection.profile.visual.latent_width,
+                "decoded_frames": inspection.profile.visual.decoded_frame_count,
+                "decoded_height": inspection.profile.visual.decoded_height,
+                "decoded_width": inspection.profile.visual.decoded_width,
             },
-            "audio_latent_slots": profile.audio.as_ref().map(|audio| audio.latent_slots),
+            "audio_latent_slots": inspection.profile.audio.as_ref().map(|audio| audio.latent_slots),
         },
-        "safetensors": preflight_value(&preflight),
+        "safetensors": preflight_value(&inspection.safetensors),
     }))
 }
 
@@ -616,58 +604,35 @@ fn pack_raw_h3_value(
     overwrite: bool,
 ) -> CoreResult<Value> {
     let limits = ValidationLimits::default();
-    let payload_path_buf = PathBuf::from(payload_path);
-    let (preflight, measured_payload) = inspect_raw_h3_payload(&payload_path_buf, &limits, false)?;
-    let payload_sha256 = measured_payload.sha256.to_string();
-    let manifest = build_h3_manifest(
-        &preflight,
-        measured_payload.byte_length,
-        &payload_sha256,
-        cartridge_id,
-        parse_authoring_provenance(provenance_json, &limits)?,
-        preview_path,
-        &limits,
-    )?;
-    let mut request = PackRequest::new(manifest, payload_path_buf);
-    if let Some(preview_path) = preview_path {
-        request = request.with_preview(PathBuf::from(preview_path));
+    let authoring = parse_authoring_provenance(provenance_json, &limits)?;
+    let created_by = authoring.created_by.unwrap_or_else(|| AuthoringProducer {
+        name: "latentdeck-pack".to_owned(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+    });
+    let mut options = RawH3AuthoringOptions::new(created_by.name, created_by.version)
+        .with_source_kind(
+            authoring
+                .source_kind
+                .unwrap_or_else(|| "raw_h3_safetensors".to_owned()),
+        )
+        .with_overwrite(overwrite);
+    if let Some(cartridge_id) = cartridge_id {
+        options = options.with_cartridge_id(cartridge_id);
     }
-    let options = write_options(overwrite);
-    let receipt = pack_atomic(&request, PathBuf::from(output_path), &options)?;
+    if let Some(created_at) = authoring.created_at {
+        options = options.with_created_at(created_at);
+    }
+    if let Some(source_metadata) = authoring.source_metadata {
+        options = options.with_source_metadata(source_metadata);
+    }
+    if let Some(preview_path) = preview_path {
+        options = options.with_preview(preview_path);
+    }
+    let receipt = pack_raw_h3_atomic(payload_path, output_path, &options)?;
     Ok(pack_receipt_value(
         &receipt.output_path,
         &receipt.validation,
     ))
-}
-
-fn inspect_raw_h3_payload(
-    payload_path: &Path,
-    limits: &ValidationLimits,
-    verify_finite: bool,
-) -> CoreResult<(H3SafetensorsPreflight, MeasuredHash)> {
-    let mut payload_file = File::open(payload_path).map_err(|error| {
-        CoreError::new(ErrorCode::IoOpen, "cannot open raw H3 Safetensors payload")
-            .at_entry(h3::PAYLOAD_PATH)
-            .with_source(error)
-    })?;
-    let payload_bytes = payload_file
-        .metadata()
-        .map_err(|error| {
-            CoreError::new(
-                ErrorCode::IoRead,
-                "cannot inspect raw H3 Safetensors payload",
-            )
-            .at_entry(h3::PAYLOAD_PATH)
-            .with_source(error)
-        })?
-        .len();
-    let range = EntryRange::new(0, payload_bytes);
-    let preflight = preflight_h3_safetensors(&mut payload_file, range, limits)?;
-    if verify_finite {
-        scan_h3_safetensors_finite(&mut payload_file, range, &preflight)?;
-    }
-    let measured = hash_path(payload_path)?;
-    Ok((preflight, measured))
 }
 
 fn build_h3_manifest(
@@ -982,16 +947,6 @@ fn preview_descriptor(path: &str, limits: &ValidationLimits) -> CoreResult<Previ
         width: info.width,
         height: info.height,
     })
-}
-
-fn write_options(overwrite: bool) -> WriteOptions {
-    WriteOptions {
-        overwrite: if overwrite {
-            OverwritePolicy::Replace
-        } else {
-            OverwritePolicy::Forbid
-        },
-    }
 }
 
 fn pack_receipt_value(

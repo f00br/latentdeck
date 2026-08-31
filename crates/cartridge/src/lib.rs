@@ -1,6 +1,7 @@
 //! Stable, codec-neutral `Latent Cartridge` contracts.
 
 pub mod archive;
+pub mod authoring;
 pub mod error;
 pub mod hash;
 pub mod limits;

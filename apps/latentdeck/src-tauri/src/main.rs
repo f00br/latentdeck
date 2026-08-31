@@ -14,6 +14,7 @@ use tauri_plugin_dialog::DialogExt as _;
 mod d2_capture_host;
 mod d2_runtime;
 mod d2_state;
+mod decoded_recording;
 mod diagnostic_state;
 mod embedded_viewport;
 mod library_state;
@@ -22,12 +23,14 @@ mod q4_capture_host;
 mod q4_runtime;
 mod q4_state;
 mod runtime_diagnostics;
+mod runtime_replacement;
 
 use d2_state::{
     D2AppState, ExitRequest, deck_d2_backend_rediscover, deck_d2_backend_status_get,
     deck_d2_capture_live_start, deck_d2_capture_live_stop, deck_d2_capture_snapshot,
     deck_d2_capture_status_get, deck_d2_controls_set, deck_d2_fullscreen_set,
-    deck_d2_fullscreen_status_get, deck_d2_open, deck_d2_restart, deck_d2_seed_set,
+    deck_d2_fullscreen_status_get, deck_d2_open, deck_d2_recording_start,
+    deck_d2_recording_status_get, deck_d2_recording_stop, deck_d2_restart, deck_d2_seed_set,
     deck_d2_select_decoder, deck_d2_spout_configure, deck_d2_spout_status_get, deck_d2_status_get,
     deck_d2_transport_set, deck_d2_viewport_session_begin, deck_d2_viewport_set_bounds,
 };
@@ -48,8 +51,9 @@ use q4_state::{
     Q4AppState, deck_q4_backend_rediscover, deck_q4_backend_status_get, deck_q4_capture_live_start,
     deck_q4_capture_live_stop, deck_q4_capture_snapshot, deck_q4_capture_status_get,
     deck_q4_controls_set, deck_q4_fullscreen_set, deck_q4_fullscreen_status_get, deck_q4_open,
-    deck_q4_restart, deck_q4_roles_set, deck_q4_seed_set, deck_q4_select_decoder,
-    deck_q4_spout_configure, deck_q4_spout_status_get, deck_q4_status_get, deck_q4_transport_set,
+    deck_q4_recording_start, deck_q4_recording_status_get, deck_q4_recording_stop, deck_q4_restart,
+    deck_q4_roles_set, deck_q4_seed_set, deck_q4_select_decoder, deck_q4_spout_configure,
+    deck_q4_spout_status_get, deck_q4_status_get, deck_q4_transport_set,
     deck_q4_viewport_session_begin, deck_q4_viewport_set_bounds,
 };
 
@@ -231,6 +235,9 @@ fn main() {
             deck_d2_capture_live_start,
             deck_d2_capture_live_stop,
             deck_d2_capture_status_get,
+            deck_d2_recording_start,
+            deck_d2_recording_stop,
+            deck_d2_recording_status_get,
             deck_d2_status_get,
             deck_d2_fullscreen_status_get,
             deck_d2_fullscreen_set,
@@ -251,6 +258,9 @@ fn main() {
             deck_q4_capture_live_start,
             deck_q4_capture_live_stop,
             deck_q4_capture_status_get,
+            deck_q4_recording_start,
+            deck_q4_recording_stop,
+            deck_q4_recording_status_get,
             deck_q4_status_get,
             deck_q4_fullscreen_status_get,
             deck_q4_fullscreen_set,

@@ -50,6 +50,11 @@ explicitly to replace an existing `.lc` atomically.
 
 ## Raw H3 command
 
+The Python commands are retained for developers, recorder integrations, and
+automation. LatentPlayer's **PREPARE** workspace is the supported interactive
+0.1 workflow for selecting files or folders, reviewing preflight metadata, and
+converting a bounded queue without a codec or GPU.
+
 ```text
 latentdeck-pack input.safetensors --profile h3 -o clip.lc
 ```

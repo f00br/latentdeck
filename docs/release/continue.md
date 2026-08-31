@@ -22,37 +22,68 @@ This is the only current handoff for the repository.
 - Standalone conversion of an existing 16:9 H3 AV Safetensors source into a
   validated `.lc` passed while preserving payload bytes and geometry.
 
+The current `main` source candidate after that binary baseline addresses four
+new owner-reported 0.1 release findings:
+
+- D2 Live Capture now continues across expected automatic source-loop reset
+  barriers instead of finishing at the first loop; arbitrary resets still
+  abort rather than silently joining unrelated latent state.
+- D2 and Q4 can record the intrinsic decoded sequence consumed by their
+  presentation path as video-only H.264 MP4 at 24 fps. This output is separate
+  from latent resampling, uses a bounded background encoder, never overwrites a
+  destination, and exposes no partial final file.
+- Library imports and completed captures invalidate active Deck source views
+  automatically. Refresh preserves currently playing and next-load draft
+  identities; stale asynchronous responses are ignored.
+- A completed capture has explicit per-slot `Use capture in …` actions. The
+  candidate is fully resolved and checked before a bounded worker replacement,
+  while the other source draft, controls, roles, seed, transport intent, and
+  decoded-video recorder are retained.
+- LatentPlayer now has a `Prepare` workspace for explicit raw-H3 file/folder
+  preflight, metadata inspection, no-clobber sequential `.lc` conversion,
+  progress and per-item errors, cooperative stop-after-current, and direct
+  `Open in Player`. Conversion is bound to the payload SHA-256 approved by
+  preflight, so a changed source fails without producing an `.lc`. The console
+  converter remains the developer interface.
+
+These changes have focused synthetic and native Windows encoder coverage, but
+they are not present in the `2f00a4b` RC and are not owner-accepted yet. Do not
+record the four findings as closed until the affected slices in
+[MASTER_USER_TEST.md](MASTER_USER_TEST.md) pass in a fresh application build.
+
 The documentation cleanup containing this handoff is newer than the binary
 baseline. Any source change after `2f00a4b`, including an accepted UAT fix,
 requires a fresh clean RC before publication review.
 
 ## Next action
 
-1. Read the newest owner UAT findings and reproduce only the reported surface.
-2. If no new functional regression is waiting, add the ComfyUI all-nodes gallery
-   described below. It is the one known UAT presentation item not present in
-   the `2f00a4b` baseline.
-3. Fix minor or cosmetic findings narrowly. Do not alter latent math, geometry,
-   worker contracts, source identity, or embedded output unless the report
-   demonstrates a regression at that boundary.
-4. Run targeted tests, review the exact staged diff, validate the staged public
-   candidate in a clean clone, and commit locally on `main` after each coherent
-   fix. Do not push.
-5. After the owner accepts the corrections, rebuild both unsigned applications
-   from the final clean commit and repeat only the affected UAT slices.
+1. Build a fresh local application candidate from the clean commit containing
+   the four fixes above; the `2f00a4b` artifacts remain an older comparison
+   baseline.
+2. Repeat only the affected owner-UAT slices: D2 multi-loop capture, decoded
+   MP4 in both Decks, Library auto-refresh, explicit captured-source insertion,
+   and LatentPlayer Prepare/conversion.
+3. If an affected slice regresses, fix it narrowly in the primary `main`
+   checkout, rerun targeted tests, audit the staged candidate in a clean local
+   clone, and commit locally. Do not push.
+4. If no new functional regression is waiting, add the ComfyUI all-nodes gallery
+   described below and record its separate visual acceptance.
+5. After the owner accepts all corrections, rebuild both unsigned applications
+   from the final clean commit.
 6. Proceed to clean-machine lifecycle, signing, and publication only after the
    owner explicitly authorizes those separate actions.
 
 ## Why this is next
 
-The functional create, play, synthesize, resample, replay, and Spout paths have
-already passed locally. The gallery is the only known presentation surface not
-yet available to the owner, while new owner findings take priority because they
-are direct evidence from the release-candidate workflow.
+The broad create, play, synthesize, resample, replay, and Spout paths have
+already passed locally. The source changes above touch only newly reported
+boundaries; repeating the previously accepted CUDA, Spout, fullscreen, or
+six-minute suites would not add relevant evidence. The affected owner workflow
+and the separate gallery item are the remaining direct acceptance surfaces.
 
 ## Open threads
 
-- minor or cosmetic findings from the active owner UAT;
+- owner acceptance of the four post-`2f00a4b` source fixes;
 - the ComfyUI all-nodes gallery and visual proof;
 - a fresh clean RC after the final accepted source commit;
 - clean-machine lifecycle, private security contact, signing, and explicit

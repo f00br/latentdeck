@@ -34,6 +34,9 @@ describe("typed LD-D2 host client", () => {
       captureLiveStart: "deck_d2_capture_live_start",
       captureLiveStop: "deck_d2_capture_live_stop",
       captureStatusGet: "deck_d2_capture_status_get",
+      recordingStart: "deck_d2_recording_start",
+      recordingStop: "deck_d2_recording_stop",
+      recordingStatusGet: "deck_d2_recording_status_get",
       statusGet: "deck_d2_status_get",
       spoutStatusGet: "deck_d2_spout_status_get",
       spoutConfigure: "deck_d2_spout_configure",
@@ -84,6 +87,9 @@ describe("typed LD-D2 host client", () => {
     await client.captureLiveStart();
     await client.captureLiveStop();
     await client.captureStatusGet();
+    await client.recordingStart();
+    await client.recordingStatusGet();
+    await client.recordingStop();
     await client.statusGet();
     await client.spoutStatusGet();
     await client.spoutConfigure({ name: "Deck A", enabled: true });
@@ -114,6 +120,9 @@ describe("typed LD-D2 host client", () => {
       { command: "deck_d2_capture_live_start", args: {} },
       { command: "deck_d2_capture_live_stop", args: {} },
       { command: "deck_d2_capture_status_get", args: {} },
+      { command: "deck_d2_recording_start", args: {} },
+      { command: "deck_d2_recording_status_get", args: {} },
+      { command: "deck_d2_recording_stop", args: {} },
       { command: "deck_d2_status_get", args: {} },
       { command: "deck_d2_spout_status_get", args: {} },
       {

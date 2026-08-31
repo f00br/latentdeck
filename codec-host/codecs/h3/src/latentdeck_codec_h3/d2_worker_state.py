@@ -501,12 +501,11 @@ class H3D2WorkerState:
         try:
             step = engine.step(self._capture_before_decode)
             if isinstance(step, D2ResetBarrier):
-                if (
-                    self._capture is not None
-                    and self._capture.is_active
-                    and not self._capture.finish_at_reset_boundary()
-                ):
-                    self._capture.abort("causal_boundary_changed")
+                if self._capture is not None and self._capture.is_active:
+                    if self._capture.mode == "live_capture":
+                        self._capture.prepare_loop_reset(step.reasons)
+                    else:
+                        self._capture.abort("causal_boundary_changed")
                 self._slot_state = "ready"
                 return self._barrier_payload(step)
             if isinstance(step, D2Paused):
@@ -524,8 +523,6 @@ class H3D2WorkerState:
                 }
             if not isinstance(step, D2DecodedSlot):
                 raise D2StreamError("deck.process_failed", "D2 step type is invalid")
-            if self._capture is not None:
-                self._capture.after_decode(step.latent)
             frames = tuple(step.decoded)
             source_a = self._require_source(self._source_a)
             expected_bytes = source_a.width * source_a.height * 4
@@ -543,6 +540,8 @@ class H3D2WorkerState:
                 frames,
                 stream_generation=step.latent.stream_generation,
             )
+            if self._capture is not None:
+                self._capture.after_decode(step.latent)
         except D2CaptureError as error:
             if self._capture is not None and self._capture.should_cleanup_on_error:
                 self._capture.abort("capture_error")
@@ -606,7 +605,8 @@ class H3D2WorkerState:
         ring = self._require_ring()
         new_generation = int(payload["new_stream_generation"])
         capture = self._capture
-        if capture is not None and capture.is_active:
+        crossing_live_loop = capture is not None and capture.is_awaiting_loop_reset
+        if capture is not None and capture.is_active and not crossing_live_loop:
             capture.abort("causal_reset")
         try:
             result = engine.apply_reset_barrier(
@@ -614,7 +614,7 @@ class H3D2WorkerState:
                 lambda: ring.set_generation(new_generation),
             )
         except D2StreamError as error:
-            if capture is not None and capture.is_awaiting_reset:
+            if capture is not None and (capture.is_awaiting_reset or crossing_live_loop):
                 capture.abort("start_reset_failed")
             if error.code == "deck.generation_stale":
                 code = "state.stale_generation"
@@ -636,6 +636,15 @@ class H3D2WorkerState:
                 raise WorkerCommandError(
                     error.code,
                     "D2 capture could not enter its codec boundary",
+                    fatal=True,
+                ) from error
+        elif capture is not None and crossing_live_loop:
+            try:
+                capture.resume_after_loop_reset(result)
+            except D2CaptureError as error:
+                raise WorkerCommandError(
+                    error.code,
+                    "D2 Live Capture could not resume after its loop reset",
                     fatal=True,
                 ) from error
         self._decoded_start_frame = 0

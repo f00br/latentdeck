@@ -8,6 +8,7 @@ use std::sync::{
 use latentdeck_core::diagnostics::{LogLevel, record_global};
 use latentdeck_library::{CartridgeKey, DeckSourceIdentity, ResolvedDeckSource};
 use latentdeck_native_output::{HostFullscreenController, NativeSpoutStatus};
+use latentdeck_output_mp4::RecorderStatus;
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter as _, Manager as _, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt as _;
@@ -21,12 +22,17 @@ use crate::{
         D2SeedAckView, D2StatusView, D2TransportAckView, D2TransportInput,
         validate_selected_decoder,
     },
+    decoded_recording::{
+        DecodedRecordingController, DecodedRecordingError, ensure_latent_capture_idle,
+        normalize_mp4_destination,
+    },
     diagnostic_state::DeckDiagnosticLifecycle,
     embedded_viewport::{
         EmbeddedViewportStore, ViewportBoundsRequest, ViewportSessionAck, validate_viewport_bounds,
         viewport_error,
     },
     library_state::{AppState as LibraryAppState, CommandError, DeckKind},
+    runtime_replacement::preflight_before_shutdown,
 };
 
 #[derive(Clone, Debug, Deserialize)]
@@ -42,6 +48,8 @@ pub(crate) struct D2AppState {
     lifecycle: AsyncMutex<()>,
     status: Arc<Mutex<D2StatusView>>,
     capture_status: Arc<Mutex<D2CaptureView>>,
+    recording: DecodedRecordingController,
+    capture_gate: AsyncMutex<()>,
     exit_gate: ExitGate,
     viewport: EmbeddedViewportStore,
 }
@@ -104,6 +112,8 @@ impl D2AppState {
             lifecycle: AsyncMutex::new(()),
             status: Arc::new(Mutex::new(D2StatusView::default())),
             capture_status: Arc::new(Mutex::new(D2CaptureView::default())),
+            recording: DecodedRecordingController::new(),
+            capture_gate: AsyncMutex::new(()),
             exit_gate: ExitGate::new(),
             viewport: EmbeddedViewportStore::new(),
         }
@@ -119,7 +129,26 @@ impl D2AppState {
 
     pub(crate) async fn shutdown_runtime(&self) -> Result<(), D2RuntimeError> {
         let _lifecycle = self.lifecycle.lock().await;
-        shutdown_runtime_slot(&self.runtime).await
+        // Serialize exit with the native save dialog and recorder arm. Either
+        // an in-flight start is stopped here, or a later start observes that
+        // the runtime has already been removed.
+        let _capture_gate = self.capture_gate.lock().await;
+        let runtime_result = shutdown_runtime_slot(&self.runtime).await;
+        let recording = self.recording.clone();
+        match tauri::async_runtime::spawn_blocking(move || recording.stop()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => record_global(
+                LogLevel::Error,
+                "deck.d2.recording_shutdown_failed",
+                Some(error.code()),
+            ),
+            Err(_) => record_global(
+                LogLevel::Error,
+                "deck.d2.recording_shutdown_failed",
+                Some("recording.worker_stopped"),
+            ),
+        }
+        runtime_result
     }
 
     pub(crate) async fn runtime_diagnostics(
@@ -268,10 +297,6 @@ pub(crate) async fn deck_d2_open(
     let identity_a = source_identity(source_a)?;
     let identity_b = source_identity(source_b)?;
     let _lifecycle = state.lifecycle.lock().await;
-    if let Err(error) = shutdown_runtime_slot(&state.runtime).await {
-        D2AppState::emit_error(&app, &error);
-        return Err(command_error(error));
-    }
     let backend = match lock_backend(&state.backend).and_then(|backend| backend.launch_backend()) {
         Ok(value) => value,
         Err(error) => {
@@ -325,12 +350,25 @@ pub(crate) async fn deck_d2_open(
             return Err(command_error(error));
         }
     };
+    // Resolving identities and building the launch config are the complete
+    // candidate preflight. Keep the current good runtime alive until all of
+    // that succeeds, then transfer runtime ownership at one explicit boundary.
+    let config = preflight_before_shutdown(async { Ok::<_, CommandError>(config) }, async {
+        shutdown_runtime_slot(&state.runtime)
+            .await
+            .map_err(|error| {
+                D2AppState::emit_error(&app, &error);
+                command_error(error)
+            })
+    })
+    .await?;
     let deck_session = library.begin_deck_session(DeckKind::D2)?;
     let started = D2Runtime::start(
         app.clone(),
         parent,
         Arc::clone(&state.status),
         Arc::clone(&state.capture_status),
+        state.recording.clone(),
         config,
         deck_session.clone(),
         viewport,
@@ -484,6 +522,8 @@ pub(crate) async fn deck_d2_capture_snapshot(
     app: AppHandle,
     state: State<'_, D2AppState>,
 ) -> Result<Option<D2CaptureView>, CommandError> {
+    let _capture_gate = state.capture_gate.lock().await;
+    ensure_recording_idle_for_capture(&state.recording)?;
     let Some(output) = capture_output_path(&app, "LatentDeck Snapshot.lc")? else {
         return Ok(None);
     };
@@ -505,6 +545,8 @@ pub(crate) async fn deck_d2_capture_live_start(
     app: AppHandle,
     state: State<'_, D2AppState>,
 ) -> Result<Option<D2CaptureView>, CommandError> {
+    let _capture_gate = state.capture_gate.lock().await;
+    ensure_recording_idle_for_capture(&state.recording)?;
     let Some(output) = capture_output_path(&app, "LatentDeck Live Capture.lc")? else {
         return Ok(None);
     };
@@ -544,6 +586,69 @@ pub(crate) async fn deck_d2_capture_status_get(
         }
         Err(error) => Err(command_error(error)),
     }
+}
+
+/// Select a no-clobber destination and arm video-only H.264 MP4 recording.
+/// Geometry is fixed by the next successfully presented decoded frame.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) async fn deck_d2_recording_start(
+    app: AppHandle,
+    state: State<'_, D2AppState>,
+) -> Result<RecorderStatus, CommandError> {
+    let _capture_gate = state.capture_gate.lock().await;
+    if clone_slot(&state.runtime).await.is_none() {
+        return Err(runtime_inactive());
+    }
+    let capture = state.shared_capture_status().map_err(command_error)?;
+    ensure_latent_capture_idle(&capture.state).map_err(recording_command_error)?;
+    if state.recording.is_active() {
+        return Err(recording_command_error(DecodedRecordingError::Active));
+    }
+    let selected = app
+        .dialog()
+        .file()
+        .add_filter("H.264 MP4 Video", &["mp4"])
+        .set_file_name("LatentDeck D2 Output.mp4")
+        .blocking_save_file();
+    let Some(selected) = selected else {
+        return Ok(state.recording.status());
+    };
+    let destination = selected.into_path().map_err(|_| {
+        recording_command_error(DecodedRecordingError::Recorder(
+            latentdeck_output_mp4::RecorderError::InvalidDestination,
+        ))
+    })?;
+    let destination = normalize_mp4_destination(destination).map_err(recording_command_error)?;
+    if clone_slot(&state.runtime).await.is_none() {
+        return Err(runtime_inactive());
+    }
+    state
+        .recording
+        .arm(destination)
+        .map_err(recording_command_error)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) async fn deck_d2_recording_stop(
+    state: State<'_, D2AppState>,
+) -> Result<RecorderStatus, CommandError> {
+    let recording = state.recording.clone();
+    tauri::async_runtime::spawn_blocking(move || recording.stop())
+        .await
+        .map_err(|_| {
+            recording_command_error(DecodedRecordingError::Recorder(
+                latentdeck_output_mp4::RecorderError::WorkerStopped,
+            ))
+        })?
+        .map_err(recording_command_error)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn deck_d2_recording_status_get(state: State<'_, D2AppState>) -> RecorderStatus {
+    state.recording.status()
 }
 
 #[tauri::command]
@@ -724,6 +829,28 @@ fn runtime_inactive() -> CommandError {
         "deck.runtime_unavailable",
         "Open two validated cartridges before controlling LD-D2.",
     )
+}
+
+fn ensure_recording_idle_for_capture(
+    recording: &DecodedRecordingController,
+) -> Result<(), CommandError> {
+    if recording.is_active() {
+        Err(CommandError::new(
+            "capture.recording_conflict",
+            "Stop decoded MP4 recording before starting latent Snapshot or Live Capture.",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn recording_command_error(error: DecodedRecordingError) -> CommandError {
+    record_global(
+        LogLevel::Error,
+        "deck.d2.recording_failed",
+        Some(error.code()),
+    );
+    CommandError::new(error.code(), error.message())
 }
 
 fn command_error(error: D2RuntimeError) -> CommandError {

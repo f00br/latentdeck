@@ -11,13 +11,15 @@ state into a new cartridge.
 ## Repository status
 
 The `0.1.0` implementation is in owner-UAT closeout on `main`. The current
-walkthrough is broadly positive; new work is limited to reported minor or
-cosmetic findings, the ComfyUI all-nodes presentation canvas, and final release
-gates. The repository contains:
+walkthrough is broadly positive. A post-baseline source candidate addresses
+four owner-reported capture, Library/hot-reload, and Player-preparation
+findings; affected owner retest, the ComfyUI all-nodes presentation canvas, and
+final release gates remain. The repository contains:
 
 - public-repository boundaries and agent instructions;
 - pinned Cargo, pnpm, uv, Tauri, Svelte, and Python workspaces;
-- complete LatentDeck and LatentPlayer applications;
+- complete LatentDeck application and a LatentPlayer that can both play `.lc`
+  cartridges and prepare raw H3 latent files for them;
 - normative LC 0.1 and H3 0.1 specifications;
 - a deterministic Rust cartridge SDK and command-line tool;
 - the native Python SDK binding, raw H3 `latentdeck-pack` authoring command,
@@ -28,7 +30,11 @@ gates. The repository contains:
 - isolated H3 Player, LD-D2, and LD-Q4 workers with native DX12 presentation;
 - a shared SQLite Library with many-to-many Collections and virtual `All` and
   `Unassigned` banks;
-- deterministic Snapshot and bounded Live Capture resampling back into `.lc`;
+- deterministic Snapshot and bounded Live Capture resampling back into `.lc`,
+  including D2 capture across automatic source-loop boundaries;
+- video-only H.264 MP4 recording of D2/Q4 decoded output at intrinsic geometry;
+- automatic Library-to-Deck invalidation and explicit hot insertion of newly
+  captured cartridges through a bounded worker replacement;
 - Spout2 output, structured diagnostics, database backup/migration, Windows
   application packaging, independent Codec Pack lifecycle tooling, and SBOM
   generation;
@@ -59,7 +65,8 @@ cartridges.
 ## Ecosystem components
 
 - **LatentDeck App** — standalone real-time latent synthesis instrument.
-- **LatentPlayer App** — lightweight `.lc` playback application.
+- **LatentPlayer App** — `.lc` playback plus guided raw-H3 preflight and batch
+  cartridge preparation; the console converter remains the developer surface.
 - **Latent Cartridge Standard** — codec-neutral, data-only media container.
 - **Cartridge SDK and APIs** — read, write, validate, inspect, hash, resample,
   codec adaptation, and operator integration.
@@ -83,6 +90,8 @@ MiniMax H3 is the first intended codec profile. It is not the definition of
 - [Codec Pack installation contract 0.1](spec/codec-pack/README.md)
 - [Worker Protocol 1](spec/worker-protocol/README.md)
 - [Deck Signal Contract 0.1](spec/deck-api/README.md)
+- [Decoded MP4 output boundary](crates/output-mp4/README.md)
+- [LatentPlayer PLAY/PREPARE workflow](apps/latentplayer/README.md)
 - [Python Cartridge SDK, raw H3 packer, and converter](sdk/python/README.md)
 - [ComfyUI-LatentCartridge recorder](comfy/latent-cartridge/README.md)
 - [LatentDeck Comfy Toolkit](comfy/toolkit/README.md)

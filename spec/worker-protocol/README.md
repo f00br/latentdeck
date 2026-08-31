@@ -334,11 +334,13 @@ worker finishes automatically after that slot decodes successfully; it never
 turns an ordinary bounded-spool limit into a fatal Deck failure. A limit set
 that cannot contain at least `T=2` is rejected before capture starts.
 
-A cartridge cannot cross a causal decoder generation. When normal looping
-reaches a reset barrier, an active Live Capture finishes from its already
-decoded spool if the current length is codec-valid; otherwise it aborts with an
-explicit boundary reason. The subsequent causal reset remains the ordinary
-two-step Deck transition.
+An input cartridge cannot cross a causal decoder generation, but an active Live
+Capture may retain its post-operator spool across a normal automatic loop
+barrier whose reasons are exclusively `slot_*.loop`. The ordinary two-step Deck
+reset must return a strictly newer generation and a valid structural-carrier
+playhead before capture resumes. Restart, recovery, manual or non-loop reset,
+and an invalid reset mapping still abort Live Capture explicitly; Snapshot does
+not gain this loop-crossing exception.
 
 Capture status is one of `awaiting_reset`, `capturing`, `stop_armed`,
 `finished`, or `aborted`, with state-specific generation, target, stop-boundary,

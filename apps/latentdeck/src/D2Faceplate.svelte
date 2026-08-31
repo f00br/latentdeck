@@ -43,10 +43,21 @@
     type SignalCompatibilityReport,
   } from "./library-model";
   import {
+    createLibraryRefreshController,
+    notifyLibraryInvalidated,
+  } from "./library-refresh";
+  import {
     describeSpout,
     spoutControlsFor,
     type SpoutStatus,
   } from "./output-model";
+  import {
+    IDLE_DECODED_RECORDING,
+    decodedRecordingControls,
+    describeDecodedRecording,
+    type DecodedRecordingControls,
+    type DecodedRecordingStatus,
+  } from "./recording-model";
   import {
     buildD2Preset,
     d2ControlsFromPreset,
@@ -77,6 +88,11 @@
     shouldShowNextLoadDraftReadout,
     type DeckSourceTruthState,
   } from "./deck-source-truth";
+  import {
+    createExclusiveOperationGate,
+    replaceDraftSource,
+    retainDraftSourceOptions,
+  } from "./source-replacement";
   import {
     canSetDeckFullscreen,
     shouldExitFullscreenForHiddenDeck,
@@ -138,6 +154,11 @@
   let resetMessage = "";
   let capture: D2CaptureView = { ...DEFAULT_D2_CAPTURE };
   let captureBusy = false;
+  let sourceReplaceBusy = false;
+  let recording: DecodedRecordingStatus = { ...IDLE_DECODED_RECORDING };
+  let recordingBusy = false;
+  let recordingPending = false;
+  let recordingMessage = "";
   let lastImportedCaptureId = "";
   let spout: SpoutStatus | null = null;
   let spoutBusy = false;
@@ -184,11 +205,20 @@
   let sourceOptions: CartridgeView[] = [];
   let presentCount = 0;
   let captureActive = false;
+  let recordingControls: DecodedRecordingControls = {
+    start: false,
+    stop: false,
+  };
+  let recordingActive = false;
+  let recordingStatusText = describeDecodedRecording(recording);
   let spoutControls = spoutControlsFor(null, false);
   let spoutState = describeSpout(null);
   let selectedCompatibilityReasons: readonly string[] = [];
   let selectedSourcesCompatible = false;
   let sourceDraftDiffers = false;
+  const sourceReplaceGate = createExclusiveOperationGate((active) => {
+    sourceReplaceBusy = active;
+  });
   let captureUi = deckCaptureUiPolicy(capture.mode, capture.state);
   let captureActions = deckCaptureActions(capture.mode, capture.state, {
     loaded: status.loaded,
@@ -272,9 +302,19 @@
   ).length;
   $: captureUi = deckCaptureUiPolicy(capture.mode, capture.state);
   $: captureActive = captureUi.active;
+  $: recordingActive =
+    recording.state === "armed" ||
+    recording.state === "recording" ||
+    recording.state === "finalizing";
+  $: recordingControls = decodedRecordingControls(
+    recording,
+    status.loaded,
+    recordingBusy || captureBusy || captureActive,
+  );
+  $: recordingStatusText = describeDecodedRecording(recording);
   $: captureActions = deckCaptureActions(capture.mode, capture.state, {
     loaded: status.loaded,
-    hostBusy,
+    hostBusy: hostBusy || sourceReplaceBusy,
     captureBusy,
     controlsDirty,
     controlsDispatchRunning,
@@ -306,6 +346,7 @@
     }
   }
   $: if (viewportMounted) void syncViewportAfterSurfaceChange(active);
+  $: bankRefresh.setActive(active);
 
   onMount(() => {
     let disposed = false;
@@ -365,11 +406,11 @@
       }
 
       if (!disposed) {
-        await refreshBank();
         await refreshBackendStatus();
         await refreshHostStatus();
         await refreshFullscreenStatus();
         await refreshCaptureStatus();
+        await refreshRecordingStatus();
         await refreshSpoutStatus();
       }
     })();
@@ -377,6 +418,9 @@
     const spoutTimer = globalThis.setInterval(() => {
       if (!disposed) void refreshSpoutStatus();
     }, 250);
+    const recordingTimer = globalThis.setInterval(() => {
+      if (!disposed) void refreshRecordingStatus(false);
+    }, 500);
 
     return () => {
       disposed = true;
@@ -412,6 +456,8 @@
       }
       viewportEpoch = null;
       globalThis.clearInterval(spoutTimer);
+      globalThis.clearInterval(recordingTimer);
+      bankRefresh.dispose();
       controlsDispatcher.dispose();
       for (const stop of stopListeners) stop();
     };
@@ -545,21 +591,27 @@
 
   async function refreshBank(): Promise<void> {
     if (presetBusy) return;
-    bankBusy = true;
-    bankError = "";
-    try {
-      bankView = await invoke<LibraryView>("library_snapshot", {
-        search: null,
-      });
+    await bankRefresh.refresh();
+  }
+
+  const bankRefresh = createLibraryRefreshController<LibraryView>({
+    load: async () => {
+      bankBusy = true;
+      bankError = "";
+      return invoke<LibraryView>("library_snapshot", { search: null });
+    },
+    apply: async (nextView) => {
+      bankView = nextView;
       presetResolvedSources = presetResolvedSources.filter(
         (source) =>
           source !== null &&
           (source.archiveSha256 === sourceAHash ||
             source.archiveSha256 === sourceBHash),
       );
-      const availableSources = mergePresetSourceOptions(
+      const availableSources = retainDraftSourceOptions(
         bankView.cartridges,
-        presetResolvedSources,
+        [...presetResolvedSources, ...loadedSourceViews],
+        currentSourceDraft(),
       );
       const choices =
         sourceTruth.loadedArchiveSha256s !== null &&
@@ -576,12 +628,13 @@
       sourceBHash = choices.sourceBHash;
       await tick();
       await refreshSpatialCompatibility();
-    } catch (error) {
-      bankError = describeCommandError(error);
-    } finally {
       bankBusy = false;
-    }
-  }
+    },
+    onError: (error) => {
+      bankError = describeCommandError(error);
+      bankBusy = false;
+    },
+  });
 
   async function changeBank(event: Event): Promise<void> {
     const collectionId = (event.currentTarget as HTMLSelectElement).value;
@@ -794,6 +847,21 @@
     }
   }
 
+  async function refreshRecordingStatus(reportError = true): Promise<void> {
+    if (recordingPending) return;
+    recordingPending = true;
+    try {
+      recording = await d2Client.recordingStatusGet();
+      if (recording.state === "failed" && recording.errorCode !== null) {
+        recordingMessage = recording.errorCode;
+      }
+    } catch (error) {
+      if (reportError) recordingMessage = describeCommandError(error);
+    } finally {
+      recordingPending = false;
+    }
+  }
+
   async function refreshSpoutStatus(reportError = false): Promise<void> {
     if (spoutPending) return;
     spoutPending = true;
@@ -962,6 +1030,67 @@
     await refreshFullscreenStatus();
   }
 
+  async function useCapturedSource(slot: D2Slot): Promise<void> {
+    await sourceReplaceGate.run(async () => {
+      if (
+        capture.state !== "finished" ||
+        capture.cartridgeId === null ||
+        capture.archiveSha256 === null
+      ) {
+        markHostFailure(
+          new Error("The finished capture is not available yet."),
+        );
+        return;
+      }
+      const identity: PresetCartridgeIdentity = {
+        cartridge_id: capture.cartridgeId,
+        archive_sha256: capture.archiveSha256,
+      };
+      try {
+        const [captured] = await invoke<(CartridgeView | null)[]>(
+          "library_resolve_preset_sources",
+          { identities: [identity] },
+        );
+        if (captured === null || captured === undefined) {
+          throw new Error(
+            "The captured cartridge is not present in the Library.",
+          );
+        }
+        presetResolvedSources = [
+          ...presetResolvedSources.filter(
+            (source) => source?.archiveSha256 !== captured.archiveSha256,
+          ),
+          captured,
+        ];
+        discardPresetLoopDraft();
+        [sourceAHash, sourceBHash] = replaceDraftSource(
+          currentSourceDraft(),
+          slot === "A" ? 0 : 1,
+          captured.archiveSha256,
+        );
+        markSourceDraftEdited();
+        await tick();
+        await refreshSpatialCompatibility();
+        await tick();
+        if (!selectedSourcesCompatible) {
+          hostState = "error";
+          hostMessage = `Captured source ${slot} is incompatible with the other draft source.`;
+          return;
+        }
+        const expectedHash = captured.archiveSha256;
+        await openDeck();
+        const loadedSource =
+          slot === "A" ? status.sources?.sourceA : status.sources?.sourceB;
+        if (status.loaded && loadedSource?.archiveSha256 === expectedHash) {
+          hostState = "ready";
+          hostMessage = `Capture inserted in ${slot}. The bounded worker restart preserved the other draft source, controls, seed and transport intent; causal state restarts at the replacement boundary.`;
+        }
+      } catch (error) {
+        markHostFailure(error);
+      }
+    });
+  }
+
   async function applyControls(): Promise<void> {
     if (
       !status.loaded ||
@@ -1049,6 +1178,28 @@
       });
     } finally {
       captureBusy = false;
+    }
+  }
+
+  async function toggleDecodedRecording(): Promise<void> {
+    const action = recordingControls.stop
+      ? "stop"
+      : recordingControls.start
+        ? "start"
+        : null;
+    if (action === null || recordingBusy) return;
+    recordingBusy = true;
+    recordingMessage = "";
+    try {
+      recording =
+        action === "stop"
+          ? await d2Client.recordingStop()
+          : await d2Client.recordingStart();
+    } catch (error) {
+      recordingMessage = describeCommandError(error);
+      await refreshRecordingStatus(false);
+    } finally {
+      recordingBusy = false;
     }
   }
 
@@ -1204,7 +1355,7 @@
       incoming.captureId !== lastImportedCaptureId
     ) {
       lastImportedCaptureId = incoming.captureId;
-      void refreshBank();
+      notifyLibraryInvalidated();
     }
   }
 
@@ -2227,6 +2378,7 @@
         type="button"
         onclick={() => void openDeck()}
         disabled={hostBusy ||
+          sourceReplaceBusy ||
           captureBusy ||
           !captureUi.load ||
           !viewportReady ||
@@ -2255,7 +2407,9 @@
       <button
         type="button"
         onclick={() => void snapshotCapture()}
-        disabled={!captureActions.snapshotEnabled}
+        disabled={!captureActions.snapshotEnabled ||
+          recordingActive ||
+          sourceReplaceBusy}
         title="Capture one complete structural-carrier cycle"
         >{capture.mode === "snapshot" && captureActive
           ? "Snapshot running…"
@@ -2264,7 +2418,9 @@
       <button
         type="button"
         onclick={() => void toggleLiveCapture()}
-        disabled={captureActions.liveAction === null}
+        disabled={captureActions.liveAction === null ||
+          recordingActive ||
+          sourceReplaceBusy}
         title="Record a bounded changing post-operator latent stream"
         >{captureActions.liveAction === "stop"
           ? "Stop Live Capture"
@@ -2276,6 +2432,54 @@
         class:error={capture.state === "error" || capture.state === "aborted"}
         >{captureStatusText()}</small
       >
+      {#if capture.state === "finished" && capture.cartridgeId !== null && capture.archiveSha256 !== null}<div
+          class="captured-source-actions"
+        >
+          <button
+            type="button"
+            onclick={() => void useCapturedSource("A")}
+            disabled={hostBusy ||
+              bankBusy ||
+              presetBusy ||
+              captureBusy ||
+              sourceReplaceBusy}>Use capture in A</button
+          >
+          <button
+            type="button"
+            onclick={() => void useCapturedSource("B")}
+            disabled={hostBusy ||
+              bankBusy ||
+              presetBusy ||
+              captureBusy ||
+              sourceReplaceBusy}>Use capture in B</button
+          >
+          <small
+            >Explicit source insertion performs one bounded worker restart;
+            other draft settings are retained and causal state restarts.</small
+          >
+        </div>{/if}
+    </div>
+    <div class="recording-module" aria-label="Decoded MP4 recording">
+      <span>DECODED VIDEO</span>
+      <button
+        class:active={recordingControls.stop}
+        type="button"
+        onclick={() => void toggleDecodedRecording()}
+        disabled={!recordingControls.start && !recordingControls.stop}
+        >{recordingBusy
+          ? recordingControls.stop
+            ? "Finalizing…"
+            : "Opening…"
+          : recordingControls.stop
+            ? "Stop MP4"
+            : recording.state === "finalizing"
+              ? "Finalizing…"
+              : "Record MP4"}</button
+      >
+      <small class:error={recording.state === "failed"}
+        >{recordingMessage || recordingStatusText}</small
+      >
+      <small>Video-only H.264 · 24 fps · intrinsic decoded pixels</small>
     </div>
   </footer>
 
@@ -3189,10 +3393,9 @@
 
   .d2-master-strip {
     display: grid;
-    grid-template-columns: minmax(180px, 0.7fr) minmax(250px, 1fr) minmax(
-        400px,
-        1.5fr
-      );
+    grid-template-columns:
+      minmax(170px, 0.65fr) minmax(230px, 0.85fr)
+      minmax(380px, 1.35fr) minmax(220px, 0.8fr);
     gap: 7px;
     border-top: 1px solid var(--d2-line-bright);
     padding: 7px;
@@ -3201,7 +3404,8 @@
 
   .load-module,
   .restart-module,
-  .capture-module {
+  .capture-module,
+  .recording-module {
     display: grid;
     grid-template-columns: 1fr;
     align-content: center;
@@ -3251,10 +3455,35 @@
     grid-column: 1 / -1;
   }
 
+  .captured-source-actions {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: 1fr 1fr;
+    gap: 5px;
+  }
+
+  .captured-source-actions small {
+    grid-column: 1 / -1;
+  }
+
   .capture-module button:disabled {
     border-style: dashed;
     color: #7d807a;
     opacity: 0.72;
+  }
+
+  .recording-module {
+    grid-template-columns: 1fr;
+  }
+
+  .recording-module > span,
+  .recording-module > small {
+    grid-column: 1 / -1;
+  }
+
+  .recording-module button.active {
+    border-color: #c28672;
+    background: linear-gradient(#6a3d32, #42251f);
   }
 
   .d2-spout-strip {
@@ -3393,6 +3622,10 @@
     }
 
     .capture-module {
+      grid-column: 1 / -1;
+    }
+
+    .recording-module {
       grid-column: 1 / -1;
     }
 

@@ -96,6 +96,32 @@ Spout2 publishes the raw intrinsic DX12 texture. Bars are a local presentation
 decision and are never baked into the shared texture. A receiver therefore sees
 the exact decoded width, height, format, sender name, and frame sequence.
 
+Decoded MP4 recording is a separate viewing derivative of that same intrinsic
+Deck output. The bundled D2/Q4 implementations submit each validated frame
+consumed by the authoritative presentation sequence, including when local
+window presentation is temporarily skipped, preserve its decoded width and
+height without resize or crop, and write video-only H.264 at the 0.1 cadence of
+24 fps. The result is not a cartridge and does not contain latent or audio
+payloads. Encoding runs behind a bounded queue; encoder failure or overflow
+terminates only the recording and must not stall or terminate Deck playback.
+The final `.mp4` is no-clobber and becomes visible only after safe finalization
+of a sibling partial file. Latent Snapshot/Live Capture and decoded MP4
+recording are mutually exclusive in 0.1.
+
+Library changes are invalidation-driven. Import or successful capture must
+refresh an active D2/Q4 source list without requiring the user to toggle Active
+Collection, while an older asynchronous Library response must not replace a
+newer view. Refresh preserves the currently playing identities and an explicit
+next-load draft.
+
+Changing a source picker edits only the next-load draft. A newly captured
+cartridge enters a running Deck only through an explicit `Use capture in …` or
+normal Load action. The host resolves immutable identities and validates the
+complete candidate launch configuration before stopping the current worker. A
+successful bounded replacement retains the other source choices, controls,
+roles, seed, loop/play intent, and any active decoded-video recorder; causal
+operator state restarts at the source-replacement boundary.
+
 The public 0.1 performance target is `448×800` at 24 fps. Each Deck/operator
 mode is certified only after its own final receipt passes. Other validated
 geometries remain accepted for intrinsic playback, while Deck-specific

@@ -15,6 +15,7 @@ spout-sdk = ["latentdeck-native-output/spout-sdk"]
 tauri-build.workspace = true
 
 [dependencies]
+latentdeck-cartridge = { path = "../../../crates/cartridge" }
 latentdeck-control = { path = "../../../crates/control" }
 latentdeck-core = { path = "../../../crates/core" }
 latentdeck-gpu = { path = "../../../crates/gpu" }
@@ -29,6 +30,7 @@ wgpu.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

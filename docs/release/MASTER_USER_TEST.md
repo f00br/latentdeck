@@ -130,6 +130,32 @@ Repeat the sequence with one portrait and one landscape cartridge:
    cartridge or relaunch the app as the visible status directs. The Player's
    `Restart` control resets playback and causal state, not the worker process.
 
+Then test the `Prepare` workspace without a decoder or GPU requirement:
+
+8. Add two explicit raw H3 `.safetensors` files and one folder. Confirm nested
+   folders are excluded by default and included only after enabling the visible
+   recursion option.
+9. Choose a new output folder and press `Validate batch`. Inspect each planned
+   item: source name, relative `.lc` destination, payload size/hash, storage
+   dtype, latent `T/H/W`, decoded dimensions/frame count, and audio presence
+   must be visible without writing a cartridge.
+10. Deliberately create one existing destination and one duplicate
+    case-insensitive destination. Preflight must reject the batch before any
+    new output is written and must not overwrite either file.
+11. Validate one source, replace it with a different valid H3 Safetensors file,
+    then start conversion. That item must fail with `payload_hash_mismatch`,
+    preserve the preflight identity shown in the queue, and create no `.lc`.
+12. Convert a clean multi-file plan. Progress must be sequential and every
+    successful item must be atomically complete, fully validated, and free of
+    temporary residue. One invalid item must show its own sanitized error
+    without hiding the other item results.
+13. During another multi-file plan press `Stop after current`. The active item
+    must finish and validate; queued items must become cancelled and must not
+    start writing.
+14. Press `Open in Player` on a completed item. The workspace must return to
+    PLAY and load that exact new cartridge. The developer console converter
+    remains available but is not required for this workflow.
+
 ## Library and Collections
 
 1. Import one `.lc` file, then import a folder explicitly. The app must not scan
@@ -149,6 +175,13 @@ Repeat the sequence with one portrait and one landscape cartridge:
    remain, and a cartridge already playing in a Deck slot must not unload.
 10. Open D2 or Q4 from a chosen collection. The slot picker should start in that
     bank while still allowing `All Cartridges` when deliberately selected.
+11. With `All Cartridges` or `Unassigned` already active, import another
+    compatible cartridge in Library, then return to the active D2 or Q4 page.
+    It must appear without toggling Active Collection or reselecting the same
+    virtual collection. Currently playing identities and an intentionally
+    edited next-load draft must remain unchanged. Repeat with a real Collection
+    active: its membership filter must remain selected and must not silently
+    admit the new unassigned cartridge.
 
 ## LD-D2
 
@@ -160,10 +193,13 @@ Repeat the sequence with one portrait and one landscape cartridge:
    changes. The UI must stay responsive and the selected sources must not swap.
 5. Create a Snapshot resample. It must validate, appear in Library immediately,
    and play in LatentPlayer.
-6. Create a short Live Capture while changing controls. Stop it manually; the
-   result must validate, appear in Library, and play again. No `.partial` file
-   should be presented as a cartridge.
-7. Repeat the main playback and resample path with the other aspect-ratio set.
+6. Create a Live Capture while changing controls and let a short looping source
+   cross at least three automatic loop boundaries. It must remain active until
+   manual Stop, then validate and appear in Library without `.partial` residue.
+7. Use the finished capture in A, then B, without reloading the application.
+   Each explicit action may perform one bounded worker restart; the other source
+   draft, controls, seed, loop/play intent, and compatible geometry must remain.
+8. Repeat the main playback and resample path with the other aspect-ratio set.
 
 ## LD-Q4
 
@@ -176,9 +212,29 @@ Repeat the sequence with one portrait and one landscape cartridge:
    macro. The three donor weights must remain understandable and predictable.
 5. Compare TOPK and Sinkhorn and repeat the same seed/settings after Restart.
    The replay should be deterministic.
-6. Create and replay both Snapshot and Live Capture results.
+6. Create both Snapshot and Live Capture results. Use a finished capture in
+   each required A/B/C/D slot without reloading the application; other sources,
+   controls, roles, seed, and transport intent must remain.
 7. Repeat once with a compatible portrait set and once with a compatible
    landscape set.
+
+## Decoded MP4 recording in D2 and Q4
+
+Repeat in each Deck with a loaded compatible source set:
+
+1. Choose `Record MP4`, select a new destination, change a few normal realtime
+   controls, let several seconds play, and choose `Stop MP4`.
+2. Open the result in a normal video player. It must be video-only H.264 at
+   24 fps and the exact intrinsic decoded dimensions; no letterbox/pillarbox,
+   hidden resize/crop, audio stream, or sibling `.partial.mp4` may be present.
+3. Start another MP4 and use a newly captured cartridge of the same compatible
+   geometry in one slot. The bounded source replacement must not silently end
+   the decoded recording; Stop must still finalize one playable MP4.
+4. While MP4 recording is active, latent Snapshot/Live Capture controls must be
+   unavailable. While latent capture is active, MP4 start must be unavailable.
+   Neither conflict may stop Deck playback.
+5. Cancel the destination dialog and stop once before the first decoded frame.
+   Cancellation must remain non-destructive and must not claim a saved file.
 
 ## D2 and Q4 presets
 
