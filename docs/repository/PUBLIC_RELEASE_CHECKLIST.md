@@ -4,6 +4,11 @@ Checked items record durable evidence only. Completing a local release candidate
 or this checklist does not authorize publication; the owner must still
 explicitly approve every action in the Publication authority section.
 
+Current phase: the owner accepted the complete local `0.1.0` functional surface
+on 2026-09-01. The accepted unsigned `dbe310a` artifacts are UAT evidence, not a
+publication candidate after subsequent documentation changes. Every unchecked
+item below remains open.
+
 ## Ownership and legal
 
 - [x] The owner selected Apache-2.0 for original code and documentation; see
@@ -34,6 +39,9 @@ explicitly approve every action in the Publication authority section.
       a substitute for permission.
 - [ ] Documentation contains no private absolute paths, tokens, internal URLs,
       or unsupported benchmark claims.
+- [ ] `comfy/toolkit/workflows/00_ALL_NODES_GALLERY.json` exists as a public,
+      data-free presentation canvas, passes strict registry equality, and opens
+      without missing or red node cards in the isolated ComfyUI profile.
 
 ## Product and security
 

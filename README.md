@@ -10,11 +10,10 @@ state into a new cartridge.
 
 ## Repository status
 
-The `0.1.0` implementation is in owner-UAT closeout on `main`. The owner has
-confirmed the broader walkthrough. The latest correction candidate preserves
-D2/Q4 Live Capture across automatic source loops through a newly versioned H3
-Codec Pack and fixes top-down MP4 orientation; affected owner retest, the
-ComfyUI all-nodes presentation canvas, and final release gates remain. The
+On 2026-09-01 the owner accepted the complete local `0.1.0` functional surface
+on `main` with no remaining product defects. The repository is now in
+release-documentation and publication preparation. The separate ComfyUI
+all-nodes presentation canvas and the public-release gates are still open. The
 repository contains:
 
 - public-repository boundaries and agent instructions;
@@ -43,12 +42,18 @@ repository contains:
   exact-version uninstall lifecycle, and SBOM generation;
 - a policy for local-only, non-binding interface references.
 
-The owner-UAT binary baseline is a clean, unsigned local RC built from commit
-`9fc7caa`. It does not bundle a Codec Pack, decoder, model weight, or cartridge.
-Strict four-source Q4 acceptance, the owner-approved six-minute D2/Q4 stability
-suite, application playback, portrait and landscape presentation, and Spout2
-were verified locally. Clean-machine installer/Codec Pack lifecycle, signing,
-and owner-authorized publication remain external gates. See the
+The owner-accepted functional artifact baseline is the clean, unsigned local RC
+built from commit `dbe310a2b8c0a9f78a11ab8217f07c8c91a39db4`, together with
+H3 Codec Pack `0.1.1` built from that same source. It does not bundle a decoder,
+model weight, or cartridge. Strict four-source Q4 acceptance, the
+owner-approved six-minute D2/Q4 stability suite, application playback, long
+Live Capture across source loops, upright MP4 output, portrait and landscape
+presentation, Spout2, and the public Codec Pack setup lifecycle were verified
+locally. Any later documentation commit makes those binaries a retained UAT
+evidence snapshot rather than the current publication candidate, so the final
+RC must be rebuilt from the final clean commit. Clean-machine lifecycle,
+authenticated signing, detailed publication review, and owner-authorized
+publication remain open. See the
 [0.1.0 acceptance status](docs/release/ACCEPTANCE_STATUS.md). There is no
 published release or supported bundled model in this repository.
 
@@ -105,7 +110,7 @@ not part of normal public onboarding. See the
 
 ## Start here
 
-- [Current UAT and release handoff](docs/release/continue.md)
+- [Current release-preparation handoff](docs/release/continue.md)
 - [Master-user test guide](docs/release/MASTER_USER_TEST.md)
 - [0.1.0 acceptance status](docs/release/ACCEPTANCE_STATUS.md)
 - [Project concept](docs/CONCEPT.md)

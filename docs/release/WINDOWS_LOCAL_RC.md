@@ -205,14 +205,19 @@ hardware and without ComfyUI:
 
 ## Current publication boundary
 
-The local builders and synthetic packaging lifecycle are automatable. A real
-clean-machine install, including the H3 setup/adjacent-payload and exact-version
-uninstall path, NVIDIA runtime test, Spout receiver proof, and
-install/update/uninstall matrix are external acceptance gates and must be
-recorded only after they are actually run. These installers are intentionally
-unsigned; Windows may show an unknown-publisher warning. Authenticated signing
-of the application installers, H3 setup, and its generated uninstaller remains
-a separate publication gate.
+The owner accepted the complete local `0.1.0` functional surface and the
+unsigned H3 Codec Pack `0.1.1` lifecycle built from clean commit `dbe310a` on
+2026-09-01. That set remains durable UAT evidence. Any later documentation or
+release-preparation commit requires a new clean application and Codec Pack
+build from the final commit before publication review.
+
+A real clean-machine install of the final signed artifacts, including the H3
+setup/adjacent-payload and exact-version uninstall path, NVIDIA runtime test,
+Spout receiver proof, and install/update/uninstall matrix remains an external
+publication gate and must be recorded only after it is actually run. The
+accepted local installers are intentionally unsigned; Windows may show an
+unknown-publisher warning. Authenticated signing of the application installers,
+H3 setup, and its generated uninstaller remains a separate publication gate.
 
 No script in this path creates a Git tag, remote, release, upload, or updater
 feed.

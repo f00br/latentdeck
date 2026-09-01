@@ -1,9 +1,11 @@
 # Security
 
-LatentDeck has no supported public release yet. The local 0.1 candidate includes
-the cartridge validation boundary, but every external cartridge, raw latent,
-Codec Pack, decoder asset, and explicitly installed operator must still be
-treated according to its own trust boundary.
+LatentDeck has no supported public release yet. The owner has accepted the local
+0.1 functional surface, but clean-machine, signing, security-contact, and
+publication gates remain open. The candidate includes the cartridge validation
+boundary, but every external cartridge, raw latent, Codec Pack, decoder asset,
+and explicitly installed operator must still be treated according to its own
+trust boundary.
 
 The 0.1 loader treats every `.lc` cartridge as untrusted, data-only media. It
 rejects malformed manifests and payloads before runtime use, validates tensor

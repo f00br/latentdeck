@@ -1,7 +1,7 @@
 # Contributing
 
-LatentDeck 0.1 is in owner-UAT and release closeout. Contributions are not open
-for uncoordinated feature work yet.
+LatentDeck 0.1 owner UAT is complete. The repository is in coordinated release
+and publication preparation; uncoordinated feature work is not open yet.
 
 For any explicitly assigned change:
 

@@ -1,7 +1,8 @@
 # Isolated ComfyUI user-test environment
 
-For the owner-facing sequence and all-nodes visual acceptance, start with the
-[master-user test guide](MASTER_USER_TEST.md).
+For the owner-facing ComfyUI verification sequence, start with the
+[master-user test guide](MASTER_USER_TEST.md). The separate all-nodes gallery is
+an open release-presentation deliverable tracked in the current handoff.
 
 This profile runs LatentDeck Comfy Toolkit and `ComfyUI-LatentCartridge`
 without installing anything into the source ComfyUI `custom_nodes` or embedded

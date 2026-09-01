@@ -330,11 +330,11 @@ pwsh -NoProfile -File tools/Test-H3CodecPackRuntime.ps1 `
 ```
 
 These local contract tests do not prove the public lifecycle or supplied
-Python/PyTorch/CUDA runtime on another machine. Before release acceptance,
-place only the signed setup and matching adjacent ZIP on a clean Windows 11
-NVIDIA current-user account without PowerShell 7, system Python, ComfyUI, or a
-network connection. Install through setup without elevation, verify its
-Installed Apps entry, validate notices and SBOM, explicitly select a measured
+Python/PyTorch/CUDA runtime on another machine. Before publishing signed public
+artifacts, place only the signed setup and matching adjacent ZIP on a clean
+Windows 11 NVIDIA current-user account without PowerShell 7, system Python,
+ComfyUI, or a network connection. Install through setup without elevation,
+verify its Installed Apps entry, validate notices and SBOM, explicitly select a measured
 `taeh3` asset, and run Player, D2, Q4, recovery, and Spout tests. Uninstall the
 exact pack version through Installed Apps and prove both applications and user
 data remain. Record that result separately; do not infer it from packaging

@@ -3,9 +3,9 @@
 These runbooks define the local Windows `0.1.0` release-candidate path. They do
 not authorize publication, Git tags, remote changes, signing, or uploads.
 
-- [Current UAT and release handoff](continue.md)
+- [Current release-preparation handoff](continue.md)
 - [Master-user test guide](MASTER_USER_TEST.md)
-- [Verified and open 0.1.0 acceptance gates](ACCEPTANCE_STATUS.md)
+- [Owner acceptance and open publication gates](ACCEPTANCE_STATUS.md)
 - [Windows application release candidate](WINDOWS_LOCAL_RC.md)
 - [H3 Codec Pack packaging and lifecycle](H3_CODEC_PACK.md)
 - [Isolated ComfyUI user-test environment](ISOLATED_COMFY_TEST_ENVIRONMENT.md)
@@ -31,3 +31,7 @@ artifacts.
 Local unsigned setup proof does not satisfy publisher trust or clean-machine
 acceptance. Authenticated signing and the offline clean Windows lifecycle remain
 release gates and do not authorize publication by themselves.
+
+The owner accepted the complete local functional surface on 2026-09-01. A
+documentation change after the accepted `dbe310a` artifact set requires a new
+clean RC before publication review; the retained binaries remain evidence only.

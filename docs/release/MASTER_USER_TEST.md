@@ -4,10 +4,13 @@ This guide is for the owner performing visual and user-path acceptance. It does
 not require knowledge of Rust, Python internals, or latent mathematics. Report
 what the product shows and does; the engineer can diagnose the implementation.
 
-The current owner-UAT binary baseline is the clean, unsigned local RC built from
-commit `9fc7caa`. It is not a published or signed release. The H3 Codec Pack,
-TAEH3 decoder weight, test cartridges, and Spout receiver are separate local
-test inputs and are not bundled in either application.
+The owner-accepted functional baseline is the clean, unsigned local RC and H3
+Codec Pack `0.1.1` built from commit
+`dbe310a2b8c0a9f78a11ab8217f07c8c91a39db4`. It is not a published or signed
+release. The H3 Codec Pack, TAEH3 decoder weight, test cartridges, and Spout
+receiver are separate local test inputs and are not bundled in either
+application. The owner completed this functional pass on 2026-09-01; keep this
+guide as the reproducible regression and clean-machine acceptance sequence.
 
 ## Prepare the test set
 
@@ -39,7 +42,7 @@ separate acceptance has already passed.
    Installing or removing either application must not install, replace, or
    remove this entry or its pack. The old local `0.1.0` pack contains the D2
    loop defect and is not a rollback; remove it through the documented
-   engineer recovery path if it remains on this owner-UAT machine.
+   engineer recovery path if it remains on a local test machine.
 4. Restart both applications, open Codec Manager, refresh discovery, and
    confirm the compatible `0.1.1` pack is selected. Select the compatible
    external TAEH3 decoder. Confirm the UI shows ready status plus the selected
@@ -71,9 +74,9 @@ reinstall `0.1.1` afterward for the functional sections below:
    Library/cartridge data, and decoder selection remain.
 5. Reinstall from the same setup/payload pair and continue the product test.
 
-This owner-UAT slice proves the user flow but not publisher trust. Repeat the
-signed setup lifecycle offline on a clean Windows 11 NVIDIA machine without
-PowerShell 7, system Python, or ComfyUI before public release acceptance.
+This local lifecycle proof covers the user flow but not publisher trust. Repeat
+the signed setup lifecycle offline on a clean Windows 11 NVIDIA machine without
+PowerShell 7, system Python, or ComfyUI before publication.
 
 ## Convert existing raw H3 AV data
 
@@ -330,11 +333,13 @@ pwsh -NoProfile -File tools/Test-IsolatedComfyEnvironment.ps1 -ServerSmoke
 pwsh -NoProfile -File tools/Start-IsolatedComfyEnvironment.ps1 -Cpu -OpenBrowser
 ```
 
-Current closeout note: the `9fc7caa` baseline contains all discoverable nodes
-and eight runnable workflows, but not yet the requested single all-nodes gallery.
-Do not mark this section complete until
-`comfy/toolkit/workflows/00_ALL_NODES_GALLERY.json` exists and has passed its
-strict registry test.
+The accepted functional baseline discovered all repository-owned nodes and
+contains eight public workflows, but it does not contain the requested
+all-nodes gallery. The owner assigned
+`comfy/toolkit/workflows/00_ALL_NODES_GALLERY.json` to the next agent as a
+required release-documentation and presentation task. Do not report the gallery
+as implemented or tested until it exists, passes strict registry equality, and
+opens successfully in the isolated profile.
 
 When the gallery is available:
 
@@ -369,9 +374,11 @@ Severity: blocks test / functional minor / cosmetic
 Do not place private cartridge payloads, model weights, credentials, or private
 absolute paths into a public issue or committed document.
 
-## Owner-UAT completion
+## Owner acceptance and publication follow-up
 
-The owner pass is complete when every section above is either accepted or has a
-tracked finding, every accepted fix is committed locally on `main`, and the
-owner confirms there are no remaining blocking defects. A fresh clean RC must
-then be built from that final commit before clean-machine and publication review.
+The owner completed the local functional pass on 2026-09-01 and confirmed there
+are no remaining product defects. That acceptance does not claim that the
+all-nodes gallery, clean-machine lifecycle, authenticated signing, or
+publication review has passed. After the gallery and release documentation are
+committed, build a fresh clean RC from the final commit before clean-machine and
+publication review.

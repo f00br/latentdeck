@@ -1,9 +1,11 @@
 # LatentDeck agent runway
 
-This repository is in local `0.1.0` owner-UAT closeout. The current operational
-handoff is `docs/release/continue.md`, and verified versus open gates are tracked
-in `docs/release/ACCEPTANCE_STATUS.md`. Repository safeguards, specifications,
-and component boundaries remain mandatory through release.
+The owner accepted the complete local `0.1.0` functional surface on
+2026-09-01. This repository is now in coordinated release-documentation and
+publication preparation. The current operational handoff is
+`docs/release/continue.md`, and accepted evidence versus open publication gates
+are tracked in `docs/release/ACCEPTANCE_STATUS.md`. Repository safeguards,
+specifications, and component boundaries remain mandatory through release.
 
 ## Required reading order
 
@@ -25,8 +27,8 @@ the baseline.
 ## Scope discipline
 
 - Implement only the task explicitly assigned in the current session.
-- Do not infer new scope beyond the documented 0.1 contracts, current UAT
-  closeout, and the current user instruction.
+- Do not infer new scope beyond the accepted 0.1 contracts, current
+  release-preparation work, and the current user instruction.
 - Do not create a new roadmap, Technical Design Document, dependency graph, or
   stack migration unless requested.
 - Do not treat the concept images as pixel-perfect UI requirements. They are
