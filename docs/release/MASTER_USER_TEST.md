@@ -32,7 +32,9 @@ separate acceptance has already passed.
    the [Windows RC runbook](WINDOWS_LOCAL_RC.md).
 2. Install the H3 Codec Pack separately by following the
    [Codec Pack runbook](H3_CODEC_PACK.md). Installing or removing either app
-   must not install, replace, or remove the Codec Pack.
+   must not install, replace, or remove the Codec Pack. For the correction
+   candidate described by the current handoff, confirm that Codec Manager
+   selects the newer `0.1.1` pack rather than the retained `0.1.0` rollback.
 3. Open Codec Manager, refresh discovery, and select the compatible external
    TAEH3 decoder. Confirm the UI shows ready status plus the selected variant,
    SHA-256 identity, source, and license. Repeat the status check in Player,
@@ -196,6 +198,8 @@ Then test the `Prepare` workspace without a decoder or GPU requirement:
 6. Create a Live Capture while changing controls and let a short looping source
    cross at least three automatic loop boundaries. It must remain active until
    manual Stop, then validate and appear in Library without `.partial` residue.
+   The result must be longer than one carrier cycle; for a 107-slot carrier its
+   visual `T` must be greater than 107.
 7. Select the finished capture as A's next-load draft. The A button must become
    `Load + Play A`; press it and confirm the complete compatible A+B draft loads
    and A starts without reloading the application. Repeat in B with either the
@@ -231,8 +235,9 @@ Repeat in each Deck with a loaded compatible source set:
 1. Choose `Record MP4`, select a new destination, change a few normal realtime
    controls, let several seconds play, and choose `Stop MP4`.
 2. Open the result in a normal video player. It must be video-only H.264 at
-   24 fps and the exact intrinsic decoded dimensions; no letterbox/pillarbox,
-   hidden resize/crop, audio stream, or sibling `.partial.mp4` may be present.
+   24 fps, upright with the source top still at the top, and at the exact
+   intrinsic decoded dimensions; no letterbox/pillarbox, hidden resize/crop,
+   audio stream, or sibling `.partial.mp4` may be present.
 3. Start another MP4 and use a newly captured cartridge of the same compatible
    geometry in one slot. The bounded source replacement must not silently end
    the decoded recording; Stop must still finalize one playable MP4.

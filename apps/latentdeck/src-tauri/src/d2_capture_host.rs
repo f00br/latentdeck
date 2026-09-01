@@ -661,6 +661,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn d2_and_q4_live_capture_caps_match_and_exceed_ten_minutes_at_landscape_geometry() {
+        use crate::q4_capture_host::{
+            APP_Q4_CAPTURE_MAX_LATENT_SLOTS, APP_Q4_CAPTURE_MAX_VISUAL_BYTES,
+        };
+
+        assert_eq!(
+            APP_CAPTURE_MAX_LATENT_SLOTS,
+            APP_Q4_CAPTURE_MAX_LATENT_SLOTS
+        );
+        assert_eq!(
+            APP_CAPTURE_MAX_VISUAL_BYTES,
+            APP_Q4_CAPTURE_MAX_VISUAL_BYTES
+        );
+
+        let bytes_per_slot = 24_u64 * 48 * 84 * 2;
+        let bounded_slots =
+            APP_CAPTURE_MAX_LATENT_SLOTS.min(APP_CAPTURE_MAX_VISUAL_BYTES / bytes_per_slot);
+        let valid_slots = 2 + 5 * ((bounded_slots - 2) / 5);
+        let decoded_frames = 5 + 17 * ((valid_slots - 2) / 5);
+
+        assert_eq!(valid_slots, 5_547);
+        assert!(decoded_frames >= 24 * 60 * 10);
+    }
+
+    #[test]
     fn exact_receipt_path_is_bound_to_its_host_created_capture_root() {
         let directory = tempdir().expect("temporary app data");
         let capture_id = WireUuid::new_v4();

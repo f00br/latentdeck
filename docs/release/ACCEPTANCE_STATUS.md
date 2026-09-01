@@ -5,9 +5,11 @@ active owner UAT, and publication gates. It does not authorize a remote, push,
 tag, upload, signing action, or public release.
 
 Status on 2026-09-01: the complete `0.1.0` product surface is in owner-UAT
-closeout. The owner reports that the current experience is generally working
-well. The four primary findings are present in a clean local RC; one final
-changed-draft `Load + Play` UX correction and its fresh clean RC remain open.
+closeout. The owner confirms that the broader product works as stated,
+including Library refresh, hot insertion, and LatentPlayer preparation. Final
+retest remains open for two reproduced delivery defects: the prior installed D2
+worker ended latent Live Capture after one carrier loop, and D2/Q4 decoded MP4
+pixels were vertically inverted.
 
 ## Previous owner-UAT binary baseline
 
@@ -32,13 +34,17 @@ requires a fresh clean RC before publication review.
 
 ### Current post-baseline source candidate (owner acceptance open)
 
-The `2aa5c30` binary contains the four primary fixes listed below:
+The `2aa5c30` application binary contains the four primary fixes listed below,
+but its independently installed Codec Pack remained an older source snapshot:
 
-- D2 Live Capture survives expected automatic source-loop reset barriers and
-  remains bounded by explicit Stop and the existing validated spool limits.
+- Current D2 and Q4 worker source preserves Live Capture across expected
+  automatic source-loop reset barriers and remains bounded by explicit Stop and
+  the matching validated spool limits. The stale installed D2 `0.1.0` pack did
+  not contain this source and is not valid evidence for that behavior.
 - D2/Q4 decoded output can be saved as no-clobber, video-only H.264 MP4 at
-  intrinsic geometry and 24 fps. Synthetic Windows Media Foundation output was
-  finalized and checked as an H.264 MP4 with no audio stream or partial residue.
+  intrinsic geometry and 24 fps. The current source candidate additionally
+  preserves top-down row order before Media Foundation encoding; an
+  asymmetric-row regression test catches vertical inversion.
 - Library invalidation refreshes active Deck source options without an Active
   Collection toggle, while preserving loaded and edited draft identities.
 - Finished captures can be inserted explicitly into D2 A/B or Q4 A/B/C/D by a
@@ -50,14 +56,16 @@ The `2aa5c30` binary contains the four primary fixes listed below:
   open of a completed cartridge. Conversion is bound to the preflight payload
   SHA-256; a subsequently changed source fails without writing its destination.
 
-The source commit containing this status adds the final contextual action not
-represented by the artifact hashes above: when a next-load slot differs from
-its currently playing identity, D2 and Q4 expose `Load + Play`, which applies
-the complete compatible draft and starts the requested slot. Matching
-identities retain ordinary transport-only `Play`/`Pause` behavior.
+The owner accepted the contextual action not represented by the artifact hashes
+above: when a next-load slot differs from its currently playing identity, D2
+and Q4 expose `Load + Play`, which applies the complete compatible draft and
+starts the requested slot. Matching identities retain ordinary transport-only
+`Play`/`Pause` behavior.
 
 Focused Rust, Python, and frontend contract tests cover these boundaries. The
-accepted CUDA, Spout, fullscreen, and six-minute stability suites were not
+physical Codec Pack runtime smoke now also proves D2/Q4 capture ownership across
+one automatic loop reset and resume without a model, decoder, GPU, or payload.
+The accepted CUDA, Spout, fullscreen, and six-minute stability suites were not
 repeated: latent math and the Spout/native-presentation implementation did not
 change, while the new post-presentation MP4 handoff has its own focused tests
 and affected owner-UAT slice. Live application behavior remains **owner-UAT
@@ -159,6 +167,10 @@ pending**, not verified by those synthetic checks.
   dependency inventory, SBOM, notices, and exact-version removal passed. The
   pack contains no model weight, generator, ComfyUI, cartridge, or private
   media; the decoder asset remains an explicit external selection.
+- That immutable `0.1.0` pack predates the D2 loop-preservation source change.
+  It is retained only as rollback. The next owner-UAT delivery must build and
+  install a new `0.1.1` pack from the same clean final source commit; same-version
+  overwrite remains forbidden.
 - Application packaging binds both independent NSIS installers, all three lock
   files, Spout2 provenance/license, the SBOM, and third-party notices in one
   schema-3 receipt and checksum set.
@@ -167,11 +179,10 @@ pending**, not verified by those synthetic checks.
 
 Use the [master-user test guide](MASTER_USER_TEST.md). At this handoff:
 
-- the owner is testing the applications and reports the overall result as good;
-- minor and cosmetic findings will be fixed as they are reported;
-- the post-baseline candidate must pass D2 multi-loop capture, D2/Q4 decoded
-  MP4, Library auto-refresh, captured-source insertion, and LatentPlayer Prepare
-  tests before the four findings are closed;
+- the owner confirms all other reported workflows work as stated;
+- the fresh candidate must select H3 Codec Pack `0.1.1`, keep D2 capture active
+  across at least three carrier loops until manual Stop, cross one short Q4 loop,
+  and produce upright D2 and Q4 MP4 files;
 - already accepted heavy CUDA, six-minute stability, embedded-output,
   fullscreen, aspect, source-identity, and Spout paths should be repeated only
   when a relevant change or concrete regression requires it;

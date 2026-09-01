@@ -10,11 +10,12 @@ state into a new cartridge.
 
 ## Repository status
 
-The `0.1.0` implementation is in owner-UAT closeout on `main`. The current
-walkthrough is broadly positive. A post-baseline source candidate addresses
-four owner-reported capture, Library/hot-reload, and Player-preparation
-findings; affected owner retest, the ComfyUI all-nodes presentation canvas, and
-final release gates remain. The repository contains:
+The `0.1.0` implementation is in owner-UAT closeout on `main`. The owner has
+confirmed the broader walkthrough. The latest correction candidate preserves
+D2/Q4 Live Capture across automatic source loops through a newly versioned H3
+Codec Pack and fixes top-down MP4 orientation; affected owner retest, the
+ComfyUI all-nodes presentation canvas, and final release gates remain. The
+repository contains:
 
 - public-repository boundaries and agent instructions;
 - pinned Cargo, pnpm, uv, Tauri, Svelte, and Python workspaces;
@@ -31,8 +32,10 @@ final release gates remain. The repository contains:
 - a shared SQLite Library with many-to-many Collections and virtual `All` and
   `Unassigned` banks;
 - deterministic Snapshot and bounded Live Capture resampling back into `.lc`,
-  including D2 capture across automatic source-loop boundaries;
-- video-only H.264 MP4 recording of D2/Q4 decoded output at intrinsic geometry;
+  including D2/Q4 capture across automatic source-loop boundaries and matching
+  large application safety limits;
+- upright video-only H.264 MP4 recording of D2/Q4 decoded output at intrinsic
+  geometry;
 - automatic Library-to-Deck invalidation and explicit hot insertion of newly
   captured cartridges through a bounded worker replacement;
 - Spout2 output, structured diagnostics, database backup/migration, Windows

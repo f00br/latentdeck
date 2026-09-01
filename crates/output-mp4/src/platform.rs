@@ -213,7 +213,7 @@ impl VideoSink {
             .ok_or(RecorderError::InvalidFrame)?;
         let buffer =
             unsafe { MFCreateMemoryBuffer(packed_len) }.map_err(|_| RecorderError::EncodeFailed)?;
-        fill_rgb32_bottom_up(&buffer, width, height, row_stride, rgba)?;
+        fill_rgb32_top_down(&buffer, width, height, row_stride, rgba)?;
         let sample = unsafe { MFCreateSample() }.map_err(|_| RecorderError::EncodeFailed)?;
         let (start, duration) = frame_time(self.frame_index)?;
         let writer = self.writer.as_ref().ok_or(RecorderError::EncodeFailed)?;
@@ -254,7 +254,7 @@ impl Drop for VideoSink {
     }
 }
 
-fn fill_rgb32_bottom_up(
+fn fill_rgb32_top_down(
     buffer: &IMFMediaBuffer,
     width: u32,
     height: u32,
@@ -281,7 +281,7 @@ fn fill_rgb32_bottom_up(
         return Err(RecorderError::EncodeFailed);
     }
     for output_y in 0..height {
-        let source_y = height - 1 - output_y;
+        let source_y = output_y;
         let source_row = &rgba[source_y * source_stride..source_y * source_stride + packed_stride];
         let destination_row = unsafe { destination.add(output_y * packed_stride) };
         for (x, pixel) in source_row.chunks_exact(4).enumerate() {
@@ -328,4 +328,44 @@ fn frame_time(index: u64) -> Result<(i64, i64), RecorderError> {
         i64::try_from(start).map_err(|_| RecorderError::EncodeFailed)?,
         i64::try_from(end - start).map_err(|_| RecorderError::EncodeFailed)?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::slice;
+
+    use super::*;
+
+    #[test]
+    fn rgb32_packing_preserves_top_down_row_order() {
+        let _lifecycle = MediaFoundationApartment::start().expect("Media Foundation starts");
+        let buffer = unsafe { MFCreateMemoryBuffer(16) }.expect("RGB32 test buffer");
+        let rgba = [
+            1, 2, 3, 255, 4, 5, 6, 255, 90, 91, 92, 93, // top row plus padding
+            7, 8, 9, 255, 10, 11, 12, 255, 94, 95, 96, 97, // bottom row plus padding
+        ];
+
+        fill_rgb32_top_down(&buffer, 2, 2, 12, &rgba).expect("pack top-down RGB32");
+
+        let mut data = ptr::null_mut();
+        let mut maximum = 0_u32;
+        let mut current = 0_u32;
+        unsafe {
+            buffer
+                .Lock(
+                    &raw mut data,
+                    Some(&raw mut maximum),
+                    Some(&raw mut current),
+                )
+                .expect("lock packed RGB32");
+        }
+        let packed = unsafe { slice::from_raw_parts(data, current as usize) }.to_vec();
+        unsafe {
+            buffer.Unlock().expect("unlock packed RGB32");
+        }
+
+        assert_eq!(maximum, 16);
+        assert_eq!(current, 16);
+        assert_eq!(packed, [3, 2, 1, 0, 6, 5, 4, 0, 9, 8, 7, 0, 12, 11, 10, 0]);
+    }
 }

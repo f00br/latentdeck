@@ -9,7 +9,9 @@ a Latent Cartridge and not an input to realtime latent synthesis.
 
 - Input is each exact validated, ABI-padded RGBA frame consumed by the Deck's
   authoritative presentation sequence at its intrinsic decoded width and
-  height. Recording stays continuous when a local window presentation is
+  height. The RGB Ring origin is top-left; the positive Media Foundation RGB32
+  stride preserves that top-down row order while channels are packed from RGBA
+  to BGRX. Recording stays continuous when a local window presentation is
   temporarily skipped because the surface is occluded or being recreated.
 - Output is video-only H.264 in an `.mp4` container at the 0.1 cadence of
   24 fps. Audio tensors and cartridge audio metadata are not rendered.
@@ -43,3 +45,7 @@ Run the focused contract tests with:
 cargo test -p latentdeck-output-mp4
 cargo test -p latentdeck-app decoded_recording::tests
 ```
+
+The Windows unit boundary includes an asymmetric top/bottom RGBA frame with
+source-row padding. This prevents a spatially uniform encoder fixture from
+hiding a vertical inversion regression.

@@ -95,9 +95,10 @@ pwsh -NoProfile -File tools/Build-H3CodecPack.ps1 `
 
 Pass `-DecoderAssetContractPath $decoderContract` only to use another reviewed
 metadata contract. The builder runs locked export, exact target installation,
-wheel build, curation, archive validation, isolated CUDA/import smoke, isolated
-install, post-install smoke, and exact-version uninstall before atomically
-publishing below `artifacts/codec-pack/0.1.0`. It refuses overwrite.
+wheel build, curation, archive validation, isolated CUDA/import smoke, a
+no-payload D2/Q4 Live Capture loop-preservation probe, isolated install,
+post-install smoke, and exact-version uninstall before atomically publishing
+below `artifacts/codec-pack/0.1.0`. It refuses overwrite.
 
 The version directory contains the ZIP, `SHA256SUMS.txt`, path-free package and
 distributable proof receipts, plus separate archive and installed-runtime smoke
@@ -275,8 +276,8 @@ separately:
 .\.venv\Scripts\python.exe -m pytest -q tools/tests/test_codec_pack_curator.py
 ```
 
-To repeat the isolated import/CUDA proof for an already expanded or installed
-pack:
+To repeat the isolated import/CUDA and D2/Q4 Live Capture loop-preservation
+proof for an already expanded or installed pack:
 
 ```powershell
 pwsh -NoProfile -File tools/Test-H3CodecPackRuntime.ps1 `

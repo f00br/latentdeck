@@ -8,11 +8,14 @@ This is the only current handoff for the repository.
   `2aa5c304e8d147e42820333f93b42be4181bb7b7` on `main`. Its receipt says
   `git_dirty=false`; installer and SBOM hashes are recorded in
   [ACCEPTANCE_STATUS.md](ACCEPTANCE_STATUS.md).
-- Owner UAT is active. The owner reports that the product is generally working
-  well; no open P0 or P1 defect has been reported at this handoff.
+- Owner UAT is active. The owner confirms that the product otherwise works as
+  stated. Two final reproducible defects remain in the prior test set: D2
+  latent Live Capture stops after one carrier cycle, and decoded MP4 pixels are
+  vertically inverted.
 - Player, Library/Collections, LD-D2, LD-Q4, embedded native output, fullscreen,
   portrait and landscape aspect-fit presentation, source identity, Snapshot,
-  Live Capture, and Spout2 were already exercised successfully.
+  capture hot insertion, decoded recording lifecycle, and Spout2 were already
+  exercised successfully apart from the two defects above.
 - Strict four-source Q4 and duplicate-source functional Q4 were both covered.
   Duplicate inputs remain acceptable for the owner's UI regression pass.
 - The owner accepted the measured six-minute D2 XS5, Q4 TOPK, and Q4 Sinkhorn
@@ -44,37 +47,54 @@ findings:
   preflight, so a changed source fails without producing an `.lc`. The console
   converter remains the developer interface.
 
-The current source candidate adds one final UX correction:
+The owner accepted the changed-draft UX correction in the prior application
+build:
 
 - A changed next-load slot now exposes `Load + Play` in both Decks. It applies
   the complete compatible draft and starts the requested slot; ordinary
   `Play`/`Pause` remains transport-only when draft and runtime identities match.
 
-The four primary changes above were built from clean commit `2aa5c30`. That
-owner-UAT candidate exposed the final changed-draft Play ambiguity addressed by
-the contextual action above. Do not record the affected source-insertion slice
-as closed until it passes in a fresh application build.
+The two remaining defects have exact local diagnoses:
+
+- Both reported D2 cartridges fully validate but contain the same 107-slot,
+  362-frame payload. The application was loading an independently installed H3
+  Codec Pack `0.1.0` built before the D2 multi-loop correction. That pack still
+  finalizes on the first loop barrier. Current source already preserves D2 and
+  Q4 capture ownership across automatic loop resets, so the correction must be
+  delivered as a new immutable Codec Pack `0.1.1`; application installers do
+  not and must not replace Codec Packs.
+- The shared Media Foundation path declared positive top-down RGB32 stride but
+  also reversed RGBA rows during channel packing. The current correction keeps
+  top-down row order for both D2 and Q4. An asymmetric-row unit test covers the
+  regression.
+- The physical Codec Pack runtime smoke now exercises D2 and Q4 loop reset and
+  resume transitions without a decoder, GPU, or payload. It fails on the stale
+  installed D2 pack and must pass on the new pack before delivery.
 
 The source candidate containing this handoff is newer than that binary
-baseline. Any source change after `2aa5c30`, including this UAT fix, requires a
-fresh clean RC before publication review.
+baseline. Any source change after `2aa5c30`, including these corrections,
+requires a fresh clean RC before publication review.
 
 ## Next action
 
-1. Build a fresh local application candidate from the clean commit containing
-   the contextual `Load + Play` fix; the `2aa5c30` artifacts remain an older
-   comparison baseline.
-2. Repeat the final affected owner-UAT slice: choose a newly captured cartridge
-   in a running D2/Q4 slot, press the contextual `Load + Play`, and verify that
-   the selected source loads and starts without reloading the application.
-3. If an affected slice regresses, fix it narrowly in the primary `main`
+1. Commit the two corrections locally on `main`, delete the superseded RC clone,
+   and create one fresh short-path clone at that exact commit.
+2. From that clone, build both unsigned applications and the independent H3
+   Codec Pack as new SemVer `0.1.1`. Install `0.1.1` beside retained rollback
+   `0.1.0`, restart the applications, and confirm Codec Manager selected the
+   highest compatible version.
+3. Repeat only the affected owner-UAT slices: keep D2 Live Capture active across
+   at least three carrier loops, manually stop it, and confirm visual `T` is
+   greater than the carrier's 107 slots; repeat one short Q4 loop crossing; then
+   record D2 and Q4 MP4 and confirm both are upright.
+4. If an affected slice regresses, fix it narrowly in the primary `main`
    checkout, rerun targeted tests, audit the staged candidate in a clean local
    clone, and commit locally. Do not push.
-4. If no new functional regression is waiting, add the ComfyUI all-nodes gallery
+5. If no new functional regression is waiting, add the ComfyUI all-nodes gallery
    described below and record its separate visual acceptance.
-5. After the owner accepts all corrections, rebuild both unsigned applications
+6. After the owner accepts all corrections, rebuild both unsigned applications
    from the final clean commit.
-6. Proceed to clean-machine lifecycle, signing, and publication only after the
+7. Proceed to clean-machine lifecycle, signing, and publication only after the
    owner explicitly authorizes those separate actions.
 
 ## Why this is next
@@ -87,7 +107,8 @@ and the separate gallery item are the remaining direct acceptance surfaces.
 
 ## Open threads
 
-- owner acceptance of the final changed-draft `Load + Play` workflow;
+- owner acceptance of D2/Q4 multi-loop capture from H3 Codec Pack `0.1.1` and
+  upright D2/Q4 decoded MP4;
 - the ComfyUI all-nodes gallery and visual proof;
 - a fresh clean RC after the final accepted source commit;
 - clean-machine lifecycle, private security contact, signing, and explicit
