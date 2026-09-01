@@ -773,7 +773,7 @@ try {
         if ($maintenancePublishWindow.Success) {
             [regex]::Matches(
             $maintenancePublishWindow.Groups['window'].Value,
-            '(?m)^\s*SetOutPath\b[^\r\n]*$'
+            '(?m)^\s*SetOutPath\b[^\r\n]*\r?$'
             )
         }
     )
@@ -790,7 +790,7 @@ try {
         if ($maintenanceRollbackWindow.Success) {
             [regex]::Matches(
             $maintenanceRollbackWindow.Groups['window'].Value,
-            '(?m)^\s*DeleteRegKey\b[^\r\n]*$'
+            '(?m)^\s*DeleteRegKey\b[^\r\n]*\r?$'
             )
         }
     )
