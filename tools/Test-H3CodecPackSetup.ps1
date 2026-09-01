@@ -761,9 +761,74 @@ try {
         '(?ms)InitPluginsDir\s+SetOutPath "\$PLUGINSDIR".*?' +
         'File "/oname=\$\{HELPER_FILE\}" "\$\{HELPER_PATH\}"'
     ).Count
+    $maintenancePublishWindow = [regex]::Match(
+        $installerTemplateText,
+        '(?ms)WriteUninstaller "\$\{MAINTENANCE_STAGE\}\\Uninstall\.exe"\s+' +
+        'IfErrors maintenance_failed(?<window>.*?)' +
+        'maintenance_publish_stage:\s+' +
+        'ClearErrors\s+' +
+        'Rename "\$\{MAINTENANCE_STAGE\}" "\$INSTDIR"'
+    )
+    $maintenancePublishSetOutPaths = @(
+        if ($maintenancePublishWindow.Success) {
+            [regex]::Matches(
+            $maintenancePublishWindow.Groups['window'].Value,
+            '(?m)^\s*SetOutPath\b[^\r\n]*$'
+            )
+        }
+    )
+    $maintenanceStageLeavesCurrentDirectory =
+        $maintenancePublishWindow.Success -and
+        $maintenancePublishSetOutPaths.Count -eq 1 -and
+        $maintenancePublishSetOutPaths[0].Value.Trim() -ceq 'SetOutPath "$PLUGINSDIR"'
+    $maintenanceRollbackWindow = [regex]::Match(
+        $installerTemplateText,
+        '(?ms)maintenance_rollback_complete:(?<window>.*?)' +
+        'maintenance_rollback_cleanup_failed:'
+    )
+    $maintenanceRollbackDeleteKeys = @(
+        if ($maintenanceRollbackWindow.Success) {
+            [regex]::Matches(
+            $maintenanceRollbackWindow.Groups['window'].Value,
+            '(?m)^\s*DeleteRegKey\b[^\r\n]*$'
+            )
+        }
+    )
+    $installSectionPrologue = [regex]::Match(
+        $installerTemplateText,
+        '(?ms)Section "Install H3 Codec Pack" SEC_MAIN(?<window>.*?)payload_present:'
+    )
+    $maintenanceRollbackIsTransactionScoped =
+        $installerTemplateText -match '(?m)^Var MaintenanceRegistryTouched\s*$' -and
+        $installSectionPrologue.Success -and
+        $installSectionPrologue.Groups['window'].Value -match (
+            '(?m)^\s*StrCpy \$MaintenanceRegistryTouched "0"\s*$'
+        ) -and
+        $installerTemplateText -match (
+            '(?ms)WriteRegStr HKCU "\$\{UNINSTALL_KEY\}" "DisplayName".*?' +
+            'IfErrors maintenance_registry_failed\s+' +
+            'StrCpy \$MaintenanceRegistryTouched "1"'
+        ) -and
+        $installerTemplateText -match (
+            '(?ms)maintenance_failed:\s+' +
+            '(?:;[^\r\n]*\r?\n\s*)*' +
+            'SetOutPath "\$PLUGINSDIR"\s+' +
+            'DetailPrint "Failed to create Installed Apps maintenance data\."'
+        ) -and
+        $maintenanceRollbackWindow.Success -and
+        $maintenanceRollbackDeleteKeys.Count -eq 1 -and
+        $maintenanceRollbackWindow.Groups['window'].Value -match (
+            '(?ms)\$\{If\} \$MaintenanceRegistryTouched == "1"\s+' +
+            'ClearErrors\s+' +
+            'DeleteRegKey HKCU "\$\{UNINSTALL_KEY\}"\s+' +
+            'IfErrors maintenance_rollback_cleanup_failed\s+' +
+            '\$\{EndIf\}'
+        )
     Assert-Condition `
         -Condition (
             $pluginHelperEmbeds -eq 2 -and
+            $maintenanceStageLeavesCurrentDirectory -and
+            $maintenanceRollbackIsTransactionScoped -and
             $installerTemplateText -notmatch '(?m)nsExec::ExecToStack.*\$INSTDIR\\\$\{HELPER_FILE\}' -and
             $installerTemplateText -match '(?m)^\s*StrCmp \$9 "INSTALLER_RUST_LICENSES\.txt" uninstall_inventory_known\s*$' -and
             $installerTemplateText -match '(?ms)uninstall_inventory_unsafe:.*?Goto uninstall_maintenance_root_unsafe' -and
@@ -771,7 +836,9 @@ try {
         ) `
         -Message (
             'NSIS template does not embed the helper only through $PLUGINSDIR or ' +
-            'fail closed on an unknown maintenance entry before uninstall mutation.'
+            'leave the maintenance stage before publication/rollback, scope rollback ' +
+            'registry deletion to this transaction, or fail closed on an unknown ' +
+            'maintenance entry before uninstall mutation.'
         )
 
     $syntheticCargoMetadata = [pscustomobject]@{

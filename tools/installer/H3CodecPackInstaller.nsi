@@ -171,6 +171,7 @@ Var TransactionMutex
 Var HadMaintenance
 Var ProgramDataRoot
 Var MaintenanceRegistryRemoved
+Var MaintenanceRegistryTouched
 
 Function ResolveProgramDataRoot
   System::Call 'shell32::SHGetFolderPathW(p 0, i ${CSIDL_COMMON_APPDATA}, p 0, i 0, t.r0) i.r1'
@@ -284,6 +285,7 @@ Section "Install H3 Codec Pack" SEC_MAIN
   SectionIn RO
   AddSize ${ESTIMATED_SIZE_KIB}
   StrCpy $FreshInstall "0"
+  StrCpy $MaintenanceRegistryTouched "0"
   ; `/D=...` must never redirect maintenance bytes into the integrity-closed pack.
   StrCpy $INSTDIR "${MAINTENANCE_DESTINATION}"
   ; Reject every existing maintenance component below the known LocalAppData
@@ -353,6 +355,9 @@ maintenance_stage_cleanup:
   File "/oname=installer-SBOM.cdx.json" "${INSTALLER_SBOM_PATH}"
   WriteUninstaller "${MAINTENANCE_STAGE}\Uninstall.exe"
   IfErrors maintenance_failed
+  ; SetOutPath also changes the process current directory. Leave the stage
+  ; before renaming or removing it; Windows will not move the current folder.
+  SetOutPath "$PLUGINSDIR"
 
   ; Publish a complete maintenance tree with a same-volume rename.
   !insertmacro ProbeSafeDirectory "$INSTDIR" $HadMaintenance maintenance_failed
@@ -374,6 +379,8 @@ maintenance_publish_stage:
 
   ClearErrors
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "${PRODUCT_NAME} ${PACK_VERSION}"
+  IfErrors maintenance_registry_failed
+  StrCpy $MaintenanceRegistryTouched "1"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "${PACK_VERSION}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "Publisher" "LatentDeck Project"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "InstallLocation" "${PACK_DESTINATION}"
@@ -427,6 +434,9 @@ maintenance_registry_failed:
   Goto maintenance_failed
 
 maintenance_failed:
+  ; A stage extraction or WriteUninstaller failure may arrive here while the
+  ; process current directory is still the transaction stage.
+  SetOutPath "$PLUGINSDIR"
   DetailPrint "Failed to create Installed Apps maintenance data."
   ${If} $FreshInstall == "1"
     nsExec::ExecToStack '"$PLUGINSDIR\${HELPER_FILE}" --local-app-data "$LOCALAPPDATA" --program-data "$ProgramDataRoot" uninstall --version "${PACK_VERSION}"'
@@ -452,9 +462,14 @@ maintenance_failed:
   ${EndIf}
 
 maintenance_rollback_complete:
-  ClearErrors
-  DeleteRegKey HKCU "${UNINSTALL_KEY}"
-  IfErrors maintenance_rollback_cleanup_failed
+  ; Delete only a key this transaction actually created or replaced.
+  ; DeleteRegKey reports an error when the key is already absent, which is the
+  ; expected state when maintenance publication failed before registry writes.
+  ${If} $MaintenanceRegistryTouched == "1"
+    ClearErrors
+    DeleteRegKey HKCU "${UNINSTALL_KEY}"
+    IfErrors maintenance_rollback_cleanup_failed
+  ${EndIf}
   !insertmacro RemoveKnownMaintenanceTree "$INSTDIR" maintenance_rollback_cleanup_failed
   !insertmacro RemoveKnownMaintenanceTree "${MAINTENANCE_STAGE}" maintenance_rollback_cleanup_failed
   !insertmacro RemoveKnownMaintenanceTree "${MAINTENANCE_BACKUP}" maintenance_rollback_cleanup_failed
