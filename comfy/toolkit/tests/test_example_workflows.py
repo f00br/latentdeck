@@ -5,7 +5,11 @@ import re
 from pathlib import Path
 
 from latentdeck_comfy_cartridge.nodes import NODE_CLASS_MAPPINGS as RECORDER_NODE_TYPES
+from latentdeck_example_channel_roll import (
+    NODE_CLASS_MAPPINGS as CHANNEL_ROLL_NODE_TYPES,
+)
 
+from latentdeck_comfy_toolkit import NODE_CLASS_MAPPINGS as TOOLKIT_NODE_TYPES
 from latentdeck_comfy_toolkit.device_nodes import DEVICE_NODE_CLASS_MAPPINGS
 from latentdeck_comfy_toolkit.io_nodes import IO_NODE_CLASS_MAPPINGS
 from latentdeck_comfy_toolkit.report_nodes import REPORT_NODE_CLASS_MAPPINGS
@@ -14,14 +18,24 @@ from latentdeck_comfy_toolkit.vae_nodes import VAE_NODE_CLASS_MAPPINGS
 
 WORKFLOW_DIRECTORY = Path(__file__).parents[1] / "workflows"
 CUSTOM_NODE_TYPES = {
+    **TOOLKIT_NODE_TYPES,
     **RECORDER_NODE_TYPES,
-    **DEVICE_NODE_CLASS_MAPPINGS,
-    **IO_NODE_CLASS_MAPPINGS,
-    **RESEARCH_NODE_CLASS_MAPPINGS,
-    **VAE_NODE_CLASS_MAPPINGS,
-    **REPORT_NODE_CLASS_MAPPINGS,
+    **CHANNEL_ROLL_NODE_TYPES,
 }
+REPOSITORY_OWNED_NODE_TYPES = {
+    *TOOLKIT_NODE_TYPES,
+    *RECORDER_NODE_TYPES,
+    *CHANNEL_ROLL_NODE_TYPES,
+}
+GALLERY_WORKFLOW = "00_ALL_NODES_GALLERY.json"
+assert len(TOOLKIT_NODE_TYPES) == 33
+assert len(RECORDER_NODE_TYPES) == 1
+assert len(CHANNEL_ROLL_NODE_TYPES) == 2
+assert len(REPOSITORY_OWNED_NODE_TYPES) == (
+    len(TOOLKIT_NODE_TYPES) + len(RECORDER_NODE_TYPES) + len(CHANNEL_ROLL_NODE_TYPES)
+)
 EXPECTED_WORKFLOWS = {
+    GALLERY_WORKFLOW: REPOSITORY_OWNED_NODE_TYPES,
     "01_LC_INSPECT.json": {
         "LatentDeckToolkitLCLoadInspect",
         "LatentDeckToolkitLatentScopes",
@@ -98,14 +112,14 @@ def test_example_workflows_are_loadable_sanitized_comfy_graphs() -> None:
         *VAE_NODE_CLASS_MAPPINGS,
         *REPORT_NODE_CLASS_MAPPINGS,
         *RECORDER_NODE_TYPES,
+        *CHANNEL_ROLL_NODE_TYPES,
+        *TOOLKIT_NODE_TYPES,
         "VAELoader",
         "PreviewAny",
         "PreviewImage",
     }
 
-    assert {path.name for path in WORKFLOW_DIRECTORY.glob("*.json")} == set(
-        EXPECTED_WORKFLOWS
-    )
+    assert {path.name for path in WORKFLOW_DIRECTORY.glob("*.json")} == set(EXPECTED_WORKFLOWS)
     for name, required_types in EXPECTED_WORKFLOWS.items():
         workflow = json.loads((WORKFLOW_DIRECTORY / name).read_text(encoding="utf-8"))
         assert workflow["version"] == 0.4
@@ -113,7 +127,10 @@ def test_example_workflows_are_loadable_sanitized_comfy_graphs() -> None:
         assert workflow["revision"] == 0
         assert isinstance(workflow["nodes"], list) and workflow["nodes"]
         assert isinstance(workflow["links"], list)
-        assert workflow["groups"] == []
+        if name == GALLERY_WORKFLOW:
+            assert len(workflow["groups"]) == 8
+        else:
+            assert workflow["groups"] == []
         assert workflow["config"] == {}
         assert isinstance(workflow["extra"], dict)
 
@@ -154,7 +171,7 @@ def test_workflow_and_operator_template_guides_cover_every_public_example() -> N
     )
     toolkit_readme = (toolkit_root / "README.md").read_text(encoding="utf-8")
 
-    for workflow_name in EXPECTED_WORKFLOWS:
+    for workflow_name in set(EXPECTED_WORKFLOWS) - {GALLERY_WORKFLOW}:
         assert workflow_name in workflow_guide
     for topology in ("single_source", "dual_source", "carrier_donors"):
         assert f"`{topology}`" in operator_guide
@@ -174,6 +191,34 @@ def test_workflow_and_operator_template_guides_cover_every_public_example() -> N
     assert "dynamic loader" in workflow_guide
     assert "workflows/README.md" in toolkit_readme
     assert "docs/OPERATOR_DEVELOPER_TEMPLATE.md" in toolkit_readme
+
+
+def test_all_nodes_gallery_is_an_exact_data_free_registry_view() -> None:
+    workflow = json.loads((WORKFLOW_DIRECTORY / GALLERY_WORKFLOW).read_text(encoding="utf-8"))
+    node_types = [node["type"] for node in workflow["nodes"]]
+
+    assert len(REPOSITORY_OWNED_NODE_TYPES) == 36
+    assert len(node_types) == 36
+    assert set(node_types) == REPOSITORY_OWNED_NODE_TYPES
+    assert all(node_types.count(node_type) == 1 for node_type in REPOSITORY_OWNED_NODE_TYPES)
+    assert workflow["links"] == []
+    assert {group["title"] for group in workflow["groups"]} == {
+        "Cartridge / Conversion",
+        "Decode / Offline",
+        "XS Operators",
+        "Labs",
+        "Diagnostics / Evaluation",
+        "Developer / Utilities",
+        "Recorder",
+        "External Example",
+    }
+
+    text = "\n".join(_all_strings(workflow))
+    lowered = text.lower()
+    assert "prompt" not in lowered
+    assert "payloads/" not in lowered
+    assert re.search(r"(?:^|[\"'])[a-z]:[\\/]", text, re.IGNORECASE) is None
+    assert "w:/" not in lowered
 
 
 def test_comparison_previews_are_unambiguous_for_visual_master_testing() -> None:
@@ -229,7 +274,10 @@ def test_example_workflow_ports_match_the_registered_comfy_contracts() -> None:
 
             serialized_names = {item["name"] for item in node["inputs"]}
             required_widgets = []
-            for input_name, declaration in declared_inputs.get("required", {}).items():
+            widget_declarations = dict(declared_inputs.get("required", {}))
+            if path.name == GALLERY_WORKFLOW:
+                widget_declarations.update(declared_inputs.get("optional", {}))
+            for input_name, declaration in widget_declarations.items():
                 if input_name in serialized_names:
                     continue
                 input_type = declaration[0]
@@ -291,16 +339,12 @@ def test_cuda_research_examples_stage_every_operator_source_explicitly() -> None
             assert nodes[origin_id]["type"] == "LatentDeckToolkitExplicitDeviceTransfer"
 
     template = json.loads(
-        (WORKFLOW_DIRECTORY / "99_OPERATOR_DEVELOPER_TEMPLATE.json").read_text(
-            encoding="utf-8"
-        )
+        (WORKFLOW_DIRECTORY / "99_OPERATOR_DEVELOPER_TEMPLATE.json").read_text(encoding="utf-8")
     )
     nodes = {node["id"]: node for node in template["nodes"]}
     links = {link[0]: link for link in template["links"]}
     benchmark = next(
-        node
-        for node in template["nodes"]
-        if node["type"] == "LatentDeckToolkitOperatorBenchmark"
+        node for node in template["nodes"] if node["type"] == "LatentDeckToolkitOperatorBenchmark"
     )
     latent_input = next(value for value in benchmark["inputs"] if value["name"] == "latent")
     assert nodes[links[latent_input["link"]][1]]["type"] == (
