@@ -29,13 +29,15 @@ Push-Location $repositoryRoot
 try {
     Invoke-Checked { & $pnpm --version } 'pnpm version'
     Invoke-Checked { cargo fmt --all -- --check } 'Rust format'
-    Invoke-Checked { cargo clippy --workspace --all-targets -- -D warnings } 'Rust Clippy'
-    Invoke-Checked { cargo test --workspace --all-targets } 'Rust tests'
     Invoke-Checked { & $pnpm install --frozen-lockfile } 'pnpm lock/install'
     Invoke-Checked { & $pnpm format:check } 'Frontend format'
     Invoke-Checked { & $pnpm lint } 'Svelte/TypeScript checks'
     Invoke-Checked { & $pnpm test } 'Frontend tests'
     Invoke-Checked { & $pnpm build } 'Frontend builds'
+    # Tauri's generate_context! macro validates frontendDist during Rust
+    # compilation, so a genuinely clean clone must build both dist trees first.
+    Invoke-Checked { cargo clippy --workspace --all-targets -- -D warnings } 'Rust Clippy'
+    Invoke-Checked { cargo test --workspace --all-targets } 'Rust tests'
     Invoke-Checked { uv lock --check } 'uv lock'
     Invoke-Checked {
         uv sync --all-packages --all-extras --no-editable --locked `
