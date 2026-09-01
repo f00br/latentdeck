@@ -182,6 +182,10 @@ different checkpoint.
 Codec Pack manifest and integrity-catalog versions are independently versioned
 from the app, Worker Protocol, LC Spec, and H3 profile. LatentDeck `0.1.x`
 implements manifest/catalog version `1.0.0` and Worker Protocol `1`.
+`pack_version` and `adapter.adapter_version` are also independent canonical
+SemVer axes. A packager must report the version exposed by the bundled adapter;
+it must never copy `pack_version` into `adapter_version` merely because the pack
+is being updated.
 
 An unsupported version or compatibility range is a visible incompatibility,
 not an upgrade instruction. Installation, update, and removal remain separate

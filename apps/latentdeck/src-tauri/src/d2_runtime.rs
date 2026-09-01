@@ -4186,6 +4186,7 @@ impl D2Runtime {
 
 #[cfg(test)]
 mod common_tests {
+    use crate::codec_pack_test_support::write_h3_pack;
     use latentdeck_cartridge::{
         manifest::{DType, Rational},
         profile::h3::H3CompatibilityKey,
@@ -4266,6 +4267,19 @@ mod common_tests {
         let view = backend.accept_rediscovery(D2BackendController::discover(&[]));
         assert_eq!(view.state, "missing");
         assert!(backend.discovery_fault.is_none());
+    }
+
+    #[test]
+    fn backend_selects_newest_pack_without_coupling_adapter_version() {
+        let root = tempfile::tempdir().expect("codec pack root");
+        write_h3_pack(root.path(), "0.1.0");
+        write_h3_pack(root.path(), "0.1.1");
+
+        let backend = D2BackendController::discover(&[root.path().to_path_buf()]);
+        let pack = backend.codec_pack.expect("selected H3 Codec Pack");
+
+        assert_eq!(pack.manifest.pack_version, "0.1.1");
+        assert_eq!(pack.manifest.adapter.adapter_version, "0.1.0");
     }
 
     #[test]

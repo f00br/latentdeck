@@ -11,6 +11,8 @@ use latentdeck_native_output::HostFullscreenController;
 use tauri::{AppHandle, Manager as _, RunEvent, State};
 use tauri_plugin_dialog::DialogExt as _;
 
+#[cfg(test)]
+mod codec_pack_test_support;
 mod d2_capture_host;
 mod d2_runtime;
 mod d2_state;

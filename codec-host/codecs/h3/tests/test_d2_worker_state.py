@@ -190,6 +190,18 @@ def codec_payload() -> dict[str, object]:
     }
 
 
+def test_codec_upgrade_keeps_pack_and_adapter_versions_independent() -> None:
+    state, _decoder, _rings = configured_state(initialize=False)
+    state.handle("session.configure", session_payload())
+    payload = codec_payload()
+    payload["pack_version"] = "0.1.1"
+
+    loaded = state.handle("codec.load", payload)
+
+    assert loaded["pack_version"] == "0.1.1"
+    assert loaded["adapter_version"] == "0.1.0"
+
+
 def configured_state(
     *, initialize: bool = True, source_a_audio: Any = None, source_b_audio: Any = None
 ) -> tuple[H3D2WorkerState, FakeDecoder, dict[str, FakeRing]]:

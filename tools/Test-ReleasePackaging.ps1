@@ -552,6 +552,15 @@ try {
         -TrustedArchiveSha256 $hash011 `
         -InstallRoot $installRoot | Out-Null
 
+    $installedManifest011 = Get-Content -Raw -LiteralPath (
+        Join-Path $installRoot 'org.latentdeck.h3/0.1.1/codec-pack.json'
+    ) | ConvertFrom-Json -Depth 20
+    if ($installedManifest011.pack_version -cne '0.1.1' -or
+        $installedManifest011.adapter.adapter_id -cne 'org.latentdeck.h3' -or
+        $installedManifest011.adapter.adapter_version -cne '0.1.0') {
+        throw 'Codec Pack and H3 adapter versions must remain independently versioned.'
+    }
+
     $packParent = Join-Path $installRoot 'org.latentdeck.h3'
     if (-not (Test-Path -LiteralPath (Join-Path $packParent '0.1.0') -PathType Container) -or
         -not (Test-Path -LiteralPath (Join-Path $packParent '0.1.1') -PathType Container)) {

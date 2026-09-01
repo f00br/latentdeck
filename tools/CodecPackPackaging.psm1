@@ -1343,8 +1343,8 @@ function Test-H3CodecPackDirectory {
     if ($manifest.platform.os -cne 'windows' -or $manifest.platform.arch -cne 'x86_64') {
         throw 'Codec Pack platform must be Windows x86-64.'
     }
-    if ($manifest.adapter.adapter_id -cne 'org.latentdeck.h3' -or
-        $manifest.adapter.adapter_version -cne $manifest.pack_version) {
+    Assert-SemVer -Value ([string]$manifest.adapter.adapter_version) -Name 'adapter_version'
+    if ($manifest.adapter.adapter_id -cne 'org.latentdeck.h3') {
         throw 'Codec Pack adapter identity is inconsistent.'
     }
     if ($manifest.worker.executable -cne 'runtime/python.exe' -or

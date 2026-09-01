@@ -107,6 +107,25 @@ fn discovers_a_fully_integrity_checked_h3_pack() {
 }
 
 #[test]
+fn player_selects_newest_pack_without_coupling_adapter_version() {
+    let root = TempDir::new().expect("root");
+    write_pack(root.path(), "org.latentdeck.h3", "0.1.0");
+    write_pack(root.path(), "org.latentdeck.h3", "0.1.1");
+
+    let packs =
+        discover_codec_packs(&[root.path().to_path_buf()], "0.1.0").expect("validated packs");
+    assert!(
+        packs
+            .iter()
+            .all(|pack| pack.manifest.adapter.adapter_version == "0.1.0")
+    );
+
+    let player = PlayerCoordinator::discover(&[root.path().to_path_buf()], "0.1.0")
+        .expect("player codec discovery");
+    assert_eq!(player.view().codec.pack_version.as_deref(), Some("0.1.1"));
+}
+
+#[test]
 fn player_exposes_decoder_provenance_and_recovers_after_incompatible_selection() {
     let root = TempDir::new().expect("root");
     let pack_path = write_pack(root.path(), "org.latentdeck.h3", "0.1.0");

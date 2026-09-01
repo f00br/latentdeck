@@ -5,7 +5,8 @@ param(
 
     [string]$DecoderAssetContractPath,
 
-    [string]$PackVersion = '0.1.0',
+    [Parameter(Mandatory)]
+    [string]$PackVersion,
 
     [string]$OutputDirectory,
 

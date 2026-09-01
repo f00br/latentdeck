@@ -18,7 +18,8 @@ param(
     [Parameter(Mandatory)]
     [string]$DecoderAssetContractPath,
 
-    [string]$PackVersion = '0.1.0',
+    [Parameter(Mandatory)]
+    [string]$PackVersion,
 
     [string]$OutputDirectory,
 
@@ -211,7 +212,7 @@ try {
         }
         adapter = [ordered]@{
             adapter_id = 'org.latentdeck.h3'
-            adapter_version = $PackVersion
+            adapter_version = '0.1.0'
         }
         integrity = [ordered]@{
             catalog_path = 'integrity.json'

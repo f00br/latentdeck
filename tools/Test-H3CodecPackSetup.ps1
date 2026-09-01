@@ -653,13 +653,26 @@ try {
     $fullPackBuilderCommand = Get-Command (
         Join-Path $PSScriptRoot 'Build-H3CodecPack.ps1'
     )
+    $lowLevelPackBuilderCommand = Get-Command (
+        Join-Path $PSScriptRoot 'New-H3CodecPack.ps1'
+    )
     $setupBuilderCommand = Get-Command (
         Join-Path $PSScriptRoot 'Build-H3CodecPackInstaller.ps1'
     )
+    $fullPackVersionIsMandatory = @(
+        $fullPackBuilderCommand.Parameters['PackVersion'].Attributes |
+            Where-Object { $_ -is [System.Management.Automation.ParameterAttribute] }
+    ).Mandatory -contains $true
+    $lowLevelPackVersionIsMandatory = @(
+        $lowLevelPackBuilderCommand.Parameters['PackVersion'].Attributes |
+            Where-Object { $_ -is [System.Management.Automation.ParameterAttribute] }
+    ).Mandatory -contains $true
     Assert-Condition `
         -Condition (
             $fullPackBuilderCommand.Parameters.ContainsKey('AllowNetwork') -and
             $fullPackBuilderCommand.Parameters.ContainsKey('SigningCommand') -and
+            $fullPackVersionIsMandatory -and
+            $lowLevelPackVersionIsMandatory -and
             -not $setupBuilderCommand.Parameters.ContainsKey('LifecycleHelperPath') -and
             -not $setupBuilderCommand.Parameters.ContainsKey('ValidatedPackRoot')
         ) `

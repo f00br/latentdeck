@@ -183,6 +183,18 @@ def codec_payload() -> dict[str, object]:
     }
 
 
+def test_codec_upgrade_keeps_pack_and_adapter_versions_independent() -> None:
+    state, _decoder, _rings = configured_state(initialize=False)
+    state.handle("session.configure", session_payload())
+    payload = codec_payload()
+    payload["pack_version"] = "0.1.1"
+
+    loaded = state.handle("codec.load", payload)
+
+    assert loaded["pack_version"] == "0.1.1"
+    assert loaded["adapter_version"] == "0.1.0"
+
+
 def load_payload() -> dict[str, object]:
     result: dict[str, object] = {
         "deck_id": "main-q4",

@@ -174,6 +174,50 @@ def decode_payload(cycle: int, generation: int = 1) -> dict[str, object]:
     }
 
 
+def test_codec_upgrade_keeps_pack_and_adapter_versions_independent() -> None:
+    decoder = FakeDecoder()
+    state = H3WorkerState(
+        decoder_factory=lambda *_: decoder,
+        source_loader=lambda *_: source(),
+        ring_factory=lambda *_: FakeRing(),
+        runtime_inspector=lambda: RuntimeInspection(
+            "2.13.0+cu130", False, None, (RuntimeDevice(0, "Synthetic device", 12),)
+        ),
+    )
+    state.handle(
+        "session.configure",
+        {
+            "selected_protocol_version": 1,
+            "app_version": "0.1.0",
+            "heartbeat_interval_ms": 1000,
+            "heartbeat_hard_timeout_ms": 10000,
+            "max_frame_bytes": 262144,
+            "max_inflight_decode_batches": 1,
+        },
+    )
+
+    loaded = state.handle(
+        "codec.load",
+        {
+            "pack_id": "org.latentdeck.h3",
+            "pack_version": "0.1.1",
+            "adapter_id": "org.latentdeck.h3",
+            "profile": {
+                "codec_family": "minimax_h3",
+                "profile": "h3_av_latent",
+                "profile_version": "0.1.0",
+            },
+            "device_ordinal": 0,
+            "assets": [
+                {"asset_id": "taeh3", "path": "weight", "sha256": "0" * 64, "byte_length": 1}
+            ],
+        },
+    )
+
+    assert loaded["pack_version"] == "0.1.1"
+    assert loaded["adapter_version"] == "0.1.0"
+
+
 def test_prime_and_steady_cycles_are_ordered_and_bounded() -> None:
     state, decoder, ring = configured_state()
 

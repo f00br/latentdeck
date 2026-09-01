@@ -134,6 +134,20 @@ Every payload file is bound by byte length and SHA-256 in `integrity.json`.
 Windows x64 compatibility, app range `>=0.1.0,<0.2.0`, Worker Protocol 1, LC
 Spec 0.1, H3 Profile 0.1, and external decoder metadata.
 
+The public `0.1` release keeps these version axes explicit:
+
+| Axis | Version |
+| --- | --- |
+| Codec Pack, setup, and distribution artifact | `0.1.1` |
+| LatentDeck apps, H3 adapter/worker, Python/Rust packages, and D2/Q4 operators | `0.1.0` |
+| LC Spec and H3 profile | `0.1.0` |
+| Worker Protocol | `1` |
+| Codec Pack manifest and integrity catalog | `1.0.0` |
+
+The pack version identifies the immutable distribution payload; it is not an
+alias for the bundled adapter version. In particular, the `0.1.1` pack must
+declare the adapter version actually exposed by Player, D2, and Q4: `0.1.0`.
+
 All three Python entrypoints use `-B`, and Core independently fixes
 `PYTHONDONTWRITEBYTECODE=1` for every worker process. A successful playback or
 synthesis session therefore cannot create `__pycache__` files inside the

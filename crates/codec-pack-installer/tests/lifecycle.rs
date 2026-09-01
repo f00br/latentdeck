@@ -71,7 +71,7 @@ fn write_pack_archive_as(
             "working_directory": "bin",
             "probe_timeout_ms": 5000
         },
-        "adapter": {"adapter_id": "org.latentdeck.h3", "adapter_version": version},
+        "adapter": {"adapter_id": "org.latentdeck.h3", "adapter_version": "0.1.0"},
         "integrity": {"catalog_path": "catalog.json", "catalog_sha256": sha256(&catalog_bytes)},
         "external_assets": [{
             "asset_id": "taeh3",
