@@ -39,12 +39,12 @@ repository contains:
 - automatic Library-to-Deck invalidation and explicit hot insertion of newly
   captured cartridges through a bounded worker replacement;
 - Spout2 output, structured diagnostics, database backup/migration, Windows
-  application packaging, independent Codec Pack lifecycle tooling, and SBOM
-  generation;
+  application packaging, an independent current-user H3 Codec Pack setup and
+  exact-version uninstall lifecycle, and SBOM generation;
 - a policy for local-only, non-binding interface references.
 
 The owner-UAT binary baseline is a clean, unsigned local RC built from commit
-`2f00a4b`. It does not bundle a Codec Pack, decoder, model weight, or cartridge.
+`9fc7caa`. It does not bundle a Codec Pack, decoder, model weight, or cartridge.
 Strict four-source Q4 acceptance, the owner-approved six-minute D2/Q4 stability
 suite, application playback, portrait and landscape presentation, and Spout2
 were verified locally. Clean-machine installer/Codec Pack lifecycle, signing,
@@ -80,6 +80,28 @@ cartridges.
 
 MiniMax H3 is the first intended codec profile. It is not the definition of
 `.lc`, and H3 weights or cartridges are not distributed from this source tree.
+
+## Windows installation boundary
+
+LatentDeck App, LatentPlayer, and the H3 Codec Pack are three independent
+Windows installations. Installing or removing one does not install, replace,
+or remove either of the others.
+
+The public H3 path is user-facing: keep
+`LatentDeck-H3-CodecPack-<version>-setup.exe` beside the exact matching
+`LatentDeck-H3-CodecPack-<version>-windows-x64.zip`, then run the setup. The
+large ZIP remains adjacent rather than being embedded in the small setup, and
+the setup accepts only the filename, byte length, SHA-256, pack identity, and
+version bound into that executable. It installs for the current user at the
+fixed `%LOCALAPPDATA%\LatentDeck\CodecPacks` root and registers exact-version
+removal in Windows Installed Apps. It needs no administrator elevation,
+network access, system Python, or PowerShell.
+
+The Codec Pack does not contain a decoder weight or model. After installation,
+select an accepted external TAEH3 decoder explicitly in Codec Manager. The
+PowerShell lifecycle scripts remain engineering and recovery tools; they are
+not part of normal public onboarding. See the
+[H3 Codec Pack runbook](docs/release/H3_CODEC_PACK.md).
 
 ## Start here
 

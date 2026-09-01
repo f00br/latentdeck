@@ -11,7 +11,9 @@ param(
 
     [switch]$AllowNetwork,
 
-    [switch]$RequireCuda
+    [switch]$RequireCuda,
+
+    [string]$SigningCommand
 )
 
 $ErrorActionPreference = 'Stop'
@@ -265,27 +267,116 @@ try {
         -PackRoot $expanded `
         -ReceiptPath $archiveSmokePath `
         -RequireCuda:$RequireCuda | Out-Null
+    Remove-SafeTemporaryDirectory `
+        -ParentPath $workRoot `
+        -CandidatePath $expanded `
+        -RequiredLeafPrefix 'expanded'
 
-    $installRoot = Join-Path $workRoot 'installed'
     $archiveHash = (
         Get-FileHash -LiteralPath $archivePath -Algorithm SHA256
     ).Hash.ToLowerInvariant()
-    & (Join-Path $PSScriptRoot 'Install-H3CodecPack.ps1') `
-        -ArchivePath $archivePath `
-        -TrustedArchiveSha256 $archiveHash `
-        -InstallRoot $installRoot | Out-Null
-    $installedVersion = Join-Path $installRoot "org.latentdeck.h3/$PackVersion"
-    $installedSmokePath = Join-Path $stagedVersion 'installed-runtime-smoke.json'
-    & (Join-Path $PSScriptRoot 'Test-H3CodecPackRuntime.ps1') `
-        -PackRoot $installedVersion `
-        -ReceiptPath $installedSmokePath `
-        -RequireCuda:$RequireCuda | Out-Null
-    & (Join-Path $PSScriptRoot 'Uninstall-H3CodecPack.ps1') `
-        -PackVersion $PackVersion `
-        -InstallRoot $installRoot | Out-Null
-    if (Test-Path -LiteralPath $installedVersion) {
-        throw 'Isolated Codec Pack uninstall left the installed version behind.'
+    $setupBuildParameters = @{
+        ArchivePath = $archivePath
+        PackVersion = $PackVersion
+        OutputDirectory = $stagedVersion
+        AllowNetwork = $AllowNetwork.IsPresent
     }
+    if (-not [string]::IsNullOrWhiteSpace($SigningCommand)) {
+        $setupBuildParameters.SigningCommand = $SigningCommand
+    }
+    $setupOutput = @(
+        & (Join-Path $PSScriptRoot 'Build-H3CodecPackInstaller.ps1') `
+            @setupBuildParameters
+    )
+    if ($setupOutput.Count -ne 1 -or
+        -not (Test-Path -LiteralPath ([string]$setupOutput[0]) -PathType Leaf)) {
+        throw 'Codec Pack setup builder did not return exactly one setup path.'
+    }
+    $setupPath = (Resolve-Path -LiteralPath ([string]$setupOutput[0])).Path
+    $helperPath = Join-Path `
+        $artifactsRoot `
+        'codec-pack-installer-target/x86_64-pc-windows-msvc/release/latentdeck-codec-pack-installer.exe'
+    if (-not (Test-Path -LiteralPath $helperPath -PathType Leaf)) {
+        throw 'Codec Pack setup builder did not retain its native lifecycle helper.'
+    }
+
+    $isolatedLocalAppData = Join-Path $workRoot 'installer-local-app-data'
+    $isolatedProgramData = Join-Path $workRoot 'installer-program-data'
+    $savedLocalAppData = $env:LOCALAPPDATA
+    $savedProgramData = $env:PROGRAMDATA
+    try {
+        $env:LOCALAPPDATA = $isolatedLocalAppData
+        $env:PROGRAMDATA = $isolatedProgramData
+        Invoke-Checked `
+            -Executable $helperPath `
+            -Context 'native setup-helper install' `
+            -SuppressOutput `
+            -Arguments @(
+            '--local-app-data', $isolatedLocalAppData,
+            '--program-data', $isolatedProgramData,
+            'install',
+            '--archive', $archivePath,
+            '--expected-sha256', $archiveHash,
+            '--expected-length', [string](Get-Item -LiteralPath $archivePath).Length,
+            '--expected-version', $PackVersion
+        )
+        $installedVersion = Join-Path `
+            $isolatedLocalAppData `
+            "LatentDeck/CodecPacks/org.latentdeck.h3/$PackVersion"
+        $installedSmokePath = Join-Path $stagedVersion 'installed-runtime-smoke.json'
+        & (Join-Path $PSScriptRoot 'Test-H3CodecPackRuntime.ps1') `
+            -PackRoot $installedVersion `
+            -ReceiptPath $installedSmokePath `
+            -RequireCuda:$RequireCuda | Out-Null
+        Invoke-Checked `
+            -Executable $helperPath `
+            -Context 'native setup-helper uninstall' `
+            -SuppressOutput `
+            -Arguments @(
+            '--local-app-data', $isolatedLocalAppData,
+            '--program-data', $isolatedProgramData,
+            'uninstall', '--version', $PackVersion
+        )
+        if (Test-Path -LiteralPath $installedVersion) {
+            throw 'Native setup-helper uninstall left the installed version behind.'
+        }
+    } finally {
+        $env:LOCALAPPDATA = $savedLocalAppData
+        $env:PROGRAMDATA = $savedProgramData
+    }
+
+    $setupReceiptPath = Join-Path $stagedVersion 'setup-receipt.json'
+    $setupReceipt = Get-Content -Raw -LiteralPath $setupReceiptPath |
+        ConvertFrom-Json -Depth 100
+    if ($setupReceipt.native_helper_lifecycle_smoke -cne 'pending' -or
+        $setupReceipt.windows_setup_lifecycle -cne 'not_run_clean_machine_gate' -or
+        $setupReceipt.setup.name -cne (Split-Path -Leaf $setupPath) -or
+        $setupReceipt.payload.sha256 -cne $archiveHash) {
+        throw 'Codec Pack setup receipt does not match the completed native-helper smoke metadata.'
+    }
+    $setupReceipt.native_helper_lifecycle_smoke = 'passed'
+    Write-JsonFile -Value $setupReceipt -Path $setupReceiptPath
+    $setupReceiptHash = (
+        Get-FileHash -LiteralPath $setupReceiptPath -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    $setupSumsPath = Join-Path $stagedVersion 'SHA256SUMS.txt'
+    $setupSumLines = @(Get-Content -LiteralPath $setupSumsPath)
+    $receiptSumIndexes = @(
+        for ($index = 0; $index -lt $setupSumLines.Count; $index += 1) {
+            if ($setupSumLines[$index] -match '  setup-receipt\.json$') {
+                $index
+            }
+        }
+    )
+    if ($receiptSumIndexes.Count -ne 1) {
+        throw 'Codec Pack checksum manifest does not contain one setup receipt entry.'
+    }
+    $setupSumLines[$receiptSumIndexes[0]] = "$setupReceiptHash  setup-receipt.json"
+    [System.IO.File]::WriteAllText(
+        $setupSumsPath,
+        ($setupSumLines -join "`n") + "`n",
+        [System.Text.UTF8Encoding]::new($false)
+    )
 
     Write-JsonFile -Value ([ordered]@{
         schema_version = 1
@@ -297,6 +388,14 @@ try {
             byte_length = [int64](Get-Item -LiteralPath $archivePath).Length
             sha256 = $archiveHash
         }
+        setup = [ordered]@{
+            name = Split-Path -Leaf $setupPath
+            byte_length = [int64](Get-Item -LiteralPath $setupPath).Length
+            sha256 = [string]$setupReceipt.setup.sha256
+            payload_delivery = 'adjacent_hash_bound_zip'
+            native_helper_lifecycle_smoke = 'passed'
+            windows_setup_lifecycle = [string]$setupReceipt.windows_setup_lifecycle
+        }
         cpython = [ordered]@{
             version = [string]$lock.python_runtime.version
             archive_sha256 = $runtimeArchiveHash
@@ -304,13 +403,14 @@ try {
         dependency_inventory = 'DEPENDENCY_INVENTORY.json'
         sbom = 'SBOM.cdx.json'
         archive_runtime_smoke = 'passed'
-        isolated_install_smoke = 'passed'
-        isolated_uninstall = 'passed'
+        isolated_native_install_smoke = 'passed'
+        isolated_native_uninstall = 'passed'
         cuda_required = $RequireCuda.IsPresent
         contains_model_weights = $false
         contains_generator = $false
         contains_comfy = $false
-        publisher_signature = 'not_present_local_rc'
+        signing = $setupReceipt.signing
+        publisher_signature = [string]$setupReceipt.publisher_signature
     }) -Path (Join-Path $stagedVersion 'distributable-proof.json')
 
     [System.IO.Directory]::CreateDirectory($outputRoot) | Out-Null

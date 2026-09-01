@@ -9,18 +9,21 @@ closeout. The owner confirms that the broader product works as stated,
 including Library refresh, hot insertion, and LatentPlayer preparation. Final
 retest remains open for two reproduced delivery defects: the prior installed D2
 worker ended latent Live Capture after one carrier loop, and D2/Q4 decoded MP4
-pixels were vertically inverted.
+pixels were vertically inverted. Release onboarding also remains open until the
+new public H3 Codec Pack setup and exact-version Windows uninstall lifecycle
+are built and accepted; engineer-only PowerShell commands are not sufficient
+for a public `0.1` release.
 
 ## Previous owner-UAT binary baseline
 
 The previous unsigned local application RC was built from clean commit
-`2aa5c304e8d147e42820333f93b42be4181bb7b7` on `main`.
+`9fc7caa02c0edcfcf45bd29207191cc2b7bb16c0` on `main`.
 
 | Artifact | SHA-256 |
 | --- | --- |
-| `LatentDeck-0.1.0-windows-x64-unsigned-setup.exe` | `b1e6f1a0ad8bc14df2a856dcecae9584b8fd8e9de8b3a7ae445b0754af83f78f` |
-| `LatentPlayer-0.1.0-windows-x64-unsigned-setup.exe` | `51b73d6165a3708a159edc958d0d6686ead2d60ebba3051618203c31889241c0` |
-| `latentdeck-0.1.0-sbom.cdx.json` | `7c6ab2a1451ed0e0f094e16cb0f55604f6366f1614719d6d711079e02358305c` |
+| `LatentDeck-0.1.0-windows-x64-unsigned-setup.exe` | `5734f73ce68e50c4e1c8e9450867dd379da603bcc85e42279ba6d17a328254a3` |
+| `LatentPlayer-0.1.0-windows-x64-unsigned-setup.exe` | `0c4a58fdedc92fc3bd4d3242f9ff22c6350e047e064286a0a2f8810abf3e7458` |
+| `latentdeck-0.1.0-sbom.cdx.json` | `492a5645809c6011c8946ae678367eee8268a773d734e439a377f67f79613203` |
 | `THIRD_PARTY_NOTICES.md` | `f99db3adcf79512f4ee8f753b168919a42e475fc46aefe70ef3751db48232991` |
 
 The schema-3 receipt records `git_dirty=false`, 478 files in the public source
@@ -32,19 +35,21 @@ The documentation handoff was written after this binary set. This RC remains
 the previous behavior baseline for owner UAT, but any accepted source change
 requires a fresh clean RC before publication review.
 
-### Current post-baseline source candidate (owner acceptance open)
+### Current owner-UAT application behavior (Codec Pack retest open)
 
-The `2aa5c30` application binary contains the four primary fixes listed below,
-but its independently installed Codec Pack remained an older source snapshot:
+The `9fc7caa` application artifact set and corresponding source contain the
+primary corrections below. The independently installed Codec Pack remained an
+older source snapshot, so the D2 worker correction was not delivered by those
+application installers:
 
 - Current D2 and Q4 worker source preserves Live Capture across expected
   automatic source-loop reset barriers and remains bounded by explicit Stop and
   the matching validated spool limits. The stale installed D2 `0.1.0` pack did
   not contain this source and is not valid evidence for that behavior.
 - D2/Q4 decoded output can be saved as no-clobber, video-only H.264 MP4 at
-  intrinsic geometry and 24 fps. The current source candidate additionally
-  preserves top-down row order before Media Foundation encoding; an
-  asymmetric-row regression test catches vertical inversion.
+  intrinsic geometry and 24 fps. The application binary preserves top-down row
+  order before Media Foundation encoding; an asymmetric-row regression test
+  catches vertical inversion.
 - Library invalidation refreshes active Deck source options without an Active
   Collection toggle, while preserving loaded and edited draft identities.
 - Finished captures can be inserted explicitly into D2 A/B or Q4 A/B/C/D by a
@@ -56,10 +61,10 @@ but its independently installed Codec Pack remained an older source snapshot:
   open of a completed cartridge. Conversion is bound to the preflight payload
   SHA-256; a subsequently changed source fails without writing its destination.
 
-The owner accepted the contextual action not represented by the artifact hashes
-above: when a next-load slot differs from its currently playing identity, D2
-and Q4 expose `Load + Play`, which applies the complete compatible draft and
-starts the requested slot. Matching identities retain ordinary transport-only
+The same application binary includes the owner-accepted contextual action: when
+a next-load slot differs from its currently playing identity, D2 and Q4 expose
+`Load + Play`, which applies the complete compatible draft and starts the
+requested slot. Matching identities retain ordinary transport-only
 `Play`/`Pause` behavior.
 
 Focused Rust, Python, and frontend contract tests cover these boundaries. The
@@ -168,9 +173,21 @@ pending**, not verified by those synthetic checks.
   pack contains no model weight, generator, ComfyUI, cartridge, or private
   media; the decoder asset remains an explicit external selection.
 - That immutable `0.1.0` pack predates the D2 loop-preservation source change.
-  It is retained only as rollback. The next owner-UAT delivery must build and
-  install a new `0.1.1` pack from the same clean final source commit; same-version
-  overwrite remains forbidden.
+  It contains the reproduced D2 loop defect, is not a valid rollback candidate,
+  and must be removed from the owner test machine. It is historical evidence
+  only and must not be offered as a public artifact.
+- The next owner-UAT delivery must build the corrected immutable `0.1.1` pack
+  and its `LatentDeck-H3-CodecPack-0.1.1-setup.exe` from the same clean final
+  source commit. The exact matching
+  `LatentDeck-H3-CodecPack-0.1.1-windows-x64.zip` must remain adjacent to setup.
+  The current-user setup is offline, has a fixed LocalAppData destination, and
+  requires no UAC, PowerShell, system Python, network access, decoder, or model.
+- Setup and payload hashes, source identity, toolchain, and lifecycle status
+  must be bound by path-free receipts and `SHA256SUMS.txt`. Setup helpers,
+  uninstallers, and receipts remain outside the integrity-closed pack
+  directory. Windows Installed Apps removes one exact version; immutable
+  side-by-side installation remains capped at 16 versions and never overwrites
+  another version.
 - Application packaging binds both independent NSIS installers, all three lock
   files, Spout2 provenance/license, the SBOM, and third-party notices in one
   schema-3 receipt and checksum set.
@@ -183,6 +200,11 @@ Use the [master-user test guide](MASTER_USER_TEST.md). At this handoff:
 - the fresh candidate must select H3 Codec Pack `0.1.1`, keep D2 capture active
   across at least three carrier loops until manual Stop, cross one short Q4 loop,
   and produce upright D2 and Q4 MP4 files;
+- the H3 public setup must reject a missing or mismatched adjacent ZIP without
+  a discoverable or partial pack, maintenance tree, or Installed Apps entry,
+  install `0.1.1` without developer prerequisites or elevation,
+  register exact-version removal in Windows Installed Apps, and uninstall only
+  that pack version while preserving both applications and user data;
 - already accepted heavy CUDA, six-minute stability, embedded-output,
   fullscreen, aspect, source-identity, and Spout paths should be repeated only
   when a relevant change or concrete regression requires it;
@@ -192,9 +214,11 @@ Use the [master-user test guide](MASTER_USER_TEST.md). At this handoff:
 
 - **UAT closeout:** resolve or explicitly accept every owner finding and the
   Comfy gallery item, then rebuild the clean RC from the final commit.
-- **Clean-machine lifecycle:** verify install, maintenance/upgrade, downgrade
-  behavior, independent app removal, Codec Pack lifecycle, recovery, and Spout
-  on a separate clean Windows 11 x64 NVIDIA system without ComfyUI.
+- **Clean-machine lifecycle:** verify the signed application installers and H3
+  setup plus adjacent payload, maintenance/upgrade/downgrade behavior,
+  independent app removal, exact-version Codec Pack removal, recovery, and
+  Spout on a separate non-admin Windows 11 x64 NVIDIA account without
+  PowerShell 7, system Python, ComfyUI, or setup-time network access.
 - **Security contact and trust:** configure a private vulnerability-reporting
   channel and an authenticated publisher trust/signing path.
 - **Publication review:** inspect the exact Git archive and history, complete

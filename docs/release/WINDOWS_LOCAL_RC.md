@@ -17,7 +17,10 @@ Both use current-user NSIS installation, carry version `0.1.0`, set
 rejects silent `/S` downgrades; an interactive explicit
 uninstall-before-install downgrade remains possible as documented below. They
 do not contain a Codec Pack, decoder weights, cartridges, raw latents, private
-media, or updater artifacts.
+media, or updater artifacts. The H3 Codec Pack has a separate public
+current-user setup and adjacent payload defined in
+[H3 Codec Pack packaging and lifecycle](H3_CODEC_PACK.md); it is not a third
+application bundle and is never folded into either Tauri installer.
 
 ## Prerequisites
 
@@ -170,7 +173,8 @@ release acceptance test because it hides the interactive maintenance choices.
 
 Remove each app independently through Windows Installed Apps or its generated
 uninstaller. Application uninstall is not Codec Pack uninstall. The shared H3
-Codec Pack has its own version-scoped removal command.
+Codec Pack has its own version-scoped Windows Installed Apps entry and
+uninstaller outside the integrity-closed pack directory.
 
 ## Acceptance matrix
 
@@ -190,18 +194,24 @@ hardware and without ComfyUI:
 7. Attempt a silent `/S` downgrade and verify that it is rejected. Then run the
    same older installer interactively and verify that it warns and requires an
    explicit uninstall-before-install choice before the downgrade can proceed.
-8. Install the H3 Codec Pack separately, select an external decoder weight,
-   then test playback, D2/Q4, native output, and Spout receiver shutdown.
+8. Keep `LatentDeck-H3-CodecPack-0.1.1-setup.exe` beside its exact matching
+   `LatentDeck-H3-CodecPack-0.1.1-windows-x64.zip`, then install through setup
+   without elevation, PowerShell, system Python, a model, or setup-time network
+   access. Select an external decoder weight, then test playback, D2/Q4, native
+   output, and Spout receiver shutdown.
 9. Remove each application and prove the independently installed Codec Pack is
-   unaffected; then remove the Codec Pack with its own tool.
+   unaffected; then remove only Codec Pack `0.1.1` through its Windows Installed
+   Apps entry and prove both applications and user data remain.
 
 ## Current publication boundary
 
 The local builders and synthetic packaging lifecycle are automatable. A real
-clean-machine install, NVIDIA runtime test, Spout receiver proof, and
+clean-machine install, including the H3 setup/adjacent-payload and exact-version
+uninstall path, NVIDIA runtime test, Spout receiver proof, and
 install/update/uninstall matrix are external acceptance gates and must be
 recorded only after they are actually run. These installers are intentionally
-unsigned; Windows may show an unknown-publisher warning. Code signing remains
+unsigned; Windows may show an unknown-publisher warning. Authenticated signing
+of the application installers, H3 setup, and its generated uninstaller remains
 a separate publication gate.
 
 No script in this path creates a Git tag, remote, release, upload, or updater

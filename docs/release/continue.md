@@ -5,13 +5,15 @@ This is the only current handoff for the repository.
 ## Last completed state
 
 - The previous owner-UAT application build is clean commit
-  `2aa5c304e8d147e42820333f93b42be4181bb7b7` on `main`. Its receipt says
+  `9fc7caa02c0edcfcf45bd29207191cc2b7bb16c0` on `main`. Its receipt says
   `git_dirty=false`; installer and SBOM hashes are recorded in
   [ACCEPTANCE_STATUS.md](ACCEPTANCE_STATUS.md).
 - Owner UAT is active. The owner confirms that the product otherwise works as
-  stated. Two final reproducible defects remain in the prior test set: D2
-  latent Live Capture stops after one carrier cycle, and decoded MP4 pixels are
-  vertically inverted.
+  stated. The prior test set reproduced D2 latent Live Capture stopping after
+  one carrier cycle and vertically inverted decoded MP4; their corrections
+  still require the affected owner retest in the next complete artifact set.
+  The owner also identified the missing public H3 Codec Pack setup as a release
+  blocker: engineer-only PowerShell installation is not acceptable onboarding.
 - Player, Library/Collections, LD-D2, LD-Q4, embedded native output, fullscreen,
   portrait and landscape aspect-fit presentation, source identity, Snapshot,
   capture hot insertion, decoded recording lifecycle, and Spout2 were already
@@ -23,12 +25,9 @@ This is the only current handoff for the repository.
 - Standalone conversion of an existing 16:9 H3 AV Safetensors source into a
   validated `.lc` passed while preserving payload bytes and geometry.
 
-The previous owner-UAT build addresses four owner-reported 0.1 release
-findings:
+The previous owner-UAT application build addresses four owner-reported 0.1
+release findings:
 
-- D2 Live Capture now continues across expected automatic source-loop reset
-  barriers instead of finishing at the first loop; arbitrary resets still
-  abort rather than silently joining unrelated latent state.
 - D2 and Q4 can record the intrinsic decoded sequence consumed by their
   presentation path as video-only H.264 MP4 at 24 fps. This output is separate
   from latent resampling, uses a bounded background encoder, never overwrites a
@@ -54,15 +53,18 @@ build:
   the complete compatible draft and starts the requested slot; ordinary
   `Play`/`Pause` remains transport-only when draft and runtime identities match.
 
-The two remaining defects have exact local diagnoses:
+The affected corrections and the public-onboarding gap have exact local
+diagnoses:
 
 - Both reported D2 cartridges fully validate but contain the same 107-slot,
   362-frame payload. The application was loading an independently installed H3
   Codec Pack `0.1.0` built before the D2 multi-loop correction. That pack still
-  finalizes on the first loop barrier. Current source already preserves D2 and
-  Q4 capture ownership across automatic loop resets, so the correction must be
-  delivered as a new immutable Codec Pack `0.1.1`; application installers do
-  not and must not replace Codec Packs.
+  stops capture at the first carrier reset. Current D2 worker source continues
+  Live Capture across expected automatic source-loop reset barriers while
+  arbitrary resets still abort rather than silently joining unrelated latent
+  state; those corrected worker bytes remain pending delivery and owner retest
+  in Codec Pack `0.1.1`; application installers do not and must not replace
+  Codec Packs.
 - The shared Media Foundation path declared positive top-down RGB32 stride but
   also reversed RGBA rows during channel packing. The current correction keeps
   top-down row order for both D2 and Q4. An asymmetric-row unit test covers the
@@ -70,31 +72,50 @@ The two remaining defects have exact local diagnoses:
 - The physical Codec Pack runtime smoke now exercises D2 and Q4 loop reset and
   resume transitions without a decoder, GPU, or payload. It fails on the stale
   installed D2 pack and must pass on the new pack before delivery.
+- The public H3 delivery must add a small
+  `LatentDeck-H3-CodecPack-0.1.1-setup.exe` beside the exact matching
+  `LatentDeck-H3-CodecPack-0.1.1-windows-x64.zip`. The user runs setup; no
+  PowerShell, system Python, network access, model download, UAC, custom path,
+  or preinstalled application is allowed. Setup installs to the fixed
+  current-user Codec Pack root, keeps all maintenance bytes outside the
+  integrity-closed pack directory, and registers exact-version removal in
+  Windows Installed Apps.
+- Pack versions remain immutable and may coexist side by side up to the Core
+  bound of 16 versions. The stale `0.1.0` pack contains the reproduced D2 loop
+  defect, is not a rollback, and must be removed rather than offered as a
+  recovery version.
 
 The source candidate containing this handoff is newer than that binary
-baseline. Any source change after `2aa5c30`, including these corrections,
+baseline. Any source change after `9fc7caa`, including this setup work,
 requires a fresh clean RC before publication review.
 
 ## Next action
 
-1. Commit the two corrections locally on `main`, delete the superseded RC clone,
-   and create one fresh short-path clone at that exact commit.
-2. From that clone, build both unsigned applications and the independent H3
-   Codec Pack as new SemVer `0.1.1`. Install `0.1.1` beside retained rollback
-   `0.1.0`, restart the applications, and confirm Codec Manager selected the
-   highest compatible version.
-3. Repeat only the affected owner-UAT slices: keep D2 Live Capture active across
+1. Finish the public H3 Codec Pack setup, native lifecycle helper, setup
+   receipts/checksums, focused tests, and this release documentation in the
+   primary checkout. Audit and commit the accepted candidate locally on `main`.
+2. Delete the superseded RC clone and create one fresh short-path clone at that
+   exact commit. From it, build both unsigned applications, corrected H3 Codec
+   Pack `0.1.1`, and `LatentDeck-H3-CodecPack-0.1.1-setup.exe`.
+3. Remove the known-defective local `0.1.0` pack. Keep the exact `0.1.1` payload
+   ZIP beside setup, install through setup, restart the applications, and
+   confirm Codec Manager selected `0.1.1`.
+4. Repeat only the affected owner-UAT slices: keep D2 Live Capture active across
    at least three carrier loops, manually stop it, and confirm visual `T` is
    greater than the carrier's 107 slots; repeat one short Q4 loop crossing; then
    record D2 and Q4 MP4 and confirm both are upright.
-4. If an affected slice regresses, fix it narrowly in the primary `main`
+5. Exercise the short public setup lifecycle: missing adjacent ZIP refusal,
+   successful current-user install, Installed Apps entry, exact-version
+   uninstall preserving both applications and user data, then reinstall for
+   continued UAT.
+6. If an affected slice regresses, fix it narrowly in the primary `main`
    checkout, rerun targeted tests, audit the staged candidate in a clean local
    clone, and commit locally. Do not push.
-5. If no new functional regression is waiting, add the ComfyUI all-nodes gallery
+7. If no new functional regression is waiting, add the ComfyUI all-nodes gallery
    described below and record its separate visual acceptance.
-6. After the owner accepts all corrections, rebuild both unsigned applications
-   from the final clean commit.
-7. Proceed to clean-machine lifecycle, signing, and publication only after the
+8. After the owner accepts all corrections, rebuild the full unsigned
+   application and Codec Pack artifact sets from the final clean commit.
+9. Proceed to clean-machine lifecycle, signing, and publication only after the
    owner explicitly authorizes those separate actions.
 
 ## Why this is next
@@ -109,6 +130,8 @@ and the separate gallery item are the remaining direct acceptance surfaces.
 
 - owner acceptance of D2/Q4 multi-loop capture from H3 Codec Pack `0.1.1` and
   upright D2/Q4 decoded MP4;
+- owner acceptance of the public H3 setup plus adjacent payload and
+  exact-version Windows Installed Apps removal;
 - the ComfyUI all-nodes gallery and visual proof;
 - a fresh clean RC after the final accepted source commit;
 - clean-machine lifecycle, private security contact, signing, and explicit
@@ -168,8 +191,11 @@ guard, apply the exact staged candidate to a clean local clone and audit there.
 - The all-nodes gallery opens cleanly and its strict registry test passes.
 - Targeted checks and the aggregate local-equivalent check pass at the final
   source commit.
-- A fresh clean, unsigned RC and its receipt bind that exact commit.
+- A fresh clean, unsigned RC plus H3 Codec Pack setup/payload set and their
+  receipts bind that exact commit. Setup requires its exact adjacent ZIP and
+  needs no PowerShell, system Python, network, model, or elevation.
 - Clean Windows lifecycle, release archive/history, SBOM/license, security
-  contact, and signing gates are recorded in the
+  contact, authenticated setup/uninstaller signing, and publication gates are
+  recorded in the
   [public release checklist](../repository/PUBLIC_RELEASE_CHECKLIST.md).
 - Publication still waits for a separate explicit owner command.

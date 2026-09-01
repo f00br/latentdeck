@@ -29,7 +29,7 @@ if ($Scope -eq 'AllUsers' -and [string]::IsNullOrWhiteSpace($InstallRoot)) {
 
 $lifecycleMutex = [System.Threading.Mutex]::new(
     $false,
-    'Local\LatentDeck.CodecPackLifecycle.org.latentdeck.h3'
+    'Global\LatentDeck.CodecPackLifecycle.org.latentdeck.h3'
 )
 $mutexHeld = $false
 try {

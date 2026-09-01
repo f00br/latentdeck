@@ -29,6 +29,54 @@ bytes never travel through that control channel.
 A cartridge cannot install or select a Codec Pack, adapter, model asset, or
 operator.
 
+## Public Windows installation
+
+The public Windows distribution for one pack version consists of exactly one
+small setup executable and its separately delivered large payload:
+
+```text
+LatentDeck-H3-CodecPack-<version>-setup.exe
+LatentDeck-H3-CodecPack-<version>-windows-x64.zip
+```
+
+The exact matching ZIP MUST remain beside the setup when the user runs it. The
+setup binds the expected payload filename, byte length, SHA-256, pack identity,
+and canonical SemVer; an absent, renamed, truncated, replaced, or mismatched
+payload MUST fail before a version becomes visible to discovery. An adjacent
+checksum file is transport evidence only and is not a substitute for the
+payload identity bound into an authenticated setup.
+
+The setup is offline and current-user only. It MUST NOT require administrator
+elevation, system Python, PowerShell, a network request, either application, a
+decoder weight, or any other model asset. The install destination is fixed at
+`%LOCALAPPDATA%\LatentDeck\CodecPacks\<pack_id>\<pack_version>`; the public
+setup exposes no arbitrary destination picker and does not install into the
+all-users root.
+
+Archive validation and extraction happen in a bounded staging directory on the
+same volume but outside every discovery root. Only a completely extracted and
+validated version may be atomically moved into discovery. Same-version bytes
+are immutable and MUST NOT be overwritten or silently repaired. At most 16
+versions of one pack identifier may be installed in one discovery root.
+Canonical versions may otherwise coexist side by side, and application
+selection of a compatible version remains independent from installation.
+
+The version directory is an integrity-closed tree: it contains only the two
+control files and the exact payload inventory bound by `integrity.json`.
+The native helper MUST be embedded in setup and its generated uninstaller and
+MUST NOT be installed as a mutable loose executable. Build receipts remain in
+the adjacent distribution artifact set and are not installed. The generated
+uninstaller and Windows maintenance metadata MUST remain in a version-scoped
+sibling maintenance root outside `CodecPacks`; adding any of these bytes to the
+version directory invalidates the pack.
+
+Each installed version has its own current-user Windows Installed Apps entry.
+Its uninstaller removes only that exact version and its maintenance entry; it
+MUST NOT remove another Codec Pack version, LatentDeck App, LatentPlayer,
+cartridges, or external decoder selection. The registry entry is Windows shell
+metadata, not an additional discovery source: the two filesystem roots above
+remain authoritative.
+
 ## Installation manifest
 
 `codec-pack.json` is a strict JSON object. Unknown fields are rejected. It
@@ -138,3 +186,9 @@ implements manifest/catalog version `1.0.0` and Worker Protocol `1`.
 An unsupported version or compatibility range is a visible incompatibility,
 not an upgrade instruction. Installation, update, and removal remain separate
 from the LatentDeck application lifecycle.
+
+Updates use a new canonical SemVer installed beside existing accepted versions.
+Rollback means removing the newer exact version so a retained, previously
+accepted compatible version can be selected; known-defective bytes are not a
+rollback candidate. A public setup never mutates a different installed
+version.

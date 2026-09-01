@@ -347,6 +347,31 @@ pub fn discover_codec_packs(
     Ok(packs)
 }
 
+/// Validate one already isolated Codec Pack directory.
+///
+/// This is the narrow installer boundary: callers are responsible for placing
+/// the candidate outside discovery and for checking its directory identity
+/// before publication. The same manifest, compatibility, reparse-point,
+/// physical-inventory, byte-length, and SHA-256 checks used by discovery are
+/// applied here.
+///
+/// # Errors
+///
+/// Returns a stable [`CodecPackError`] when the application version is not
+/// canonical `SemVer` or the candidate violates any Codec Pack contract.
+pub fn validate_codec_pack_directory(
+    root: &Path,
+    app_version: &str,
+) -> Result<ValidatedCodecPack, CodecPackError> {
+    let app_version = Version::parse(app_version).map_err(|_| {
+        CodecPackError::new(
+            CodecPackErrorCode::PackIncompatibleApp,
+            "application version is not canonical SemVer",
+        )
+    })?;
+    validate_codec_pack(root, &app_version)
+}
+
 /// Validate one user-selected external asset against an installed pack.
 ///
 /// The path is never inferred or scanned. The codec worker repeats the same

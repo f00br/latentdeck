@@ -4,6 +4,7 @@ members = [
   "apps/latentplayer/src-tauri",
   "crates/cartridge",
   "crates/cartridge-python",
+  "crates/codec-pack-installer",
   "crates/control",
   "crates/core",
   "crates/gpu",
@@ -28,6 +29,7 @@ bytes = "=1.12.1"
 bytemuck = { version = "=1.25.2", features = ["derive"] }
 clap = { version = "=4.6.6", features = ["derive"] }
 crc32fast = "=1.5.1"
+fs2 = "=0.4.3"
 getrandom = "=0.4.3"
 hex = "=0.4.3"
 memmap2 = "=0.9.11"
@@ -54,6 +56,7 @@ uuid = { version = "=1.26.0", features = ["serde", "v4", "v7"] }
 wgpu = "=30.0.1"
 windows = "=0.62.2"
 windows-sys = "=0.61.2"
+zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

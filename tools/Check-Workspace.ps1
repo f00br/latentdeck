@@ -6,6 +6,7 @@ Set-StrictMode -Version Latest
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $nodeRoot = & (Join-Path $PSScriptRoot 'Get-PinnedNode.ps1')
+$nsisRoot = & (Join-Path $PSScriptRoot 'Get-PinnedNsis.ps1') -AllowNetwork
 $env:PATH = "$nodeRoot;$env:PATH"
 $pnpm = Join-Path $nodeRoot 'pnpm.cmd'
 
@@ -59,6 +60,9 @@ try {
     } 'Codec Pack curator tests'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-LinkedDevCodecPack.ps1 } 'Linked development Codec Pack contract'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-ReleasePackaging.ps1 } 'Release packaging contract'
+    Invoke-Checked {
+        pwsh -NoProfile -File tools/Test-H3CodecPackSetup.ps1 -NsisRoot $nsisRoot
+    } 'H3 Codec Pack setup contract'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-DiagnosticBundle.ps1 } 'Diagnostic bundle contract'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-PublicTree.ps1 } 'Public-tree audit'
     Invoke-Checked { git diff --check } 'Working-tree whitespace'

@@ -5,7 +5,7 @@ not require knowledge of Rust, Python internals, or latent mathematics. Report
 what the product shows and does; the engineer can diagnose the implementation.
 
 The current owner-UAT binary baseline is the clean, unsigned local RC built from
-commit `2f00a4b`. It is not a published or signed release. The H3 Codec Pack,
+commit `9fc7caa`. It is not a published or signed release. The H3 Codec Pack,
 TAEH3 decoder weight, test cartridges, and Spout receiver are separate local
 test inputs and are not bundled in either application.
 
@@ -16,8 +16,8 @@ Use visually distinct inputs so a wrong source is immediately obvious:
 - at least two portrait cartridges;
 - at least two landscape cartridges;
 - one existing raw H3 AV `.safetensors` file for conversion;
-- the separately installed H3 Codec Pack and explicitly selected compatible
-  TAEH3 decoder asset;
+- the matching H3 Codec Pack setup and adjacent payload ZIP, plus an explicitly
+  selected compatible TAEH3 decoder asset;
 - the official Spout2 D3D12 receiver for output verification.
 
 It is acceptable to reuse cartridges in more than one Q4 slot for this
@@ -30,22 +30,50 @@ separate acceptance has already passed.
    Verify its receipt and checksums, then install LatentDeck App and
    LatentPlayer independently. The full procedure and artifact contract are in
    the [Windows RC runbook](WINDOWS_LOCAL_RC.md).
-2. Install the H3 Codec Pack separately by following the
-   [Codec Pack runbook](H3_CODEC_PACK.md). Installing or removing either app
-   must not install, replace, or remove the Codec Pack. For the correction
-   candidate described by the current handoff, confirm that Codec Manager
-   selects the newer `0.1.1` pack rather than the retained `0.1.0` rollback.
-3. Open Codec Manager, refresh discovery, and select the compatible external
-   TAEH3 decoder. Confirm the UI shows ready status plus the selected variant,
-   SHA-256 identity, source, and license. Repeat the status check in Player,
-   D2, and Q4.
-4. Keep the official D3D12 receiver available for the Spout section. The exact
+2. Keep `LatentDeck-H3-CodecPack-0.1.1-setup.exe` and the exact matching
+   `LatentDeck-H3-CodecPack-0.1.1-windows-x64.zip` in one folder, then run the
+   setup. It must install for the current user without UAC, a network request,
+   PowerShell, system Python, or either application already being installed.
+   Follow the [Codec Pack runbook](H3_CODEC_PACK.md) for the complete contract.
+3. Confirm Windows Installed Apps contains `LatentDeck H3 Codec Pack 0.1.1`.
+   Installing or removing either application must not install, replace, or
+   remove this entry or its pack. The old local `0.1.0` pack contains the D2
+   loop defect and is not a rollback; remove it through the documented
+   engineer recovery path if it remains on this owner-UAT machine.
+4. Restart both applications, open Codec Manager, refresh discovery, and
+   confirm the compatible `0.1.1` pack is selected. Select the compatible
+   external TAEH3 decoder. Confirm the UI shows ready status plus the selected
+   variant, SHA-256 identity, source, and license. Repeat the status check in
+   Player, D2, and Q4.
+5. Keep the official D3D12 receiver available for the Spout section. The exact
    tested upstream boundary is recorded in
    [Spout acceptance](../repository/SPOUT_ACCEPTANCE.md).
 
 If a pack or decoder is missing or incompatible, the application must explain
 that state and remain usable for Library/diagnostic actions. Do not work around
 it by copying a weight into an undocumented application directory.
+
+## H3 Codec Pack setup lifecycle
+
+Perform this short lifecycle once on a disposable current-user test account;
+reinstall `0.1.1` afterward for the functional sections below:
+
+1. Temporarily separate the setup from its required ZIP and run it. It must
+   report the exact missing adjacent filename, create no visible pack version,
+   and create no Windows Installed Apps entry.
+2. Put the exact matching ZIP back beside setup and install. Confirm the fixed
+   path `%LOCALAPPDATA%\LatentDeck\CodecPacks\org.latentdeck.h3\0.1.1` exists
+   and Codec Manager discovers it after refresh/restart.
+3. Run the same setup again. It may restore its external maintenance metadata,
+   but must not overwrite or silently repair the immutable installed pack.
+4. Remove `LatentDeck H3 Codec Pack 0.1.1` through Windows Installed Apps.
+   Confirm only that exact version disappears; LatentDeck, LatentPlayer,
+   Library/cartridge data, and decoder selection remain.
+5. Reinstall from the same setup/payload pair and continue the product test.
+
+This owner-UAT slice proves the user flow but not publisher trust. Repeat the
+signed setup lifecycle offline on a clean Windows 11 NVIDIA machine without
+PowerShell 7, system Python, or ComfyUI before public release acceptance.
 
 ## Convert existing raw H3 AV data
 
@@ -302,7 +330,7 @@ pwsh -NoProfile -File tools/Test-IsolatedComfyEnvironment.ps1 -ServerSmoke
 pwsh -NoProfile -File tools/Start-IsolatedComfyEnvironment.ps1 -Cpu -OpenBrowser
 ```
 
-Current closeout note: the `2f00a4b` baseline contains all discoverable nodes
+Current closeout note: the `9fc7caa` baseline contains all discoverable nodes
 and eight runnable workflows, but not yet the requested single all-nodes gallery.
 Do not mark this section complete until
 `comfy/toolkit/workflows/00_ALL_NODES_GALLERY.json` exists and has passed its

@@ -1669,6 +1669,66 @@ function Expand-SafeCodecPackArchive {
     }
 }
 
+function Get-CargoNormalBuildDependencyIds {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Metadata,
+
+        [Parameter(Mandatory)]
+        [string]$RootPackageId
+    )
+
+    $nodes = @($Metadata.resolve.nodes)
+    if ($nodes.Count -eq 0) {
+        throw 'Cargo metadata resolve graph is empty.'
+    }
+    $nodesById = @{}
+    foreach ($node in $nodes) {
+        $nodeId = [string]$node.id
+        if ([string]::IsNullOrWhiteSpace($nodeId) -or $nodesById.ContainsKey($nodeId)) {
+            throw 'Cargo metadata contains a missing or duplicate dependency node id.'
+        }
+        $nodesById[$nodeId] = $node
+    }
+    if (-not $nodesById.ContainsKey($RootPackageId)) {
+        throw "Cargo metadata is missing the root dependency node: $RootPackageId"
+    }
+
+    $included = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    $pending = [System.Collections.Generic.Queue[string]]::new()
+    $pending.Enqueue($RootPackageId)
+    while ($pending.Count -gt 0) {
+        $packageId = $pending.Dequeue()
+        if (-not $included.Add($packageId)) {
+            continue
+        }
+        if (-not $nodesById.ContainsKey($packageId)) {
+            throw "Cargo metadata is missing a dependency node: $packageId"
+        }
+        foreach ($dependency in @($nodesById[$packageId].deps)) {
+            $includeDependency = @(
+                $dependency.dep_kinds |
+                    Where-Object {
+                        $null -eq $_.kind -or
+                        [string]$_.kind -ceq 'normal' -or
+                        [string]$_.kind -ceq 'build'
+                    }
+            ).Count -gt 0
+            if ($includeDependency) {
+                $dependencyId = [string]$dependency.pkg
+                if ([string]::IsNullOrWhiteSpace($dependencyId)) {
+                    throw 'Cargo metadata contains a dependency edge without a package id.'
+                }
+                $pending.Enqueue($dependencyId)
+            }
+        }
+    }
+    return @($included | Sort-Object -CaseSensitive)
+}
+
 Export-ModuleMember -Function @(
     'Assert-ChildPath',
     'Assert-DirectoryNotReparsePoint',
@@ -1683,6 +1743,7 @@ Export-ModuleMember -Function @(
     'Copy-PackagingTree',
     'Convert-ToPortableRelativePath',
     'Expand-SafeCodecPackArchive',
+    'Get-CargoNormalBuildDependencyIds',
     'Get-CodecPackAuxiliaryRoot',
     'Get-CodecPackInstallRoot',
     'Get-IntegrityEntry',

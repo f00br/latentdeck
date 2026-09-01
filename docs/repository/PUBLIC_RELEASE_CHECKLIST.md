@@ -15,6 +15,9 @@ explicitly approve every action in the Publication authority section.
 - [ ] Codec/model assets and cartridges are governed separately and are not
       implied to inherit the LatentDeck license.
 - [ ] An SBOM and dependency-license review exist for the release build.
+- [ ] The H3 Codec Pack setup SBOM/notices cover NSIS, the native lifecycle
+      helper, and every shipped helper dependency separately from the runtime
+      payload inventory.
 - [ ] The application SBOM contains the exact pinned upstream Spout2 component,
       commit, archive hash, native integration provenance, and BSD-2-Clause
       license; the hash-bound `THIRD_PARTY_NOTICES.md` accompanies installers.
@@ -40,6 +43,19 @@ explicitly approve every action in the Publication authority section.
 - [ ] Cartridges are data-only and cannot execute embedded code.
 - [ ] Supported platforms, hardware, codec dependencies, and limitations are
       documented from measured results.
+- [ ] The signed `LatentDeck-H3-CodecPack-<version>-setup.exe` is bound to the
+      exact adjacent payload filename, byte length, SHA-256, identity, and
+      version; the complete pair and non-recursive receipts were inspected.
+- [ ] On a clean non-admin Windows 11 NVIDIA account, H3 setup installs offline
+      to the fixed current-user root without PowerShell, system Python, ComfyUI,
+      model assets, or setup-time network access.
+- [ ] Windows Installed Apps removes one exact H3 version while preserving
+      other versions, both applications, cartridges, and decoder selection;
+      immutable side-by-side installation and the 16-version bound were tested.
+- [ ] Application installers, H3 setup, its generated uninstaller, checksums,
+      and receipts were finalized and verified through the authenticated
+      publisher signing path before hashes intended for publication were
+      recorded.
 - [ ] A private vulnerability-reporting channel is configured.
 - [ ] Telemetry and crash reporting, if any, are opt-in and documented.
 

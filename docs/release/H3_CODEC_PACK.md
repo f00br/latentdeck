@@ -2,10 +2,11 @@
 
 ## Purpose
 
-This runbook is for the engineer assembling the independently installed H3
-playback/synthesis runtime. After reading it, they should be able to build an
-integrity-catalogued pack from explicitly prepared inputs, install versions
-side by side, and remove exactly one version.
+This runbook covers both assembly of the independently installed H3
+playback/synthesis runtime and its public Windows lifecycle. An engineer should
+be able to build an integrity-catalogued pack plus its setup, while a user needs
+only the matching setup and adjacent payload to install or remove one exact
+version.
 
 The pack is a trusted runtime and adapter distribution. It is not a cartridge
 and it is not a model distribution. The release builder is offline by default;
@@ -89,7 +90,7 @@ must therefore already be present in the uv cache for the normal release path:
 ```powershell
 pwsh -NoProfile -File tools/Build-H3CodecPack.ps1 `
   -PythonEmbedArchive $pythonEmbedArchive `
-  -PackVersion 0.1.0 `
+  -PackVersion 0.1.1 `
   -RequireCuda
 ```
 
@@ -97,13 +98,20 @@ Pass `-DecoderAssetContractPath $decoderContract` only to use another reviewed
 metadata contract. The builder runs locked export, exact target installation,
 wheel build, curation, archive validation, isolated CUDA/import smoke, a
 no-payload D2/Q4 Live Capture loop-preservation probe, isolated install,
-post-install smoke, and exact-version uninstall before atomically publishing
-below `artifacts/codec-pack/0.1.0`. It refuses overwrite.
+post-install smoke, public-setup assembly, and exact-version uninstall before
+atomically publishing below `artifacts/codec-pack/0.1.1`. It refuses
+overwrite.
 
-The version directory contains the ZIP, `SHA256SUMS.txt`, path-free package and
-distributable proof receipts, plus separate archive and installed-runtime smoke
-receipts. The adjacent checksum is transport evidence, not a publisher trust
-anchor.
+The version directory contains the small
+`LatentDeck-H3-CodecPack-0.1.1-setup.exe`, its required adjacent
+`LatentDeck-H3-CodecPack-0.1.1-windows-x64.zip`, `SHA256SUMS.txt`, path-free
+package, setup, and distributable proof receipts, plus separate archive and
+installed-runtime smoke receipts. It also carries the installer-specific
+`installer-SBOM.cdx.json`, `INSTALLER_THIRD_PARTY_NOTICES.md`,
+`INSTALLER_NSIS_COPYING.txt`, and `INSTALLER_RUST_LICENSES.txt`; keep the
+complete directory together. `SHA256SUMS.txt` binds setup, payload, setup
+receipt, and all four installer sidecars. The adjacent checksum is transport
+evidence, not a publisher trust anchor.
 
 Inside the archive, the version-scoped pack contains:
 
@@ -162,48 +170,55 @@ Python's `-B` switch so linked package trees never receive bytecode caches.
 requires all three entrypoint files, exact manifest argument arrays, and worker
 package precedence ahead of the linked laboratory packages.
 
-## Install
+## Install with the public Windows setup
 
-Obtain the archive SHA-256 from an independently authenticated owner-approved
-release record, then install for the current user:
+Keep these exact matching files in one folder:
 
-```powershell
-pwsh -NoProfile -File tools/Install-H3CodecPack.ps1 `
-  -ArchivePath $packArchive `
-  -TrustedArchiveSha256 $trustedPackSha256
+```text
+LatentDeck-H3-CodecPack-0.1.1-setup.exe
+LatentDeck-H3-CodecPack-0.1.1-windows-x64.zip
 ```
 
-`SHA256SUMS.txt` and `package-receipt.json` beside the ZIP are useful for
-transport-error detection, but an attacker can replace an unsigned ZIP and its
-adjacent hashes together. They are not a publisher trust anchor. Do not install
-from an adjacent checksum alone. Publisher signing/key verification remains a
-mandatory distribution gate beyond this unsigned local RC path.
+Run `LatentDeck-H3-CodecPack-0.1.1-setup.exe`. The large ZIP is deliberately
+adjacent rather than embedded; renaming, moving, omitting, truncating, or
+replacing it makes setup fail without exposing a partial pack to application
+discovery. The setup is bound to that exact filename, byte length, SHA-256,
+pack identity, and version. `SHA256SUMS.txt` and the receipts are useful
+transport evidence, but the authenticated setup is the publisher trust anchor
+for its adjacent payload. Publisher signing remains a mandatory release gate;
+an unsigned local RC is not a public trust claim.
 
-Current-user versions are installed below
-`%LOCALAPPDATA%\LatentDeck\CodecPacks\org.latentdeck.h3\<version>`.
-Use `-Scope AllUsers` from an elevated PowerShell process to use the
-corresponding `%PROGRAMDATA%` root.
+The setup is offline and current-user only. It exposes no install-directory
+choice, requests no administrator elevation, performs no download, and needs
+neither PowerShell nor a system Python installation. It does not install a
+model or decoder weight. The fixed destination is:
 
-The installer opens the archive once with exclusive sharing, validates the
-independently trusted hash, and extracts from that same immutable handle. This
-closes the checksum-to-extraction replacement race. It rejects duplicate or
-unsafe ZIP entries and reparse points,
-verifies exact JSON value kinds plus the strict manifest and every catalogued
-file, refuses uncatalogued bytes, and atomically moves the validated version
-into discovery. It never overwrites an installed version.
+```text
+%LOCALAPPDATA%\LatentDeck\CodecPacks\org.latentdeck.h3\0.1.1
+```
 
-Extraction is staged on the same volume outside discovery, below
-`%LOCALAPPDATA%\LatentDeck\CodecPackStaging` for current-user installs (or the
-corresponding ProgramData sibling). Therefore a concurrent app scan never sees
-an `.install-*` directory as a malformed pack version.
+Setup opens the adjacent ZIP once with exclusive sharing, verifies its bound
+identity, and validates and extracts from that same handle. It rejects
+duplicate or unsafe ZIP entries and reparse points, verifies the strict
+manifest and every catalogued file, refuses uncatalogued bytes, and atomically
+moves only a complete version from same-volume staging into discovery. A
+concurrent app scan never sees an `.install-*` directory as a malformed pack.
 
-Different versions may coexist in the same scope. Lifecycle commands for the
-invoking user are serialized with a named mutex so current-user and elevated
-all-users operations from that session cannot race their check-and-move steps.
-The installer rejects the same pack/version across the invoking user's
-`LOCALAPPDATA` root and ProgramData. It cannot inventory another Windows
-account's private `LOCALAPPDATA`; if that user later sees the same version in
-both roots, application discovery fails closed instead of choosing one.
+The pack directory is an integrity-closed tree. The native helper is embedded
+in setup and in the generated uninstaller and is extracted only to Windows'
+temporary plugin directory while a lifecycle operation runs; no mutable loose
+helper is installed. The uninstaller, installation metadata, SBOM, and notices
+used by Windows maintenance are stored separately below the version-scoped
+sibling root
+`%LOCALAPPDATA%\LatentDeck\CodecPackMaintenance\org.latentdeck.h3\0.1.1`.
+None of these bytes may be copied into the pack directory because any
+uncatalogued file there invalidates discovery.
+
+Setup registers `LatentDeck H3 Codec Pack 0.1.1` in Windows Installed Apps.
+The registry entry is maintenance UI only; the filesystem remains the sole
+Codec Pack discovery authority. Re-running setup for already installed,
+matching immutable bytes may restore maintenance metadata, but it never
+overwrites or repairs the pack payload.
 
 Installing or updating a Codec Pack does not modify LatentDeck App,
 LatentPlayer, their installers, user cartridges, or the explicitly selected
@@ -211,55 +226,70 @@ decoder weight. The current-user Deck application is installed below
 `%LOCALAPPDATA%\LatentDeck App`; this distinct root is a lifecycle invariant,
 not a display-name change. The application window remains `LatentDeck`.
 
+After setup finishes, restart LatentDeck and LatentPlayer, refresh Codec Manager
+if needed, confirm the expected pack version is selected, and explicitly select
+an accepted external TAEH3 decoder asset.
+
+### Developer lifecycle command
+
+`tools/Install-H3CodecPack.ps1` remains an engineer-only packaging, isolated
+test, and recovery surface. It requires `pwsh` plus an independently trusted
+archive hash and does not create the normal Windows Installed Apps experience.
+Public users should run the setup executable above.
+
 ## Update and rollback
 
 There is no in-place Codec Pack repair or overwrite. Build a new canonical
-SemVer, install it beside the old version, then stop/restart the applications so
-the highest compatible SemVer is selected automatically and smoke-test it.
-Retain the old version until acceptance. Roll back by uninstalling only the new
-version, restart the applications, and verify that the retained old version is
-selected. Rebuilding different bytes under an already installed version is
-deliberately refused. Decoder-weight selection remains a separate explicit
-choice.
+SemVer and install it beside previously accepted versions, then restart the
+applications so the highest compatible SemVer is selected automatically and
+smoke-test it. At most 16 versions of one pack identifier may exist in a
+discovery root; setup refuses a seventeenth before changing discovery.
+
+Rollback means uninstalling only the newer version and returning to a retained,
+previously accepted compatible version. The earlier local H3 Codec Pack
+`0.1.0` predates the D2 multi-loop correction and is known defective; it is not
+a rollback candidate for `0.1.1` and must be removed from the owner test
+machine. Rebuilding different bytes under an already installed version remains
+forbidden. Decoder-weight selection is a separate explicit choice.
 
 ## Uninstall exactly one version
 
+Use Windows **Settings > Apps > Installed apps**, choose
+`LatentDeck H3 Codec Pack 0.1.1`, and select Uninstall. This entry removes only
+that exact pack version and its version-scoped maintenance data. It does not
+remove another pack version, LatentDeck App, LatentPlayer, cartridges, or the
+external decoder selection.
+
+Stop LatentDeck, LatentPlayer, and their Codec Pack workers before uninstalling.
+If a file is locked, the interactive uninstaller asks the user to close the
+process and Retry or Cancel; it never terminates an application automatically.
+If strict validation reports a corrupt exact version, interactive removal
+requires explicit confirmation and retains the same containment and
+reparse-point protections.
+
+Silent `Uninstall.exe /S` is deliberately fail-closed for an integrity-corrupt
+pack and returns an error rather than forcing removal. Corrupt removal requires
+the interactive confirmation above or the explicitly authorized developer
+recovery command below.
+
+The developer recovery command remains available:
+
 ```powershell
 pwsh -NoProfile -File tools/Uninstall-H3CodecPack.ps1 `
-  -PackVersion 0.1.0
+  -PackVersion 0.1.1
 ```
 
-Use the same `-Scope` used for installation. The uninstaller validates the
-pack before moving and deleting only the named version. Other versions and
-both applications remain untouched.
-
-Stop LatentDeck/LatentPlayer and their Codec Pack workers before uninstalling.
-The selected version is first atomically moved out of discovery to the
-same-volume `CodecPackTrash` sibling. Once deletion begins, the script never
-restores partial remnants into discovery. If a locked DLL prevents cleanup,
-the command reports the exact quarantined path; after stopping the worker,
-retry safe cleanup with:
-
-```powershell
-pwsh -NoProfile -File tools/Uninstall-H3CodecPack.ps1 `
-  -PackVersion 0.1.0 `
-  -CleanupQuarantine
-```
-
-`-CleanupQuarantine` is cleanup-only and always returns without touching an
-installed version, including when the same version has since been reinstalled.
-Run a separate command without that switch when the live version itself must
-be uninstalled.
-
-For recovery from a deliberately confirmed corrupt pack, `-RemoveCorrupt`
-skips manifest validation but retains exact root, identifier, version,
-containment, and reparse-point checks. Do not use it for a healthy pack.
+Its `-CleanupQuarantine` and `-RemoveCorrupt` switches remain engineer-only
+recovery operations. They retain exact root, identifier, version, containment,
+and reparse-point checks and must not be used as the normal public uninstall
+path.
 
 ## Automated contract test
 
 Run the synthetic lifecycle test from the repository root:
 
 ```powershell
+pwsh -NoProfile -File tools/Test-H3CodecPackSetup.ps1
 pwsh -NoProfile -File tools/Test-ReleasePackaging.ps1
 ```
 
@@ -285,10 +315,13 @@ pwsh -NoProfile -File tools/Test-H3CodecPackRuntime.ps1 `
   -RequireCuda
 ```
 
-This local contract test does not execute or prove that a supplied
-Python/PyTorch/CUDA runtime starts on another machine. Before release
-acceptance, verify upstream provenance, install the real signed/trust-anchored
-pack on a clean Windows 11 NVIDIA system, validate its notices and SBOM,
-explicitly select a measured `taeh3` asset, and run Player, D2, Q4, recovery,
-and Spout tests. Record that result separately; do not infer it from packaging
+These local contract tests do not prove the public lifecycle or supplied
+Python/PyTorch/CUDA runtime on another machine. Before release acceptance,
+place only the signed setup and matching adjacent ZIP on a clean Windows 11
+NVIDIA current-user account without PowerShell 7, system Python, ComfyUI, or a
+network connection. Install through setup without elevation, verify its
+Installed Apps entry, validate notices and SBOM, explicitly select a measured
+`taeh3` asset, and run Player, D2, Q4, recovery, and Spout tests. Uninstall the
+exact pack version through Installed Apps and prove both applications and user
+data remain. Record that result separately; do not infer it from packaging
 success.
