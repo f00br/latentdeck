@@ -4,6 +4,9 @@ use std::{
 };
 
 #[cfg(target_os = "windows")]
+use std::thread;
+
+#[cfg(target_os = "windows")]
 use std::collections::BTreeMap;
 
 use latentdeck_cartridge::{
@@ -19,8 +22,9 @@ use latentdeck_core::{
 };
 use latentdeck_library::{
     ALL_CARTRIDGES_ID, Availability, CartridgeKey, CartridgeRecord, CollectionId, CollectionRecord,
-    DeckSourceIdentity, FolderImportOptions, IndexedDeckSource, Library, LibraryError, PathState,
-    QueryOptions, ReindexDisposition, ResolvedDeckSource,
+    DeckSourceIdentity, FolderImportOptions, ImportDisposition, IndexedDeckSource, Library,
+    LibraryError, PathState, PreparedDeckSource, QueryOptions, ReindexDisposition,
+    ResolvedDeckSource,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -39,6 +43,8 @@ const MAX_COMPATIBILITY_CANDIDATES: usize = UI_QUERY_LIMIT + MAX_PRESET_SOURCE_I
 // does not prevent same-length in-place mutation there.
 #[cfg(target_os = "windows")]
 const MAX_RETAINED_DECK_SOURCES: usize = 64;
+#[cfg(target_os = "windows")]
+const MAX_PARALLEL_DECK_SOURCE_VALIDATIONS: usize = 4;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -482,12 +488,22 @@ impl LibraryController {
         Ok(summary)
     }
 
+    #[cfg(not(target_os = "windows"))]
     fn resolve_deck_source(
         &self,
         identity: &DeckSourceIdentity,
     ) -> Result<ResolvedDeckSource, CommandError> {
         self.library
             .resolve_deck_source(identity)
+            .map_err(Into::into)
+    }
+
+    fn prepare_deck_source(
+        &self,
+        identity: &DeckSourceIdentity,
+    ) -> Result<PreparedDeckSource, CommandError> {
+        self.library
+            .prepare_deck_source(identity)
             .map_err(Into::into)
     }
 
@@ -623,6 +639,70 @@ impl DeckSourceCache {
         self.entries.clear();
     }
 
+    fn evict_archive(&mut self, key: &CartridgeKey) {
+        #[cfg(target_os = "windows")]
+        self.entries
+            .retain(|(_, archive_sha256, _), _| archive_sha256 != key.as_str());
+        #[cfg(not(target_os = "windows"))]
+        let _ = key;
+    }
+
+    #[cfg(target_os = "windows")]
+    fn checkout(&mut self, identity: &DeckSourceIdentity) -> Option<ResolvedDeckSource> {
+        let cached_key = self
+            .entries
+            .keys()
+            .find(|key| {
+                key.0 == identity.cartridge_id() && key.1 == identity.archive_sha256().as_str()
+            })
+            .cloned()?;
+        let cloned = self
+            .entries
+            .get(&cached_key)
+            .map(|entry| entry.source.try_clone_retained());
+        match cloned {
+            Some(Ok(resolved)) => {
+                self.use_sequence = self.use_sequence.saturating_add(1);
+                let used = self.use_sequence;
+                if let Some(entry) = self.entries.get_mut(&cached_key) {
+                    entry.last_used = used;
+                }
+                Some(resolved)
+            }
+            Some(Err(_)) => {
+                // A failed handle clone cannot remain reusable evidence.
+                self.entries.remove(&cached_key);
+                None
+            }
+            None => None,
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn retain(&mut self, resolved: &ResolvedDeckSource) {
+        let Ok(retained) = resolved.try_clone_retained() else {
+            return;
+        };
+        if self.entries.len() >= MAX_RETAINED_DECK_SOURCES
+            && let Some(lru_key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+        {
+            self.entries.remove(&lru_key);
+        }
+        self.use_sequence = self.use_sequence.saturating_add(1);
+        let used = self.use_sequence;
+        self.entries.insert(
+            deck_source_cache_key(resolved),
+            DeckSourceCacheEntry {
+                source: retained,
+                last_used: used,
+            },
+        );
+    }
+
     #[cfg(test)]
     fn retained_len(&self) -> usize {
         #[cfg(target_os = "windows")]
@@ -636,6 +716,105 @@ impl DeckSourceCache {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn run_bounded_ordered<T, R, E, F>(
+    items: Vec<T>,
+    limit: usize,
+    worker: F,
+) -> Result<Vec<Result<R, E>>, ()>
+where
+    T: Send,
+    R: Send,
+    E: Send,
+    F: Fn(T) -> Result<R, E> + Sync,
+{
+    assert!(limit > 0, "bounded worker limit must be positive");
+    let mut output = Vec::with_capacity(items.len());
+    let mut remaining = items.into_iter();
+    loop {
+        let batch = remaining.by_ref().take(limit).collect::<Vec<_>>();
+        if batch.is_empty() {
+            break;
+        }
+        let joined = thread::scope(|scope| {
+            let handles = batch
+                .into_iter()
+                .map(|item| scope.spawn(|| worker(item)))
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(std::thread::ScopedJoinHandle::join)
+                .collect::<Vec<_>>()
+        });
+        let mut batch_output = joined
+            .into_iter()
+            .collect::<std::thread::Result<Vec<_>>>()
+            .map_err(|_| ())?;
+        let failed = batch_output.iter().any(Result::is_err);
+        output.append(&mut batch_output);
+        if failed {
+            break;
+        }
+    }
+    Ok(output)
+}
+
+#[cfg(target_os = "windows")]
+struct DeduplicatedDeckSources {
+    unique: Vec<DeckSourceIdentity>,
+    order: Vec<usize>,
+    occurrences: Vec<usize>,
+}
+
+#[cfg(target_os = "windows")]
+fn deduplicate_deck_sources(identities: Vec<DeckSourceIdentity>) -> DeduplicatedDeckSources {
+    let mut unique = Vec::<DeckSourceIdentity>::new();
+    let mut order = Vec::with_capacity(identities.len());
+    let mut occurrences = Vec::<usize>::new();
+    for identity in identities {
+        let unique_index = unique
+            .iter()
+            .position(|candidate| candidate == &identity)
+            .unwrap_or_else(|| {
+                unique.push(identity);
+                occurrences.push(0);
+                unique.len() - 1
+            });
+        occurrences[unique_index] = occurrences[unique_index].saturating_add(1);
+        order.push(unique_index);
+    }
+    DeduplicatedDeckSources {
+        unique,
+        order,
+        occurrences,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn materialize_deck_sources(
+    mut resolved: Vec<Option<ResolvedDeckSource>>,
+    order: Vec<usize>,
+    mut remaining: Vec<usize>,
+) -> Result<Vec<ResolvedDeckSource>, CommandError> {
+    let mut output = Vec::with_capacity(order.len());
+    for unique_index in order {
+        remaining[unique_index] = remaining[unique_index].saturating_sub(1);
+        let source = resolved[unique_index]
+            .as_ref()
+            .ok_or_else(CommandError::task_stopped)?;
+        if remaining[unique_index] == 0 {
+            output.push(
+                resolved[unique_index]
+                    .take()
+                    .ok_or_else(CommandError::task_stopped)?,
+            );
+        } else {
+            output.push(source.try_clone_retained().map_err(CommandError::from)?);
+        }
+    }
+    Ok(output)
+}
+
 #[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct DeckSourceCacheStats {
@@ -643,6 +822,78 @@ pub(crate) struct DeckSourceCacheStats {
     pub(crate) full_validations: u64,
     pub(crate) cached_checkouts: u64,
     pub(crate) retained_entries: usize,
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_deck_sources_windows(
+    controller: &Arc<Mutex<LibraryController>>,
+    cache: &mut DeckSourceCache,
+    identities: Vec<DeckSourceIdentity>,
+) -> Result<Vec<ResolvedDeckSource>, CommandError> {
+    let DeduplicatedDeckSources {
+        unique,
+        order,
+        occurrences,
+    } = deduplicate_deck_sources(identities);
+    let mut resolved = std::iter::repeat_with(|| None)
+        .take(unique.len())
+        .collect::<Vec<Option<ResolvedDeckSource>>>();
+    let mut misses = Vec::new();
+    for (index, identity) in unique.iter().enumerate() {
+        if let Some(source) = cache.checkout(identity) {
+            resolved[index] = Some(source);
+            cache.cached_checkouts = cache
+                .cached_checkouts
+                .saturating_add(u64::try_from(occurrences[index]).unwrap_or(u64::MAX));
+        } else {
+            misses.push(index);
+        }
+    }
+
+    let prepared = {
+        let controller = lock_controller(controller)?;
+        misses
+            .iter()
+            .map(|index| {
+                controller
+                    .prepare_deck_source(&unique[*index])
+                    .map(|source| (*index, source))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let validation_results = run_bounded_ordered(
+        prepared,
+        MAX_PARALLEL_DECK_SOURCE_VALIDATIONS,
+        |(index, source): (usize, PreparedDeckSource)| {
+            source
+                .validate()
+                .map(|resolved| (index, resolved))
+                .map_err(|error| (index, CommandError::from(error)))
+        },
+    )
+    .map_err(|()| CommandError::task_stopped())?;
+    cache.full_validations = cache
+        .full_validations
+        .saturating_add(u64::try_from(validation_results.len()).unwrap_or(u64::MAX));
+    let mut first_error = None;
+    for result in validation_results {
+        match result {
+            Ok((index, source)) => {
+                cache.retain(&source);
+                cache.cached_checkouts = cache.cached_checkouts.saturating_add(
+                    u64::try_from(occurrences[index].saturating_sub(1)).unwrap_or(u64::MAX),
+                );
+                resolved[index] = Some(source);
+            }
+            Err((_index, error)) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    materialize_deck_sources(resolved, order, occurrences)
 }
 
 impl AppState {
@@ -653,76 +904,47 @@ impl AppState {
         }
     }
 
-    /// Resolve a Deck source through the registered library path only. Full LC
-    /// validation runs on a blocking worker thread and the resulting local path
-    /// remains a backend-only, non-serializable value.
+    /// Resolve a Deck source through the registered library path only. This is
+    /// the stable single-source composition over [`Self::resolve_deck_sources`].
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn resolve_deck_source(
         &self,
         identity: DeckSourceIdentity,
     ) -> Result<ResolvedDeckSource, CommandError> {
+        let mut resolved = self.resolve_deck_sources(vec![identity]).await?;
+        resolved.pop().ok_or_else(CommandError::task_stopped)
+    }
+
+    /// Resolve an ordered Deck source batch. On Windows, exact cache misses are
+    /// deduplicated by immutable cartridge identity and strict LC validation is
+    /// run in bounded groups of four. The cache lock is the batch singleflight
+    /// gate, so concurrent sessions cannot validate the same bytes twice.
+    pub(crate) async fn resolve_deck_sources(
+        &self,
+        identities: Vec<DeckSourceIdentity>,
+    ) -> Result<Vec<ResolvedDeckSource>, CommandError> {
         let controller = Arc::clone(&self.controller);
         let deck_sources = Arc::clone(&self.deck_sources);
         tauri::async_runtime::spawn_blocking(move || {
-            // Keep this lock through the miss path. This is a deliberately
-            // small selected-source singleflight: concurrent callers for one
-            // exact LC cannot launch duplicate full-byte validation.
+            // Keep this gate through cache checkout, metadata preparation and
+            // validation. This preserves process-wide singleflight while the
+            // distinct misses inside this batch run concurrently.
             let mut cache = lock_deck_sources(&deck_sources)?;
             #[cfg(target_os = "windows")]
-            let cached_key = cache
-                .entries
-                .keys()
-                .find(|key| {
-                    key.0 == identity.cartridge_id() && key.1 == identity.archive_sha256().as_str()
-                })
-                .cloned();
-            #[cfg(target_os = "windows")]
-            if let Some(key) = cached_key {
-                let cloned = cache
-                    .entries
-                    .get(&key)
-                    .map(|entry| entry.source.try_clone_retained());
-                match cloned {
-                    Some(Ok(resolved)) => {
-                        cache.use_sequence = cache.use_sequence.saturating_add(1);
-                        let used = cache.use_sequence;
-                        if let Some(entry) = cache.entries.get_mut(&key) {
-                            entry.last_used = used;
-                        }
-                        cache.cached_checkouts = cache.cached_checkouts.saturating_add(1);
-                        return Ok(resolved);
-                    }
-                    Some(Err(_)) => {
-                        // A failed handle clone cannot remain reusable evidence.
-                        cache.entries.remove(&key);
-                    }
-                    None => {}
-                }
+            {
+                resolve_deck_sources_windows(&controller, &mut cache, identities)
             }
 
-            cache.full_validations = cache.full_validations.saturating_add(1);
-            let resolved = lock_controller(&controller)?.resolve_deck_source(&identity)?;
-            #[cfg(target_os = "windows")]
-            if let Ok(retained) = resolved.try_clone_retained() {
-                if cache.entries.len() >= MAX_RETAINED_DECK_SOURCES
-                    && let Some(lru_key) = cache
-                        .entries
-                        .iter()
-                        .min_by_key(|(_, entry)| entry.last_used)
-                        .map(|(key, _)| key.clone())
-                {
-                    cache.entries.remove(&lru_key);
+            #[cfg(not(target_os = "windows"))]
+            {
+                let controller = lock_controller(&controller)?;
+                let mut output = Vec::with_capacity(identities.len());
+                for identity in identities {
+                    cache.full_validations = cache.full_validations.saturating_add(1);
+                    output.push(controller.resolve_deck_source(&identity)?);
                 }
-                cache.use_sequence = cache.use_sequence.saturating_add(1);
-                let used = cache.use_sequence;
-                cache.entries.insert(
-                    deck_source_cache_key(&resolved),
-                    DeckSourceCacheEntry {
-                        source: retained,
-                        last_used: used,
-                    },
-                );
+                Ok(output)
             }
-            Ok(resolved)
         })
         .await
         .map_err(|_| CommandError::task_stopped())?
@@ -800,13 +1022,19 @@ impl LibraryImporter {
             let result = controller
                 .library
                 .import_file(path)
-                .map(|result| result.key)
-                .map_err(Into::into);
+                .map_err(CommandError::from);
             drop(controller);
-            if result.is_ok() {
-                lock_deck_sources(&deck_sources)?.clear_retained();
+            if let Ok(imported) = &result
+                && imported.disposition == ImportDisposition::AcceptedReplacement
+                && let Some(previous_key) = &imported.previous_key
+            {
+                // Capture uses a fresh cartridge UUID and atomic no-clobber
+                // output, so Added/AlreadyIndexed cannot stale unrelated exact
+                // input handles. A defensive path replacement invalidates only
+                // the identity that the Library reports as superseded.
+                lock_deck_sources(&deck_sources)?.evict_archive(previous_key);
             }
-            result
+            result.map(|imported| imported.key)
         })
         .await
         .map_err(|_| CommandError::task_stopped())?
@@ -1096,7 +1324,15 @@ pub(crate) fn database_path(app_data_dir: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, io::Cursor};
+    use std::{
+        env, fs,
+        io::Cursor,
+        sync::{
+            Arc, Barrier,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Instant,
+    };
 
     use latentdeck_cartridge::{
         hash::hash_reader,
@@ -1106,6 +1342,134 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn bounded_validator_preserves_order_cap_and_first_failure_batch() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let first_batch = Arc::new(Barrier::new(MAX_PARALLEL_DECK_SOURCE_VALIDATIONS));
+        let results = run_bounded_ordered(
+            (0..8).collect::<Vec<_>>(),
+            MAX_PARALLEL_DECK_SOURCE_VALIDATIONS,
+            {
+                let active = Arc::clone(&active);
+                let maximum = Arc::clone(&maximum);
+                let first_batch = Arc::clone(&first_batch);
+                move |value| {
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    maximum.fetch_max(now, Ordering::SeqCst);
+                    if value < MAX_PARALLEL_DECK_SOURCE_VALIDATIONS {
+                        first_batch.wait();
+                    }
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    Ok::<_, usize>(value)
+                }
+            },
+        )
+        .expect("bounded workers do not panic");
+        assert_eq!(maximum.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            results
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .expect("bounded ordered successes"),
+            (0..8).collect::<Vec<_>>()
+        );
+
+        let attempted = Arc::new(Mutex::new(Vec::new()));
+        let results = run_bounded_ordered(
+            (0..8).collect::<Vec<_>>(),
+            MAX_PARALLEL_DECK_SOURCE_VALIDATIONS,
+            {
+                let attempted = Arc::clone(&attempted);
+                move |value| {
+                    attempted.lock().expect("attempt log").push(value);
+                    if value == 1 { Err(value) } else { Ok(value) }
+                }
+            },
+        )
+        .expect("bounded failure workers do not panic");
+        assert_eq!(
+            results.len(),
+            4,
+            "later batches stop after one failed batch"
+        );
+        assert_eq!(results[0], Ok(0));
+        assert_eq!(results[1], Err(1));
+        assert_eq!(results[2], Ok(2));
+        assert_eq!(results[3], Ok(3));
+        let mut attempted = attempted.lock().expect("attempt log").clone();
+        attempted.sort_unstable();
+        assert_eq!(attempted, vec![0, 1, 2, 3]);
+
+        assert!(
+            run_bounded_ordered(vec![0], 1, |_value| -> Result<usize, usize> {
+                panic!("synthetic validator panic")
+            })
+            .is_err(),
+            "worker panic is returned to the caller instead of unwinding it"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "windows")]
+    async fn ordered_batch_deduplicates_uncached_exact_sources() {
+        let root = tempdir().expect("temporary batch source root");
+        let mut library = Library::in_memory().expect("in-memory Library");
+        let mut identities = Vec::new();
+        for (file_name, cartridge_id) in [
+            ("batch-a.lc", "550e8400-e29b-41d4-a716-446655440071"),
+            ("batch-b.lc", "550e8400-e29b-41d4-a716-446655440072"),
+        ] {
+            let path = write_synthetic_lc(root.path(), file_name, cartridge_id, 7, 2, 2);
+            let imported = library.import_file(path).expect("import batch source");
+            identities.push(
+                DeckSourceIdentity::new(cartridge_id, imported.key).expect("exact batch identity"),
+            );
+        }
+        let state = AppState::new(library);
+        let requested = vec![
+            identities[1].clone(),
+            identities[0].clone(),
+            identities[1].clone(),
+            identities[0].clone(),
+        ];
+        let resolved = state
+            .resolve_deck_sources(requested.clone())
+            .await
+            .expect("resolve ordered duplicate batch");
+        assert_eq!(resolved.len(), requested.len());
+        for (resolved, requested) in resolved.iter().zip(&requested) {
+            assert_eq!(resolved.identity(), requested);
+        }
+        assert_eq!(
+            state.deck_source_cache_stats(),
+            DeckSourceCacheStats {
+                indexed_compatibility_checks: 0,
+                full_validations: 2,
+                cached_checkouts: 2,
+                retained_entries: 2,
+            }
+        );
+
+        let repeated = state
+            .resolve_deck_sources(requested.clone())
+            .await
+            .expect("repeat ordered duplicate batch");
+        for (resolved, requested) in repeated.iter().zip(&requested) {
+            assert_eq!(resolved.identity(), requested);
+        }
+        assert_eq!(
+            state.deck_source_cache_stats(),
+            DeckSourceCacheStats {
+                indexed_compatibility_checks: 0,
+                full_validations: 2,
+                cached_checkouts: 6,
+                retained_entries: 2,
+            }
+        );
+    }
 
     #[tokio::test]
     async fn exact_deck_source_resolution_reuses_one_full_validation() {
@@ -1272,6 +1636,250 @@ mod tests {
         );
         drop(selected);
         drop(reopened);
+    }
+
+    #[tokio::test]
+    async fn generated_capture_import_preserves_exact_q4_source_handles() {
+        let root = tempdir().expect("temporary capture cache root");
+        let ids = [
+            "550e8400-e29b-41d4-a716-446655440091",
+            "550e8400-e29b-41d4-a716-446655440092",
+            "550e8400-e29b-41d4-a716-446655440093",
+            "550e8400-e29b-41d4-a716-446655440094",
+        ];
+        let mut library = Library::in_memory().expect("in-memory Library");
+        let identities = ids
+            .iter()
+            .enumerate()
+            .map(|(index, cartridge_id)| {
+                let path = write_synthetic_lc(
+                    root.path(),
+                    &format!("capture-input-{index}.lc"),
+                    cartridge_id,
+                    7,
+                    2,
+                    2,
+                );
+                let imported = library.import_file(path).expect("import capture input");
+                DeckSourceIdentity::new(*cartridge_id, imported.key).expect("exact input identity")
+            })
+            .collect::<Vec<_>>();
+        let state = AppState::new(library);
+
+        for identity in &identities {
+            state
+                .resolve_deck_source(identity.clone())
+                .await
+                .expect("prime exact capture input");
+        }
+        let captured = write_synthetic_lc(
+            root.path(),
+            "fresh-generated-capture.lc",
+            "550e8400-e29b-41d4-a716-446655440095",
+            7,
+            2,
+            2,
+        );
+        state
+            .importer()
+            .import_generated(captured)
+            .await
+            .expect("import fresh generated capture");
+        for identity in identities {
+            state
+                .resolve_deck_source(identity)
+                .await
+                .expect("reuse exact input after capture import");
+        }
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            state.deck_source_cache_stats(),
+            DeckSourceCacheStats {
+                indexed_compatibility_checks: 0,
+                full_validations: 4,
+                cached_checkouts: 4,
+                retained_entries: 4,
+            }
+        );
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(
+            state.deck_source_cache_stats(),
+            DeckSourceCacheStats {
+                indexed_compatibility_checks: 0,
+                full_validations: 8,
+                cached_checkouts: 0,
+                retained_entries: 0,
+            }
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "windows")]
+    async fn replacement_evicts_only_the_superseded_archive_identity() {
+        let root = tempdir().expect("temporary selective eviction root");
+        let mut library = Library::in_memory().expect("in-memory Library");
+        let first_path = write_synthetic_lc(
+            root.path(),
+            "first.lc",
+            "550e8400-e29b-41d4-a716-446655440096",
+            7,
+            2,
+            2,
+        );
+        let second_path = write_synthetic_lc(
+            root.path(),
+            "second.lc",
+            "550e8400-e29b-41d4-a716-446655440097",
+            7,
+            2,
+            2,
+        );
+        let first = library
+            .import_file(first_path)
+            .expect("import first source");
+        let second = library
+            .import_file(second_path)
+            .expect("import second source");
+        let first_identity =
+            DeckSourceIdentity::new("550e8400-e29b-41d4-a716-446655440096", first.key.clone())
+                .expect("first identity");
+        let second_identity =
+            DeckSourceIdentity::new("550e8400-e29b-41d4-a716-446655440097", second.key)
+                .expect("second identity");
+        let state = AppState::new(library);
+        state
+            .resolve_deck_source(first_identity.clone())
+            .await
+            .expect("prime first source");
+        state
+            .resolve_deck_source(second_identity.clone())
+            .await
+            .expect("prime second source");
+
+        lock_deck_sources(&state.deck_sources)
+            .expect("lock retained cache")
+            .evict_archive(&first.key);
+        state
+            .resolve_deck_source(first_identity)
+            .await
+            .expect("first source requires revalidation");
+        state
+            .resolve_deck_source(second_identity)
+            .await
+            .expect("second source remains cached");
+
+        assert_eq!(
+            state.deck_source_cache_stats(),
+            DeckSourceCacheStats {
+                indexed_compatibility_checks: 0,
+                full_validations: 3,
+                cached_checkouts: 1,
+                retained_entries: 2,
+            }
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires four explicitly supplied private LC paths for local performance evidence"]
+    async fn exact_q4_source_cache_timing_from_environment() {
+        fn indexed_state(paths: &[PathBuf]) -> (AppState, Vec<DeckSourceIdentity>) {
+            let mut library = Library::in_memory().expect("in-memory performance Library");
+            let mut identities = Vec::with_capacity(paths.len());
+            for path in paths {
+                let imported = library
+                    .import_file(path)
+                    .expect("index exact performance cartridge");
+                let record = library
+                    .get_cartridge(&imported.key)
+                    .expect("query indexed performance cartridge")
+                    .expect("indexed performance cartridge exists");
+                identities.push(
+                    DeckSourceIdentity::new(record.metadata.cartridge_id, imported.key)
+                        .expect("exact performance identity"),
+                );
+            }
+            (AppState::new(library), identities)
+        }
+
+        let encoded = env::var("LATENTDECK_PERF_LC_PATHS")
+            .expect("LATENTDECK_PERF_LC_PATHS with four semicolon-separated paths");
+        let paths = encoded.split(';').map(PathBuf::from).collect::<Vec<_>>();
+        assert_eq!(paths.len(), 4, "exact Q4 performance corpus");
+
+        let (state, identities) = indexed_state(&paths);
+        let q4_first_started = Instant::now();
+        state
+            .resolve_deck_sources(identities.clone())
+            .await
+            .expect("first exact Q4 batch validation");
+        let q4_first_seconds = q4_first_started.elapsed().as_secs_f64();
+        let q4_repeat_started = Instant::now();
+        state
+            .resolve_deck_sources(identities.clone())
+            .await
+            .expect("repeat exact Q4 batch checkout");
+        let q4_repeat_seconds = q4_repeat_started.elapsed().as_secs_f64();
+
+        let (d2_state, d2_identities) = indexed_state(&paths[..2]);
+        let d2_first_started = Instant::now();
+        d2_state
+            .resolve_deck_sources(d2_identities.clone())
+            .await
+            .expect("first exact D2 batch validation");
+        let d2_first_seconds = d2_first_started.elapsed().as_secs_f64();
+        let d2_repeat_started = Instant::now();
+        d2_state
+            .resolve_deck_sources(d2_identities)
+            .await
+            .expect("repeat exact D2 batch checkout");
+        let d2_repeat_seconds = d2_repeat_started.elapsed().as_secs_f64();
+        assert_eq!(d2_state.deck_source_cache_stats().full_validations, 2);
+
+        let capture_root = tempdir().expect("temporary generated capture root");
+        let captured = write_synthetic_lc(
+            capture_root.path(),
+            "generated-cache-probe.lc",
+            "550e8400-e29b-41d4-a716-446655440098",
+            7,
+            2,
+            2,
+        );
+        state
+            .importer()
+            .import_generated(captured)
+            .await
+            .expect("import generated capture probe");
+        let post_capture_started = Instant::now();
+        state
+            .resolve_deck_sources(identities)
+            .await
+            .expect("post-capture exact Q4 batch checkout");
+        let post_capture_seconds = post_capture_started.elapsed().as_secs_f64();
+        let cache_stats = state.deck_source_cache_stats();
+
+        eprintln!(
+            "d2_first_seconds={:.6} q4_first_seconds={:.6} d2_repeat_seconds={:.6} q4_repeat_seconds={:.6} q4_post_capture_seconds={:.6} full_validations={} cached_checkouts={} retained_entries={}",
+            d2_first_seconds,
+            q4_first_seconds,
+            d2_repeat_seconds,
+            q4_repeat_seconds,
+            post_capture_seconds,
+            cache_stats.full_validations,
+            cache_stats.cached_checkouts,
+            cache_stats.retained_entries,
+        );
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            cache_stats,
+            DeckSourceCacheStats {
+                indexed_compatibility_checks: 0,
+                full_validations: 4,
+                cached_checkouts: 8,
+                retained_entries: 4,
+            }
+        );
     }
 
     #[tokio::test]

@@ -3,7 +3,8 @@
 The adapter receives only Core-retained :class:`CartridgeAccess` objects.  It
 never learns an LC path and reads only bounded ranges from the already
 integrity-validated Safetensors payload.  The external decoder asset is the
-only path-bearing input and is remeasured before the CUDA model is created.
+only path-bearing input; Protocol 2 Core hashes and retains its exact bytes
+before this authenticated worker receives the descriptor.
 """
 
 from __future__ import annotations
@@ -249,7 +250,10 @@ class H3CodecAdapter:
         self._torch_loader = torch_loader or _torch_module
         self._decoder_factory = decoder_factory or self._load_decoder
         self._tensor_transfer = tensor_transfer or self._transfer_to_cuda
-        self._asset_validator = asset_validator
+        # Kept as a compatibility-only injection seam for pack-local tests.
+        # Protocol 2 Core is the sole full-hash authority, so this callback must
+        # never run in the authenticated adapter path.
+        self._legacy_asset_validator = asset_validator
         self._request: CodecLoadRequest | None = None
         self._torch: Any | None = None
         self._asset: ExternalAsset | None = None
@@ -362,12 +366,6 @@ class H3CodecAdapter:
                 "codec.asset_incompatible",
                 "external taeh3 identity does not match the H3 pack declaration",
             )
-        try:
-            self._asset_validator(asset.path, asset.sha256, asset.byte_length)
-        except Exception as error:
-            raise CodecSdkError(
-                "codec.asset_invalid", "external taeh3 asset failed exact CPU preflight"
-            ) from error
         # Do not construct the decoder here: source profile semantics must be
         # validated and receipted before any codec-owned GPU allocation.
         self._request = request
@@ -652,6 +650,13 @@ class H3CodecAdapter:
 
     @staticmethod
     def _load_decoder(asset: ExternalAsset, device_ordinal: int) -> H3Decoder:
+        if sys.platform == "win32":
+            return H3Decoder.load_host_validated(
+                asset.path,
+                asset.sha256,
+                asset.byte_length,
+                device_ordinal,
+            )
         return H3Decoder.load(
             asset.path,
             asset.sha256,

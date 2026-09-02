@@ -66,6 +66,30 @@ def validate_decoder_asset(
 ) -> Path:
     """Revalidate an explicit external asset immediately before model load."""
 
+    asset_path = host_validated_decoder_path(path, expected_sha256, expected_byte_length)
+    digest = hashlib.sha256()
+    with asset_path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    if digest.hexdigest() != expected_sha256:
+        raise CodecRuntimeError("decoder asset hash changed after selection")
+    return asset_path
+
+
+def host_validated_decoder_path(
+    path: str | Path,
+    expected_sha256: str,
+    expected_byte_length: int,
+) -> Path:
+    """Cross-check a decoder path whose exact bytes are retained by Protocol 2 Core.
+
+    The authenticated host has already hashed the file and keeps a Windows
+    handle open without share-write or share-delete access.  Re-reading the
+    payload here would add no integrity evidence, so this boundary checks only
+    the exact descriptor and current length before the model loader consumes
+    the pinned path.
+    """
+
     asset_path = Path(path)
     if expected_byte_length <= 0:
         raise CodecRuntimeError("decoder asset byte length must be positive")
@@ -75,12 +99,6 @@ def validate_decoder_asset(
         raise CodecRuntimeError("decoder asset SHA-256 is not canonical")
     if not asset_path.is_file() or asset_path.stat().st_size != expected_byte_length:
         raise CodecRuntimeError("decoder asset is missing or its byte length changed")
-    digest = hashlib.sha256()
-    with asset_path.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
-            digest.update(chunk)
-    if digest.hexdigest() != expected_sha256:
-        raise CodecRuntimeError("decoder asset hash changed after selection")
     return asset_path
 
 
@@ -111,6 +129,27 @@ class H3Decoder:
             expected_sha256,
             expected_byte_length,
         )
+        return cls._load_validated_path(asset_path, device_ordinal)
+
+    @classmethod
+    def load_host_validated(
+        cls,
+        weight_path: str | Path,
+        expected_sha256: str,
+        expected_byte_length: int,
+        device_ordinal: int,
+    ) -> H3Decoder:
+        """Load bytes already hash-validated and retained by Protocol 2 Core."""
+
+        asset_path = host_validated_decoder_path(
+            weight_path,
+            expected_sha256,
+            expected_byte_length,
+        )
+        return cls._load_validated_path(asset_path, device_ordinal)
+
+    @classmethod
+    def _load_validated_path(cls, asset_path: Path, device_ordinal: int) -> H3Decoder:
         try:
             import torch
             from safetensors.torch import load_file

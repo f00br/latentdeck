@@ -309,6 +309,15 @@ class ProfileReceipt:
 
 @dataclass(frozen=True, slots=True)
 class CodecLoadRequest:
+    """Authenticated host request with exact, already validated asset bindings.
+
+    Core owns full external-asset hashing and retains the accepted bytes for
+    the session lifetime. On Windows, Core also pins the safe path ancestry, so
+    adapters cross-check descriptors without repeating payload hashing during
+    ``load`` or ``open_source``. Other platforms must conservatively remeasure
+    the asset until they provide an equivalent retained-handle bridge.
+    """
+
     descriptor: CodecDescriptor
     assets: tuple[ExternalAsset, ...]
     device: str

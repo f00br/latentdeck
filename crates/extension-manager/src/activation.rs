@@ -47,9 +47,10 @@ struct CacheShared {
 
 /// Process-local cache of exact active package leases.
 ///
-/// The cache stores no persistent trust metadata. Callers must explicitly
-/// invalidate an exact entry before a lifecycle operation that should release
-/// the cache-owned usage lease.
+/// The in-memory cache stores no additional persistent trust state. The common
+/// lifecycle may maintain a receipt-bound Windows seal for large Codec trees;
+/// callers must still explicitly invalidate an exact cache entry before an
+/// operation that should release the cache-owned usage lease.
 #[derive(Debug, Clone, Default)]
 pub struct ActivePackageCache {
     shared: Arc<CacheShared>,
@@ -60,6 +61,7 @@ pub struct ActivePackageCache {
 pub struct ActivePackageCacheStats {
     pub full_hash_attempts: u64,
     pub cold_full_hash_passes: u64,
+    pub persistent_fast_checkouts: u64,
     pub cached_checkouts: u64,
     pub capacity_evictions: u64,
     pub retained_entries: usize,
@@ -99,7 +101,7 @@ impl ActivePackageCache {
                 entry.active.clone()
             })
         };
-        let (result, performed_full_hash) = if let Some(active) = cached {
+        let (result, resolved_new_entry) = if let Some(active) = cached {
             #[cfg(windows)]
             {
                 (
@@ -128,12 +130,17 @@ impl ActivePackageCache {
         let mut state = self.lock_state()?;
         state.busy.remove(&key);
         match &result {
-            Ok(active) if performed_full_hash => {
+            Ok(active) if resolved_new_entry => {
                 state.insert(key, active.clone());
-                state.stats.cold_full_hash_passes = state
-                    .stats
-                    .cold_full_hash_passes
-                    .saturating_add(active.full_hash_passes());
+                if active.full_hash_passes() == 0 {
+                    state.stats.persistent_fast_checkouts =
+                        state.stats.persistent_fast_checkouts.saturating_add(1);
+                } else {
+                    state.stats.cold_full_hash_passes = state
+                        .stats
+                        .cold_full_hash_passes
+                        .saturating_add(active.full_hash_passes());
+                }
             }
             Ok(_) => {
                 state.stats.cached_checkouts = state.stats.cached_checkouts.saturating_add(1);

@@ -6,6 +6,7 @@ mod archive;
 mod error;
 mod lifecycle;
 mod model;
+mod runtime_seal;
 mod schema;
 
 pub use activation::{ActivePackageCache, ActivePackageCacheStats};

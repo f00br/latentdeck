@@ -15,7 +15,8 @@ pub use migrations::SCHEMA_VERSION;
 pub use model::*;
 pub use resolver::{
     DeckSourceIdentity, IndexedDeckSource, MAX_DECK_SOURCE_PATH_CANDIDATES,
-    MAX_INDEXED_DECK_SOURCE_QUERY_CHUNK, MAX_INDEXED_DECK_SOURCES, ResolvedDeckSource,
+    MAX_INDEXED_DECK_SOURCE_QUERY_CHUNK, MAX_INDEXED_DECK_SOURCES, PreparedDeckSource,
+    ResolvedDeckSource,
 };
 
 use rusqlite::Connection;

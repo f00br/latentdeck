@@ -428,6 +428,11 @@ pub struct TrustReceipt {
     pub publisher_identity_claim: PublisherIdentityClaim,
     pub installed_at_utc: String,
     pub enabled: bool,
+    /// Optional pre-public Protocol 2 migration field. Current binaries accept
+    /// legacy receipts without it; binaries predating this closed-schema field
+    /// may reject a migrated receipt and are not a supported downgrade path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_seal_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

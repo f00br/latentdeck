@@ -68,6 +68,19 @@ pub struct ResolvedDeckSource {
     validated_cartridge: IntegrityValidatedCartridge,
 }
 
+/// Backend-only exact identity plus its bounded registered path candidates.
+///
+/// Preparing a source performs only the Library database lookup. The value is
+/// intentionally not serializable and exposes no path accessor, so an
+/// application can move strict LC validation to an independent blocking worker
+/// without accepting a caller-supplied path or leaking one across the UI
+/// boundary.
+#[derive(Debug)]
+pub struct PreparedDeckSource {
+    identity: DeckSourceIdentity,
+    candidates: Vec<PathBuf>,
+}
+
 /// Backend-only immutable metadata selected from the Library index. It has no
 /// filesystem path or retained handle and is therefore suitable only for UI
 /// compatibility display, never launch authority.
@@ -121,6 +134,35 @@ impl ResolvedDeckSource {
                 .try_clone_retained()
                 .map_err(|error| LibraryError::cartridge(&error))?,
         })
+    }
+}
+
+impl PreparedDeckSource {
+    /// Fully validate the registered candidates and return the first exact
+    /// cartridge matching the prepared immutable identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns only path-free typed Library errors. Every candidate is subject
+    /// to the same ZIP, schema, integrity, tensor and finite-value validation as
+    /// [`Library::resolve_deck_source`].
+    pub fn validate(self) -> Result<ResolvedDeckSource> {
+        let mut first_error = None;
+        for path in self.candidates {
+            match validate_registered_path(&path, &self.identity) {
+                Ok(validated_cartridge) => {
+                    return Ok(ResolvedDeckSource {
+                        identity: self.identity,
+                        path,
+                        validated_cartridge,
+                    });
+                }
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        Err(first_error.unwrap_or_else(source_unavailable))
     }
 }
 
@@ -224,14 +266,18 @@ impl Library {
         Ok(output)
     }
 
-    /// Resolves one Deck slot source only through registered `present` paths,
-    /// then performs full LC validation before returning the local path.
+    /// Prepare one Deck source resolution from immutable Library metadata.
+    ///
+    /// This method verifies the exact cartridge identity and returns at most
+    /// [`MAX_DECK_SOURCE_PATH_CANDIDATES`] registered `present` paths inside a
+    /// backend-only value. It does not open or validate LC bytes; call
+    /// [`PreparedDeckSource::validate`] before runtime use.
     ///
     /// # Errors
     ///
     /// Returns only path-free typed library errors. No filesystem path supplied
     /// by a UI caller is accepted by this API.
-    pub fn resolve_deck_source(&self, identity: &DeckSourceIdentity) -> Result<ResolvedDeckSource> {
+    pub fn prepare_deck_source(&self, identity: &DeckSourceIdentity) -> Result<PreparedDeckSource> {
         let indexed_cartridge_id = self
             .connection
             .query_row(
@@ -272,22 +318,21 @@ impl Library {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LibraryError::database)?;
 
-        let mut first_error = None;
-        for path in candidates {
-            match validate_registered_path(&path, identity) {
-                Ok(validated_cartridge) => {
-                    return Ok(ResolvedDeckSource {
-                        identity: identity.clone(),
-                        path,
-                        validated_cartridge,
-                    });
-                }
-                Err(error) => {
-                    first_error.get_or_insert(error);
-                }
-            }
-        }
-        Err(first_error.unwrap_or_else(source_unavailable))
+        Ok(PreparedDeckSource {
+            identity: identity.clone(),
+            candidates,
+        })
+    }
+
+    /// Resolves one Deck slot source only through registered `present` paths,
+    /// then performs full LC validation before returning the local path.
+    ///
+    /// # Errors
+    ///
+    /// Returns only path-free typed library errors. No filesystem path supplied
+    /// by a UI caller is accepted by this API.
+    pub fn resolve_deck_source(&self, identity: &DeckSourceIdentity) -> Result<ResolvedDeckSource> {
+        self.prepare_deck_source(identity)?.validate()
     }
 }
 

@@ -1623,14 +1623,12 @@ pub(crate) async fn deck_generic_open(
     }
 
     let result = Box::pin(async {
-        let mut resolved = Vec::with_capacity(request.sources.len());
-        for source in &request.sources {
-            resolved.push(
-                library
-                    .resolve_deck_source(source_identity(source)?)
-                    .await?,
-            );
-        }
+        let identities = request
+            .sources
+            .iter()
+            .map(source_identity)
+            .collect::<Result<Vec<_>, _>>()?;
+        let resolved = library.resolve_deck_sources(identities).await?;
         let retained_assets = {
             let mut controller = state.controller.lock().await;
             controller.retained_assets(&request.codec_id, &request.codec_version)

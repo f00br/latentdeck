@@ -128,10 +128,21 @@ pub(crate) fn parse_strict_json<T>(bytes: &[u8], context: &str) -> Result<T>
 where
     T: DeserializeOwned + Serialize,
 {
-    if bytes.is_empty() || bytes.len() > MAX_JSON_BYTES {
+    parse_strict_json_with_limit(bytes, context, MAX_JSON_BYTES)
+}
+
+pub(crate) fn parse_strict_json_with_limit<T>(
+    bytes: &[u8],
+    context: &str,
+    max_bytes: usize,
+) -> Result<T>
+where
+    T: DeserializeOwned + Serialize,
+{
+    if bytes.is_empty() || bytes.len() > max_bytes {
         return Err(ExtensionError::new(
             ErrorCode::ManifestInvalid,
-            format!("{context} is empty or exceeds {MAX_JSON_BYTES} bytes"),
+            format!("{context} is empty or exceeds {max_bytes} bytes"),
         ));
     }
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);

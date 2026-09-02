@@ -287,6 +287,42 @@ fn pack_source(source: &Path, output: &Path) -> (String, u64) {
     )
 }
 
+fn codec_runtime_seal_path(roots: &ExtensionRoots, package: &PackageReference) -> PathBuf {
+    roots
+        .trust_root
+        .join(".runtime-v1")
+        .join("codecs")
+        .join(&package.package_id)
+        .join(format!("{}.json", package.package_version))
+}
+
+fn install_enabled_codec_fixture(
+    temp: &TempDir,
+    worker_bytes: &[u8],
+) -> (ExtensionRoots, latentdeck_extension_manager::InstallReceipt) {
+    let source = temp.path().join("codec-source");
+    fs::create_dir(&source).expect("create Codec source");
+    write_codec_source_with_worker(&source, "0.2.0", profile(), worker_bytes);
+    let archive = temp.path().join("codec.ldcodec");
+    let (hash, _) = pack_source(&source, &archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let installed = install(
+        &roots,
+        &InstallRequest {
+            archive_path: archive,
+            expected_sha256: hash,
+        },
+    )
+    .expect("install Codec fixture");
+    let enabled = enable(&roots, &installed.inspection.package).expect("enable Codec fixture");
+    assert!(
+        enabled.runtime_seal_sha256.is_some(),
+        "explicit Codec enable must persist the supported NTFS validation seal"
+    );
+    assert!(codec_runtime_seal_path(&roots, &installed.inspection.package).is_file());
+    (roots, installed)
+}
+
 fn write_unchecked_deck_archive(source: &Path, output: &Path) -> (String, u64) {
     write_unchecked_deck_archive_with_directories(source, output, &[])
 }
@@ -896,6 +932,448 @@ fn process_cache_reuses_one_cold_validation_for_repeated_exact_checkouts() {
     assert_eq!(cache.stats().cached_checkouts, 1);
 }
 
+#[cfg(windows)]
+#[test]
+fn fresh_process_cache_reuses_a_persisted_codec_validation_seal() {
+    let temp = TempDir::new().expect("temp");
+    let source = temp.path().join("codec-source");
+    fs::create_dir(&source).expect("create source");
+    write_codec_source_with_worker(&source, "0.2.0", profile(), &vec![0x5a; 8 * 1024 * 1024]);
+    let archive = temp.path().join("codec.ldcodec");
+    let (hash, _) = pack_source(&source, &archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let installed = install(
+        &roots,
+        &InstallRequest {
+            archive_path: archive,
+            expected_sha256: hash,
+        },
+    )
+    .expect("install");
+
+    let first_process = ActivePackageCache::new();
+    let active = first_process
+        .enable_and_prime(&roots, &installed.inspection.package)
+        .expect("first process validates and seals exact Codec bytes");
+    assert_eq!(first_process.stats().full_hash_attempts, 1);
+    assert!(
+        active.trust_receipt().runtime_seal_sha256.is_some(),
+        "a supported NTFS LocalAppData tree must receive a persisted seal"
+    );
+    drop(active);
+    drop(first_process);
+
+    let next_process = ActivePackageCache::new();
+    let active = next_process
+        .resolve_active(&roots, &installed.inspection.package)
+        .expect("next process checks the persisted seal without payload hashing");
+
+    assert_eq!(active.root(), installed.destination);
+    assert_eq!(next_process.stats().full_hash_attempts, 0);
+    assert_eq!(next_process.stats().cold_full_hash_passes, 0);
+    assert_eq!(next_process.stats().persistent_fast_checkouts, 1);
+}
+
+#[cfg(windows)]
+#[test]
+fn persisted_codec_seal_rejects_same_length_tamper_with_restored_mtime() {
+    let temp = TempDir::new().expect("temp");
+    let source = temp.path().join("codec-source");
+    fs::create_dir(&source).expect("create source");
+    write_codec_source_with_worker(&source, "0.2.0", profile(), &vec![0x5a; 8 * 1024 * 1024]);
+    let archive = temp.path().join("codec.ldcodec");
+    let (hash, _) = pack_source(&source, &archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let installed = install(
+        &roots,
+        &InstallRequest {
+            archive_path: archive,
+            expected_sha256: hash,
+        },
+    )
+    .expect("install");
+    let first_process = ActivePackageCache::new();
+    let active = first_process
+        .enable_and_prime(&roots, &installed.inspection.package)
+        .expect("prime persisted seal");
+    drop(active);
+    drop(first_process);
+
+    let payload = installed.destination.join("runtime/python.exe");
+    let original_mtime = fs::metadata(&payload)
+        .expect("payload metadata")
+        .modified()
+        .expect("payload mtime");
+    let mut file = File::options()
+        .write(true)
+        .open(&payload)
+        .expect("open payload for same-length tamper");
+    file.write_all(&[0xa5]).expect("overwrite one byte");
+    file.sync_all().expect("persist tamper");
+    file.set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+        .expect("restore mtime");
+    drop(file);
+
+    let next_process = ActivePackageCache::new();
+    assert_eq!(
+        next_process
+            .resolve_active(&roots, &installed.inspection.package)
+            .expect_err("USN mismatch must force a full hash and reject changed bytes")
+            .code(),
+        ErrorCode::IntegrityFailed
+    );
+    assert_eq!(next_process.stats().full_hash_attempts, 1);
+    assert_eq!(next_process.stats().persistent_fast_checkouts, 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn corrupt_or_missing_codec_seal_falls_back_to_full_hash_and_refreshes() {
+    let temp = TempDir::new().expect("temp");
+    let (roots, installed) = install_enabled_codec_fixture(&temp, &vec![0x5a; 1024 * 1024]);
+    let seal_path = codec_runtime_seal_path(&roots, &installed.inspection.package);
+
+    fs::write(&seal_path, b"{corrupt-seal").expect("corrupt persisted seal");
+    let corrupt_process = ActivePackageCache::new();
+    let active = corrupt_process
+        .resolve_active(&roots, &installed.inspection.package)
+        .expect("corrupt seal falls back to exact catalog hashes");
+    assert_eq!(corrupt_process.stats().full_hash_attempts, 1);
+    assert_eq!(corrupt_process.stats().persistent_fast_checkouts, 0);
+    drop(active);
+    drop(corrupt_process);
+
+    fs::remove_file(&seal_path).expect("remove refreshed seal");
+    let missing_process = ActivePackageCache::new();
+    let active = missing_process
+        .resolve_active(&roots, &installed.inspection.package)
+        .expect("missing seal falls back to exact catalog hashes");
+    assert_eq!(missing_process.stats().full_hash_attempts, 1);
+    assert_eq!(missing_process.stats().persistent_fast_checkouts, 0);
+    drop(active);
+    drop(missing_process);
+
+    let refreshed_process = ActivePackageCache::new();
+    refreshed_process
+        .resolve_active(&roots, &installed.inspection.package)
+        .expect("fallback publishes a fresh seal for the following process");
+    assert_eq!(refreshed_process.stats().full_hash_attempts, 0);
+    assert_eq!(refreshed_process.stats().persistent_fast_checkouts, 1);
+}
+
+#[cfg(windows)]
+#[test]
+fn legacy_codec_receipt_hashes_once_then_persists_a_fast_start_seal() {
+    let temp = TempDir::new().expect("temp");
+    let (roots, installed) = install_enabled_codec_fixture(&temp, &vec![0x5a; 1024 * 1024]);
+    let mut receipt: serde_json::Value = serde_json::from_slice(
+        &fs::read(&installed.trust_receipt_path).expect("read exact receipt"),
+    )
+    .expect("parse exact receipt");
+    receipt
+        .as_object_mut()
+        .expect("receipt object")
+        .remove("runtime_seal_sha256");
+    fs::write(&installed.trust_receipt_path, canonical(&receipt))
+        .expect("write legacy receipt without optional seal pointer");
+
+    let migration_process = ActivePackageCache::new();
+    let active = migration_process
+        .resolve_active(&roots, &installed.inspection.package)
+        .expect("legacy receipt receives one complete validation");
+    assert_eq!(migration_process.stats().full_hash_attempts, 1);
+    assert!(active.trust_receipt().runtime_seal_sha256.is_some());
+    drop(active);
+    drop(migration_process);
+
+    let next_process = ActivePackageCache::new();
+    next_process
+        .resolve_active(&roots, &installed.inspection.package)
+        .expect("next process uses the migrated receipt seal");
+    assert_eq!(next_process.stats().full_hash_attempts, 0);
+    assert_eq!(next_process.stats().persistent_fast_checkouts, 1);
+}
+
+#[cfg(windows)]
+#[test]
+fn exact_byte_file_replacement_invalidates_codec_seal_by_file_identity() {
+    let temp = TempDir::new().expect("temp");
+    let (roots, installed) = install_enabled_codec_fixture(&temp, &vec![0x5a; 1024 * 1024]);
+    let payload = installed.destination.join("runtime/python.exe");
+    let exact_bytes = fs::read(&payload).expect("read exact payload bytes");
+    fs::remove_file(&payload).expect("remove original file identity");
+    fs::write(&payload, exact_bytes).expect("restore exact bytes under a new file identity");
+
+    let replacement_process = ActivePackageCache::new();
+    let active = replacement_process
+        .resolve_active(&roots, &installed.inspection.package)
+        .expect("new file identity forces full hashes but exact bytes remain trusted");
+    assert_eq!(replacement_process.stats().full_hash_attempts, 1);
+    assert_eq!(replacement_process.stats().persistent_fast_checkouts, 0);
+    drop(active);
+    drop(replacement_process);
+
+    let next_process = ActivePackageCache::new();
+    next_process
+        .resolve_active(&roots, &installed.inspection.package)
+        .expect("replacement receives a new seal after exact hash validation");
+    assert_eq!(next_process.stats().full_hash_attempts, 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn codec_seal_closed_tree_check_rejects_added_removed_and_reparse_children() {
+    use std::os::windows::fs::symlink_dir;
+
+    for mutation in ["added", "removed", "reparse"] {
+        let temp = TempDir::new().expect("temp");
+        let (roots, installed) = install_enabled_codec_fixture(&temp, &vec![0x5a; 1024 * 1024]);
+        match mutation {
+            "added" => fs::write(installed.destination.join("unexpected.txt"), b"unexpected")
+                .expect("add uncatalogued child"),
+            "removed" => fs::remove_file(installed.destination.join("runtime/python.exe"))
+                .expect("remove catalogued child"),
+            "reparse" => {
+                let outside = temp.path().join("outside");
+                fs::create_dir(&outside).expect("create outside directory");
+                symlink_dir(&outside, installed.destination.join("unexpected-link"))
+                    .expect("create uncatalogued reparse child");
+            }
+            _ => unreachable!(),
+        }
+
+        let process = ActivePackageCache::new();
+        let expected_code = if mutation == "reparse" {
+            ErrorCode::LifecycleConflict
+        } else {
+            ErrorCode::IntegrityFailed
+        };
+        assert_eq!(
+            process
+                .resolve_active(&roots, &installed.inspection.package)
+                .expect_err("closed tree mutation must fail before trusting a persisted seal")
+                .code(),
+            expected_code,
+            "mutation={mutation}"
+        );
+        assert_eq!(
+            process.stats().full_hash_attempts,
+            0,
+            "cheap closed-tree rejection precedes a payload hash: mutation={mutation}"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn journal_identity_mismatch_falls_back_to_full_hash_validation() {
+    let temp = TempDir::new().expect("temp");
+    let (roots, installed) = install_enabled_codec_fixture(&temp, &vec![0x5a; 1024 * 1024]);
+    let seal_path = codec_runtime_seal_path(&roots, &installed.inspection.package);
+    let mut seal: serde_json::Value =
+        serde_json::from_slice(&fs::read(&seal_path).expect("read runtime seal"))
+            .expect("parse runtime seal");
+    seal["tree"]["usn_journal_id"] = serde_json::Value::String("ffffffffffffffff".to_owned());
+    let seal_bytes = canonical(&seal);
+    fs::write(&seal_path, &seal_bytes).expect("write journal-reset simulation");
+    let mut receipt: serde_json::Value = serde_json::from_slice(
+        &fs::read(&installed.trust_receipt_path).expect("read exact receipt"),
+    )
+    .expect("parse exact receipt");
+    receipt["runtime_seal_sha256"] = serde_json::Value::String(sha256(&seal_bytes));
+    fs::write(&installed.trust_receipt_path, canonical(&receipt))
+        .expect("bind receipt to journal-reset simulation");
+
+    let process = ActivePackageCache::new();
+    process
+        .resolve_active(&roots, &installed.inspection.package)
+        .expect("journal identity mismatch falls back to exact payload hashes");
+    assert_eq!(process.stats().full_hash_attempts, 1);
+    assert_eq!(process.stats().persistent_fast_checkouts, 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn explicit_verify_refreshes_codec_seal_for_the_next_process() {
+    let temp = TempDir::new().expect("temp");
+    let (roots, installed) = install_enabled_codec_fixture(&temp, &vec![0x5a; 1024 * 1024]);
+    let seal_path = codec_runtime_seal_path(&roots, &installed.inspection.package);
+    fs::write(&seal_path, b"invalid").expect("invalidate runtime seal");
+
+    verify(&roots, &installed.inspection.package)
+        .expect("explicit verify performs full validation and refreshes the seal");
+
+    let next_process = ActivePackageCache::new();
+    next_process
+        .resolve_active(&roots, &installed.inspection.package)
+        .expect("fresh process uses seal refreshed by explicit verify");
+    assert_eq!(next_process.stats().full_hash_attempts, 0);
+    assert_eq!(next_process.stats().persistent_fast_checkouts, 1);
+}
+
+#[cfg(windows)]
+#[test]
+fn repair_and_remove_delete_codec_runtime_seal_sidecars() {
+    let temp = TempDir::new().expect("temp");
+    let source = temp.path().join("codec-source");
+    fs::create_dir(&source).expect("create Codec source");
+    write_codec_source_with_worker(&source, "0.2.0", profile(), &vec![0x5a; 1024 * 1024]);
+    let archive = temp.path().join("codec.ldcodec");
+    let (hash, _) = pack_source(&source, &archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let installed = install(
+        &roots,
+        &InstallRequest {
+            archive_path: archive.clone(),
+            expected_sha256: hash.clone(),
+        },
+    )
+    .expect("install disabled Codec");
+    let seal_path = codec_runtime_seal_path(&roots, &installed.inspection.package);
+
+    verify(&roots, &installed.inspection.package).expect("verify creates disabled-package seal");
+    assert!(seal_path.is_file());
+    repair(
+        &roots,
+        &InstallRequest {
+            archive_path: archive,
+            expected_sha256: hash,
+        },
+    )
+    .expect("repair exact disabled Codec");
+    assert!(!seal_path.exists(), "repair removes stale runtime seal");
+
+    verify(&roots, &installed.inspection.package).expect("verify recreates runtime seal");
+    assert!(seal_path.is_file());
+    remove(
+        &roots,
+        &installed.inspection.package,
+        RemoveOptions::default(),
+    )
+    .expect("remove exact disabled Codec");
+    assert!(!seal_path.exists(), "remove deletes runtime seal sidecar");
+}
+
+#[cfg(windows)]
+#[test]
+fn unavailable_optional_seal_storage_cannot_block_enable_verify_or_runtime() {
+    let temp = TempDir::new().expect("temp");
+    let source = temp.path().join("codec-source");
+    fs::create_dir(&source).expect("create Codec source");
+    write_codec_source_with_worker(&source, "0.2.0", profile(), &vec![0x5a; 1024 * 1024]);
+    let archive = temp.path().join("codec.ldcodec");
+    let (hash, _) = pack_source(&source, &archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let installed = install(
+        &roots,
+        &InstallRequest {
+            archive_path: archive,
+            expected_sha256: hash,
+        },
+    )
+    .expect("install disabled Codec");
+    fs::write(
+        roots.trust_root.join(".runtime-v1"),
+        b"unavailable optional cache root",
+    )
+    .expect("block optional seal directory with a regular file");
+
+    let enabled = enable(&roots, &installed.inspection.package)
+        .expect("full validation remains authoritative when optional seal write fails");
+    assert!(enabled.enabled);
+    assert!(enabled.runtime_seal_sha256.is_none());
+    verify(&roots, &installed.inspection.package)
+        .expect("explicit full verify cannot be blocked by optional seal storage");
+
+    let process = ActivePackageCache::new();
+    let active = process
+        .resolve_active(&roots, &installed.inspection.package)
+        .expect("unsafe optional seal path falls back to complete hashes");
+    assert_eq!(process.stats().full_hash_attempts, 1);
+    assert!(active.trust_receipt().runtime_seal_sha256.is_none());
+}
+
+#[cfg(windows)]
+#[test]
+fn optional_seal_reparse_falls_back_and_partial_cleanup_is_bounded_to_owned_names() {
+    use std::os::windows::fs::symlink_dir;
+
+    let temp = TempDir::new().expect("temp");
+    let (roots, installed) = install_enabled_codec_fixture(&temp, &vec![0x5a; 1024 * 1024]);
+    let seal_path = codec_runtime_seal_path(&roots, &installed.inspection.package);
+    let seal_parent = seal_path.parent().expect("seal parent");
+    let owned_partial = seal_parent.join(".seal-00000000000000000000000000000001.partial");
+    let unrelated = seal_parent.join(".seal-owner-notes.partial");
+    fs::write(&owned_partial, b"stale").expect("write owned stale partial");
+    fs::write(&unrelated, b"keep").expect("write unrelated file");
+
+    let cleanup_process = ActivePackageCache::new();
+    cleanup_process
+        .resolve_active(&roots, &installed.inspection.package)
+        .expect("valid seal remains usable while owned stale partial is cleaned");
+    assert!(!owned_partial.exists());
+    assert!(unrelated.is_file());
+    drop(cleanup_process);
+
+    let runtime_root = roots.trust_root.join(".runtime-v1");
+    fs::remove_dir_all(&runtime_root).expect("remove test-owned optional cache root");
+    let outside = temp.path().join("outside-runtime-seal");
+    let outside_seal = outside
+        .join("codecs")
+        .join(&installed.inspection.package.package_id)
+        .join(format!(
+            "{}.json",
+            installed.inspection.package.package_version
+        ));
+    fs::create_dir_all(outside_seal.parent().expect("outside seal parent"))
+        .expect("create optional reparse target");
+    fs::write(&outside_seal, b"external sentinel").expect("write external seal sentinel");
+    symlink_dir(&outside, &runtime_root).expect("create optional cache reparse point");
+
+    let fallback_process = ActivePackageCache::new();
+    let active = fallback_process
+        .resolve_active(&roots, &installed.inspection.package)
+        .expect("optional cache reparse falls back to full hash validation");
+    assert_eq!(fallback_process.stats().full_hash_attempts, 1);
+    assert!(active.trust_receipt().runtime_seal_sha256.is_none());
+    assert_eq!(
+        fs::read(&outside_seal).expect("read sentinel"),
+        b"external sentinel"
+    );
+    drop(active);
+    drop(fallback_process);
+
+    disable(&roots, &installed.inspection.package).expect("disable with optional reparse present");
+    assert_eq!(
+        fs::read(&outside_seal).expect("read sentinel"),
+        b"external sentinel"
+    );
+    let archive = temp.path().join("codec.ldcodec");
+    let archive_hash = sha256(&fs::read(&archive).expect("read repair archive"));
+    repair(
+        &roots,
+        &InstallRequest {
+            archive_path: archive,
+            expected_sha256: archive_hash,
+        },
+    )
+    .expect("repair with optional reparse present");
+    assert_eq!(
+        fs::read(&outside_seal).expect("read sentinel"),
+        b"external sentinel"
+    );
+    remove(
+        &roots,
+        &installed.inspection.package,
+        RemoveOptions::default(),
+    )
+    .expect("remove with optional reparse present");
+    assert_eq!(
+        fs::read(&outside_seal).expect("read sentinel"),
+        b"external sentinel"
+    );
+}
+
 #[test]
 fn runtime_inventory_primes_matrix_and_runtime_boundaries_with_one_hash_per_package() {
     let temp = TempDir::new().expect("temp");
@@ -936,7 +1414,15 @@ fn runtime_inventory_primes_matrix_and_runtime_boundaries_with_one_hash_per_pack
     assert_eq!(matrix.packages.len(), 2);
     assert_eq!(matrix.matrix.len(), 1);
     assert_eq!(matrix.matrix[0].reason, CompatibilityReason::Compatible);
-    assert_eq!(cache.stats().cold_full_hash_passes, 2);
+    let expected_full_hash_passes = if cfg!(windows) { 1 } else { 2 };
+    assert_eq!(
+        cache.stats().cold_full_hash_passes,
+        expected_full_hash_passes
+    );
+    assert_eq!(
+        cache.stats().persistent_fast_checkouts,
+        u64::from(cfg!(windows))
+    );
 
     for package in [&deck.inspection.package, &codec.inspection.package] {
         cache
@@ -949,7 +1435,10 @@ fn runtime_inventory_primes_matrix_and_runtime_boundaries_with_one_hash_per_pack
             .expect("open checkout");
     }
 
-    assert_eq!(cache.stats().cold_full_hash_passes, 2);
+    assert_eq!(
+        cache.stats().cold_full_hash_passes,
+        expected_full_hash_passes
+    );
     assert_eq!(cache.stats().cached_checkouts, 4);
 }
 
@@ -1234,6 +1723,8 @@ fn disable_revokes_future_use_without_hashing_payload_again() {
         .disable(&roots, &codec.inspection.package)
         .expect("disable only narrows authority");
     assert!(!receipt.enabled);
+    assert!(receipt.runtime_seal_sha256.is_none());
+    assert!(!codec_runtime_seal_path(&roots, &codec.inspection.package).exists());
     assert_eq!(cache.stats().full_hash_attempts, 1);
     assert_eq!(
         cache
@@ -1376,8 +1867,10 @@ fn runtime_inventory_does_not_rehash_an_enabled_corrupt_package_for_its_summary(
         inventory.matrix[0].reason,
         CompatibilityReason::PackageInvalid
     );
-    assert_eq!(stats.full_hash_attempts, 2);
-    assert_eq!(stats.cold_full_hash_passes, 1);
+    let expected_codec_full_hashes = u64::from(!cfg!(windows));
+    assert_eq!(stats.full_hash_attempts, 1 + expected_codec_full_hashes);
+    assert_eq!(stats.cold_full_hash_passes, expected_codec_full_hashes);
+    assert_eq!(stats.persistent_fast_checkouts, u64::from(cfg!(windows)));
 }
 
 #[test]
@@ -1529,7 +2022,14 @@ fn process_cache_singleflights_concurrent_cold_checkouts_per_exact_package() {
             .expect("checkout thread")
             .expect("singleflight caller succeeds");
     }
-    assert_eq!(cache.stats().cold_full_hash_passes, 1);
+    assert_eq!(
+        cache.stats().cold_full_hash_passes,
+        u64::from(!cfg!(windows))
+    );
+    assert_eq!(
+        cache.stats().persistent_fast_checkouts,
+        u64::from(cfg!(windows))
+    );
     assert_eq!(cache.stats().cached_checkouts, (CALLERS - 1) as u64);
 }
 
@@ -1663,6 +2163,41 @@ fn explicit_verify_remains_independent_of_the_process_cache() {
 
 #[test]
 #[ignore = "requires an explicitly supplied installed package for local performance evidence"]
+fn installed_package_enable_and_seal_timing_from_environment() {
+    let local_app_data =
+        std::env::var_os("LATENTDECK_PERF_LOCAL_APP_DATA").expect("LATENTDECK_PERF_LOCAL_APP_DATA");
+    let package = PackageReference {
+        kind: PackageKind::CodecPack,
+        package_id: std::env::var("LATENTDECK_PERF_CODEC_ID").expect("LATENTDECK_PERF_CODEC_ID"),
+        package_version: std::env::var("LATENTDECK_PERF_CODEC_VERSION")
+            .expect("LATENTDECK_PERF_CODEC_VERSION"),
+    };
+    let roots = ExtensionRoots::from_local_app_data(local_app_data);
+    let cache = ActivePackageCache::new();
+
+    let started = std::time::Instant::now();
+    let active = cache
+        .enable_and_prime(&roots, &package)
+        .expect("full-validate, enable, seal, and prime installed Codec");
+    let elapsed = started.elapsed();
+    let stats = cache.stats();
+
+    assert!(active.trust_receipt().enabled);
+    assert_eq!(stats.full_hash_attempts, 1);
+    assert_eq!(stats.cold_full_hash_passes, 1);
+    #[cfg(windows)]
+    assert!(active.trust_receipt().runtime_seal_sha256.is_some());
+    eprintln!(
+        "enable_and_seal_seconds={:.6} full_hash_attempts={} successful_full_hash_passes={} runtime_seal={}",
+        elapsed.as_secs_f64(),
+        stats.full_hash_attempts,
+        stats.cold_full_hash_passes,
+        active.trust_receipt().runtime_seal_sha256.is_some()
+    );
+}
+
+#[test]
+#[ignore = "requires an explicitly supplied installed package for local performance evidence"]
 fn installed_package_cache_timing_from_environment() {
     let local_app_data =
         std::env::var_os("LATENTDECK_PERF_LOCAL_APP_DATA").expect("LATENTDECK_PERF_LOCAL_APP_DATA");
@@ -1687,12 +2222,20 @@ fn installed_package_cache_timing_from_environment() {
     let cached_elapsed = cached_started.elapsed();
 
     assert_eq!(cold.root(), cached.root());
-    assert_eq!(cache.stats().cold_full_hash_passes, 1);
-    assert_eq!(cache.stats().cached_checkouts, 1);
+    let stats = cache.stats();
+    assert_eq!(
+        stats.cold_full_hash_passes + stats.persistent_fast_checkouts,
+        1,
+        "one new-process validation path must complete"
+    );
+    assert_eq!(stats.cached_checkouts, 1);
     eprintln!(
-        "cold_seconds={:.6} cached_seconds={:.6}",
+        "cold_seconds={:.6} cached_seconds={:.6} full_hash_attempts={} successful_full_hash_passes={} persistent_fast_checkouts={}",
         cold_elapsed.as_secs_f64(),
-        cached_elapsed.as_secs_f64()
+        cached_elapsed.as_secs_f64(),
+        stats.full_hash_attempts,
+        stats.cold_full_hash_passes,
+        stats.persistent_fast_checkouts
     );
 }
 

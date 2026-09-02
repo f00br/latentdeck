@@ -22,6 +22,7 @@ use crate::model::{
     PackageHealth, PackageKind, PackageManifest, PackageReference, TrustReceipt,
     ValidatedInstalledPackage,
 };
+use crate::runtime_seal::{self, EncodedRuntimeSeal};
 use crate::schema::{
     MAX_JSON_BYTES, TRUST_RECEIPT_VERSION, canonical_json, is_reserved_package_id,
     parse_integrity_catalog, parse_manifest, parse_strict_json, validate_bundled_index,
@@ -104,6 +105,21 @@ impl Drop for LifecycleLock {
 }
 
 struct TemporaryDirectoryGuard(Option<PathBuf>);
+
+struct PinnedPackageTree {
+    validated: crate::archive::ValidatedDirectory,
+    retained_tree_handles: Vec<File>,
+    sealed_handle_indices: Vec<usize>,
+}
+
+impl PinnedPackageTree {
+    fn sealed_handles(&self) -> Vec<&File> {
+        self.sealed_handle_indices
+            .iter()
+            .map(|index| &self.retained_tree_handles[*index])
+            .collect()
+    }
+}
 
 impl TemporaryDirectoryGuard {
     fn disarm(&mut self) {
@@ -214,6 +230,7 @@ fn repair_prepared(
     {
         let receipt = trust_from_prepared(&prepared, false)?;
         write_receipt_replace(&receipt_path, &receipt)?;
+        remove_runtime_seal(roots, &package);
         return Ok(InstallReceipt {
             destination,
             trust_receipt_path: receipt_path,
@@ -405,18 +422,19 @@ pub(crate) fn enable_active_counted(
         )
     })?;
     full_hash_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let (validated, retained_tree_handles) =
-        pin_and_validate_package_tree(roots, &destination, package.kind)?;
-    validate_hash_bound_receipt(&validated, &receipt, package)?;
+    let tree = pin_and_validate_package_tree(roots, &destination, package.kind)?;
+    validate_hash_bound_receipt(&tree.validated, &receipt, package)?;
 
     receipt.enabled = true;
+    receipt.runtime_seal_sha256 = None;
+    prepare_runtime_seal(roots, package, &destination, &mut receipt, &tree);
     write_receipt_replace(&receipt_path, &receipt)?;
     Ok(ActiveInstalledPackage::new(
-        ValidatedInstalledPackage::new(destination, validated.manifest, receipt),
-        validated.files,
+        ValidatedInstalledPackage::new(destination, tree.validated.manifest, receipt),
+        tree.validated.files,
         1,
         usage_lock,
-        retained_tree_handles,
+        tree.retained_tree_handles,
     ))
 }
 
@@ -453,18 +471,34 @@ fn resolve_active_impl(
             &error,
         )
     })?;
-    if let Some(full_hash_attempts) = full_hash_attempts {
-        full_hash_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-    let (validated, retained_tree_handles) =
-        pin_and_validate_package_tree(roots, &destination, package.kind)?;
-    validate_hash_bound_receipt(&validated, &receipt, package)?;
+    let sealed_tree = if package.kind == PackageKind::CodecPack {
+        try_pin_codec_tree_from_runtime_seal(roots, package, &destination, &receipt)?
+    } else {
+        None
+    };
+    let (tree, receipt, full_hash_passes) = if let Some(tree) = sealed_tree {
+        (tree, receipt, 0)
+    } else {
+        if let Some(full_hash_attempts) = full_hash_attempts {
+            full_hash_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let tree = pin_and_validate_package_tree(roots, &destination, package.kind)?;
+        validate_hash_bound_receipt(&tree.validated, &receipt, package)?;
+        let receipt = persist_runtime_seal_after_full_validation(
+            roots,
+            package,
+            &destination,
+            receipt,
+            &tree,
+        );
+        (tree, receipt, 1)
+    };
     Ok(ActiveInstalledPackage::new(
-        ValidatedInstalledPackage::new(destination, validated.manifest, receipt),
-        validated.files,
-        1,
+        ValidatedInstalledPackage::new(destination, tree.validated.manifest, receipt),
+        tree.validated.files,
+        full_hash_passes,
         usage_lock,
-        retained_tree_handles,
+        tree.retained_tree_handles,
     ))
 }
 
@@ -472,8 +506,9 @@ fn pin_and_validate_package_tree(
     roots: &ExtensionRoots,
     destination: &Path,
     kind: PackageKind,
-) -> Result<(crate::archive::ValidatedDirectory, Vec<File>)> {
+) -> Result<PinnedPackageTree> {
     let mut retained = pin_package_root_directories(roots, destination)?;
+    let mut sealed_handle_indices = vec![retained.len() - 1];
     let (manifest_measurement, manifest_bytes, manifest_file) =
         open_and_measure_control_file(destination, kind.manifest_name())?;
     let manifest = parse_manifest(kind, &manifest_bytes)?;
@@ -505,10 +540,11 @@ fn pin_and_validate_package_tree(
         );
     }
     validate_directory_snapshot(destination, kind, &expected_files)?;
-    retained.extend(pin_package_subdirectories(
-        destination,
-        expected_files.keys(),
-    )?);
+    let subdirectories = pin_package_subdirectories(destination, expected_files.keys())?;
+    for handle in subdirectories {
+        sealed_handle_indices.push(retained.len());
+        retained.push(handle);
+    }
 
     let mut jobs = Vec::with_capacity(catalog.files.len());
     for (index, described) in catalog.files.into_iter().enumerate() {
@@ -539,9 +575,12 @@ fn pin_and_validate_package_tree(
             contents.insert(payload.measurement.path.clone(), bytes);
         }
         files.insert(payload.measurement.path.clone(), payload.measurement);
+        sealed_handle_indices.push(retained.len());
         retained.push(payload.file);
     }
+    sealed_handle_indices.push(retained.len());
     retained.push(manifest_file);
+    sealed_handle_indices.push(retained.len());
     retained.push(catalog_file);
 
     let explicit_directories = implied_directories(files.keys());
@@ -553,7 +592,173 @@ fn pin_and_validate_package_tree(
         ));
     }
     validate_directory_snapshot(destination, kind, &validated.files)?;
-    Ok((validated, retained))
+    Ok(PinnedPackageTree {
+        validated,
+        retained_tree_handles: retained,
+        sealed_handle_indices,
+    })
+}
+
+fn pin_codec_tree_without_payload_hash(
+    roots: &ExtensionRoots,
+    destination: &Path,
+) -> Result<PinnedPackageTree> {
+    let kind = PackageKind::CodecPack;
+    let mut retained = pin_package_root_directories(roots, destination)?;
+    let mut sealed_handle_indices = vec![retained.len() - 1];
+    let (manifest_measurement, manifest_bytes, manifest_file) =
+        open_and_measure_control_file(destination, kind.manifest_name())?;
+    let manifest = parse_manifest(kind, &manifest_bytes)?;
+    let (catalog_measurement, catalog_bytes, catalog_file) =
+        open_and_measure_control_file(destination, "integrity.json")?;
+    if catalog_measurement.sha256 != manifest.integrity().catalog_sha256 {
+        return Err(ExtensionError::new(
+            ErrorCode::IntegrityFailed,
+            "integrity.json hash does not match the control manifest",
+        ));
+    }
+    let catalog = parse_integrity_catalog(&catalog_bytes, kind)?;
+    let catalog_files = catalog.files;
+    let mut expected_files = BTreeMap::from([
+        (
+            kind.manifest_name().to_owned(),
+            manifest_measurement.clone(),
+        ),
+        ("integrity.json".to_owned(), catalog_measurement.clone()),
+    ]);
+    for described in &catalog_files {
+        expected_files.insert(
+            described.path.clone(),
+            crate::archive::FileMeasurement {
+                path: described.path.clone(),
+                byte_length: described.byte_length,
+                sha256: described.sha256.clone(),
+            },
+        );
+    }
+    validate_directory_snapshot(destination, kind, &expected_files)?;
+    for handle in pin_package_subdirectories(destination, expected_files.keys())? {
+        sealed_handle_indices.push(retained.len());
+        retained.push(handle);
+    }
+    for described in &catalog_files {
+        let file =
+            open_pinned_file_under_pinned_tree(&path_from_portable(destination, &described.path))?;
+        if file
+            .metadata()
+            .map_err(|error| {
+                ExtensionError::io(
+                    ErrorCode::IntegrityFailed,
+                    "inspect seal-pinned package file",
+                    &error,
+                )
+            })?
+            .len()
+            != described.byte_length
+        {
+            return Err(ExtensionError::new(
+                ErrorCode::IntegrityFailed,
+                format!(
+                    "catalogued file length changed before seal: {}",
+                    described.path
+                ),
+            ));
+        }
+        sealed_handle_indices.push(retained.len());
+        retained.push(file);
+    }
+    sealed_handle_indices.push(retained.len());
+    retained.push(manifest_file);
+    sealed_handle_indices.push(retained.len());
+    retained.push(catalog_file);
+
+    let contents = BTreeMap::from([
+        (kind.manifest_name().to_owned(), manifest_bytes),
+        ("integrity.json".to_owned(), catalog_bytes),
+    ]);
+    let explicit_directories = implied_directories(expected_files.keys());
+    let validated = validate_contract(kind, &expected_files, &explicit_directories, &contents)?;
+    if validated.manifest != manifest {
+        return Err(ExtensionError::new(
+            ErrorCode::IntegrityFailed,
+            "package manifest changed during sealed validation",
+        ));
+    }
+    validate_directory_snapshot(destination, kind, &validated.files)?;
+    Ok(PinnedPackageTree {
+        validated,
+        retained_tree_handles: retained,
+        sealed_handle_indices,
+    })
+}
+
+fn try_pin_codec_tree_from_runtime_seal(
+    roots: &ExtensionRoots,
+    package: &PackageReference,
+    destination: &Path,
+    receipt: &TrustReceipt,
+) -> Result<Option<PinnedPackageTree>> {
+    let Some(expected_seal_sha256) = receipt.runtime_seal_sha256.as_deref() else {
+        return Ok(None);
+    };
+    let Some(seal_bytes) = read_runtime_seal(&runtime_seal_path(roots, package)) else {
+        return Ok(None);
+    };
+    let tree = pin_codec_tree_without_payload_hash(roots, destination)?;
+    validate_hash_bound_receipt(&tree.validated, receipt, package)?;
+    let sealed_handles = tree.sealed_handles();
+    if !runtime_seal::matches(
+        &seal_bytes,
+        expected_seal_sha256,
+        package,
+        receipt,
+        destination,
+        &sealed_handles,
+    )? {
+        return Ok(None);
+    }
+    Ok(Some(tree))
+}
+
+fn prepare_runtime_seal(
+    roots: &ExtensionRoots,
+    package: &PackageReference,
+    destination: &Path,
+    receipt: &mut TrustReceipt,
+    tree: &PinnedPackageTree,
+) {
+    receipt.runtime_seal_sha256 = None;
+    if package.kind != PackageKind::CodecPack {
+        return;
+    }
+    let sealed_handles = tree.sealed_handles();
+    let Ok(Some(seal)) = runtime_seal::build(package, receipt, destination, &sealed_handles) else {
+        remove_runtime_seal(roots, package);
+        return;
+    };
+    let path = runtime_seal_path(roots, package);
+    if write_runtime_seal(&path, &seal).is_ok() {
+        receipt.runtime_seal_sha256 = Some(seal.sha256);
+    } else {
+        remove_runtime_seal(roots, package);
+    }
+}
+
+fn persist_runtime_seal_after_full_validation(
+    roots: &ExtensionRoots,
+    package: &PackageReference,
+    destination: &Path,
+    receipt: TrustReceipt,
+    tree: &PinnedPackageTree,
+) -> TrustReceipt {
+    let original = receipt.clone();
+    let mut updated = receipt;
+    prepare_runtime_seal(roots, package, destination, &mut updated, tree);
+    if write_receipt_replace(&trust_receipt_path(roots, package), &updated).is_ok() {
+        updated
+    } else {
+        original
+    }
 }
 
 fn pin_package_root_directories(roots: &ExtensionRoots, destination: &Path) -> Result<Vec<File>> {
@@ -1027,8 +1232,6 @@ pub fn enable_if_only_installed_version(
     prepare_base(roots)?;
     let _lock = acquire_lock(roots)?;
     prepare_locked_roots(roots)?;
-    verify_locked(roots, package)?;
-
     let id_root = roots.package_root(package.kind).join(&package.package_id);
     ensure_safe_directory(&id_root, false)?;
     for entry in fs::read_dir(&id_root).map_err(|error| {
@@ -1055,10 +1258,13 @@ pub fn enable_if_only_installed_version(
 
     let receipt_path = trust_receipt_path(roots, package);
     let mut receipt = read_trust_receipt(&receipt_path)?;
-    if receipt.enabled {
-        return Ok(receipt);
-    }
+    validate_exact_receipt(&receipt, package)?;
+    let destination = package_destination(roots, package);
+    let tree = pin_and_validate_package_tree(roots, &destination, package.kind)?;
+    validate_hash_bound_receipt(&tree.validated, &receipt, package)?;
     receipt.enabled = true;
+    receipt.runtime_seal_sha256 = None;
+    prepare_runtime_seal(roots, package, &destination, &mut receipt, &tree);
     write_receipt_replace(&receipt_path, &receipt)?;
     Ok(receipt)
 }
@@ -1131,6 +1337,7 @@ pub fn remove(
             &error,
         ));
     }
+    remove_runtime_seal(roots, package);
     let mut seen = 0;
     if let Err(error) = remove_tree_no_follow(&quarantine, 0, &mut seen) {
         return Err(ExtensionError::io(
@@ -1368,6 +1575,7 @@ fn publish_new(
         }
         return Err(error);
     }
+    remove_runtime_seal(roots, &package);
     remove_if_empty(&roots.staging_root);
     Ok(InstallReceipt {
         destination,
@@ -1396,6 +1604,7 @@ fn trust_from_prepared(prepared: &PreparedPackage, enabled: bool) -> Result<Trus
         publisher_identity_claim: prepared.manifest.publisher().identity_claim.clone(),
         installed_at_utc,
         enabled,
+        runtime_seal_sha256: None,
     })
 }
 
@@ -1415,11 +1624,23 @@ fn verify_locked(
     package: &PackageReference,
 ) -> Result<InstalledPackageSummary> {
     let destination = package_destination(roots, package);
-    let (receipt, validated) = verify_installed_tree_locked(roots, package, &destination)?;
+    if !path_exists(&destination, "installed package")? {
+        return Err(ExtensionError::new(
+            ErrorCode::PackageMissing,
+            "exact package version is not installed",
+        ));
+    }
+    let receipt_path = trust_receipt_path(roots, package);
+    let mut receipt = read_trust_receipt(&receipt_path)?;
+    validate_exact_receipt(&receipt, package)?;
+    let tree = pin_and_validate_package_tree(roots, &destination, package.kind)?;
+    validate_hash_bound_receipt(&tree.validated, &receipt, package)?;
+    prepare_runtime_seal(roots, package, &destination, &mut receipt, &tree);
+    write_receipt_replace(&receipt_path, &receipt)?;
     Ok(InstalledPackageSummary {
         package: package.clone(),
-        display_name: Some(validated.manifest.display_name().to_owned()),
-        publisher_name: Some(validated.manifest.publisher().name.clone()),
+        display_name: Some(tree.validated.manifest.display_name().to_owned()),
+        publisher_name: Some(tree.validated.manifest.publisher().name.clone()),
         enabled: receipt.enabled,
         health: PackageHealth::Healthy,
         error_code: None,
@@ -1507,10 +1728,20 @@ fn set_enabled(
     validate_exact_receipt(&receipt, package)?;
     if enabled {
         ensure_no_other_enabled_version(roots, package, &path)?;
-        verify_locked(roots, package)?;
+        let destination = package_destination(roots, package);
+        let tree = pin_and_validate_package_tree(roots, &destination, package.kind)?;
+        validate_hash_bound_receipt(&tree.validated, &receipt, package)?;
+        receipt.enabled = true;
+        receipt.runtime_seal_sha256 = None;
+        prepare_runtime_seal(roots, package, &destination, &mut receipt, &tree);
+    } else {
+        receipt.enabled = false;
+        receipt.runtime_seal_sha256 = None;
     }
-    receipt.enabled = enabled;
     write_receipt_replace(&path, &receipt)?;
+    if !enabled {
+        remove_runtime_seal(roots, package);
+    }
     Ok(receipt)
 }
 
@@ -2361,6 +2592,15 @@ fn trust_receipt_path(roots: &ExtensionRoots, package: &PackageReference) -> Pat
         .join(format!("{}.json", package.package_version))
 }
 
+fn runtime_seal_path(roots: &ExtensionRoots, package: &PackageReference) -> PathBuf {
+    roots
+        .trust_root
+        .join(".runtime-v1")
+        .join(package.kind.receipt_root_name())
+        .join(&package.package_id)
+        .join(format!("{}.json", package.package_version))
+}
+
 fn usage_lock_path(roots: &ExtensionRoots, package: &PackageReference) -> PathBuf {
     roots
         .usage_root
@@ -2526,10 +2766,18 @@ fn read_trust_receipt(path: &Path) -> Result<TrustReceipt> {
         ));
     }
     let receipt: TrustReceipt = parse_strict_json(&bytes, "trust receipt")?;
+    validate_trust_receipt(&receipt)?;
+    Ok(receipt)
+}
+
+fn validate_trust_receipt(receipt: &TrustReceipt) -> Result<()> {
     validate_package_reference(&receipt.package)?;
     validate_sha256(&receipt.archive_sha256, "receipt archive SHA-256")?;
     validate_sha256(&receipt.manifest_sha256, "receipt manifest SHA-256")?;
     validate_sha256(&receipt.integrity_catalog_sha256, "receipt catalog SHA-256")?;
+    if let Some(seal_sha256) = &receipt.runtime_seal_sha256 {
+        validate_sha256(seal_sha256, "receipt runtime seal SHA-256")?;
+    }
     if receipt.archive_byte_length == 0 {
         return Err(ExtensionError::new(
             ErrorCode::PackageUntrusted,
@@ -2542,7 +2790,162 @@ fn read_trust_receipt(path: &Path) -> Result<TrustReceipt> {
             "trust receipt installed_at_utc is not RFC 3339",
         )
     })?;
-    Ok(receipt)
+    Ok(())
+}
+
+fn read_runtime_seal(path: &Path) -> Option<Vec<u8>> {
+    cleanup_runtime_seal_partials(path);
+    if ensure_existing_tree_safe(path).is_err() {
+        return None;
+    }
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+        Err(_) => return None,
+    };
+    if !metadata.is_file()
+        || is_reparse_or_symlink(&metadata)
+        || metadata.len() > runtime_seal::MAX_RUNTIME_SEAL_BYTES as u64
+    {
+        return None;
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let Ok(file) = options.open(path) else {
+        return None;
+    };
+    let opened_length = match file.metadata() {
+        Ok(metadata) if metadata.is_file() && !is_reparse_or_symlink(&metadata) => metadata.len(),
+        _ => return None,
+    };
+    if opened_length != metadata.len()
+        || opened_length > runtime_seal::MAX_RUNTIME_SEAL_BYTES as u64
+    {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(opened_length).unwrap_or(0));
+    let mut bounded = file.take(runtime_seal::MAX_RUNTIME_SEAL_BYTES as u64 + 1);
+    if bounded.read_to_end(&mut bytes).is_err()
+        || bytes.len() as u64 != opened_length
+        || bytes.len() > runtime_seal::MAX_RUNTIME_SEAL_BYTES
+    {
+        return None;
+    }
+    Some(bytes)
+}
+
+fn write_runtime_seal(path: &Path, seal: &EncodedRuntimeSeal) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        ExtensionError::new(
+            ErrorCode::LifecycleConflict,
+            "runtime validation seal has no parent",
+        )
+    })?;
+    cleanup_runtime_seal_partials(path);
+    ensure_safe_directory(parent, true)?;
+    let partial = parent.join(format!(".seal-{}.partial", Uuid::new_v4().simple()));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&partial)
+        .map_err(|error| {
+            ExtensionError::io(
+                ErrorCode::LifecycleConflict,
+                "create runtime validation seal partial",
+                &error,
+            )
+        })?;
+    let result = (|| -> io::Result<()> {
+        file.write_all(&seal.bytes)?;
+        file.sync_all()?;
+        drop(file);
+        replace_atomic(&partial, path)
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(&partial);
+        return Err(ExtensionError::io(
+            ErrorCode::LifecycleConflict,
+            "atomically publish runtime validation seal",
+            &error,
+        ));
+    }
+    Ok(())
+}
+
+fn remove_runtime_seal(roots: &ExtensionRoots, package: &PackageReference) {
+    let path = runtime_seal_path(roots, package);
+    cleanup_runtime_seal_partials(&path);
+    if ensure_existing_tree_safe(&path).is_err() {
+        return;
+    }
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() && !is_reparse_or_symlink(&metadata) => {
+            let _ = fs::remove_file(&path);
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        _ => return,
+    }
+    if let Some(parent) = path.parent()
+        && ensure_existing_tree_safe(parent).is_ok()
+        && fs::symlink_metadata(parent)
+            .is_ok_and(|metadata| metadata.is_dir() && !is_reparse_or_symlink(&metadata))
+    {
+        remove_if_empty(parent);
+    }
+}
+
+fn cleanup_runtime_seal_partials(path: &Path) {
+    const MAX_PARTIALS_TO_INSPECT: usize = 64;
+
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if ensure_existing_tree_safe(parent).is_err() {
+        return;
+    }
+    let Ok(metadata) = fs::symlink_metadata(parent) else {
+        return;
+    };
+    if !metadata.is_dir() || is_reparse_or_symlink(&metadata) {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.take(MAX_PARTIALS_TO_INSPECT).flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(id) = name
+            .strip_prefix(".seal-")
+            .and_then(|name| name.strip_suffix(".partial"))
+        else {
+            continue;
+        };
+        if id.len() != 32
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            continue;
+        }
+        let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if metadata.is_file() && !is_reparse_or_symlink(&metadata) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn write_receipt_new(path: &Path, receipt: &TrustReceipt) -> Result<()> {

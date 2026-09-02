@@ -24,6 +24,7 @@ from latentdeck_codec_sdk import (
 )
 from safetensors.torch import save_file
 
+import latentdeck_codec_h3.adapter as adapter_module
 from latentdeck_codec_h3.adapter import (
     ADAPTER_VERSION,
     PACK_VERSION,
@@ -32,6 +33,7 @@ from latentdeck_codec_h3.adapter import (
     H3CodecAdapter,
     make_adapter,
 )
+from latentdeck_codec_h3.decoder import H3Decoder
 
 
 class MemoryAccess:
@@ -334,12 +336,11 @@ def test_path_free_profile_receipt_and_streamed_slot_read(
 
     adapter.load(load_request)
     assert torch_loads == [str(torch.__version__)]
-    assert asset_preflights == [
-        (load_request.assets[0].path, TAEH3_ASSET_SHA256, TAEH3_ASSET_BYTE_LENGTH)
-    ]
+    assert asset_preflights == []
     assert decoder_loads == []
 
     source = adapter.open_source(access, receipt, uuid.uuid4())
+    assert asset_preflights == []
     assert len(decoder_loads) == 1
     slot = adapter.read_slot(source, 3)
     assert slot.dtype == torch.float16
@@ -353,7 +354,6 @@ def test_path_free_profile_receipt_and_streamed_slot_read(
     )
     assert not hasattr(access, "read_payload_range")
     assert not hasattr(source, "path")
-
     decoded = adapter.decode_slot(slot, 1)
     assert (decoded.batch, decoded.height, decoded.width) == (1, 16, 16)
     assert decoded.pixels.nbytes == 16 * 16 * 4
@@ -364,6 +364,102 @@ def test_path_free_profile_receipt_and_streamed_slot_read(
     source.close()
     with pytest.raises(CodecSdkError, match="source.closed"):
         adapter.read_slot(source, 0)
+
+
+def test_repeat_protocol2_sessions_do_not_rehash_the_host_retained_decoder(
+    tmp_path: Path,
+) -> None:
+    worker_full_hashes: list[tuple[str, str, int]] = []
+    for _ in range(2):
+        adapter, request, decoder_loads, _torch_loads, asset_preflights = _adapter_harness(
+            tmp_path, FakeDecoder()
+        )
+        access = _make_access(storage_dtype="F16", with_audio=False)
+        inspection = adapter.inspect(access)
+        receipt = adapter.validate_profile(access, inspection)
+        adapter.load(request)
+        adapter.open_source(access, receipt, uuid.uuid4())
+        worker_full_hashes.extend(asset_preflights)
+        assert len(decoder_loads) == 1
+
+    assert worker_full_hashes == []
+
+
+def test_protocol2_decoder_factory_uses_the_host_validated_loader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asset_path = tmp_path / "taeh3.safetensors"
+    asset_path.write_bytes(b"host-retained exact bytes")
+    asset = ExternalAsset(
+        asset_id="taeh3",
+        path=str(asset_path),
+        sha256=TAEH3_ASSET_SHA256,
+        byte_length=TAEH3_ASSET_BYTE_LENGTH,
+    )
+    decoder = FakeDecoder()
+    observed: list[tuple[str, str, int, int]] = []
+
+    def unexpected_full_hash(cls: type[H3Decoder], *_args: object) -> H3Decoder:
+        del cls
+        raise AssertionError("Protocol 2 selected the legacy full-hash loader")
+
+    def host_validated_load(
+        cls: type[H3Decoder],
+        path: str,
+        sha256: str,
+        byte_length: int,
+        device_ordinal: int,
+    ) -> FakeDecoder:
+        del cls
+        observed.append((path, sha256, byte_length, device_ordinal))
+        return decoder
+
+    monkeypatch.setattr(H3Decoder, "load", classmethod(unexpected_full_hash))
+    monkeypatch.setattr(H3Decoder, "load_host_validated", classmethod(host_validated_load))
+
+    assert H3CodecAdapter._load_decoder(asset, 3) is decoder
+    assert observed == [(str(asset_path), TAEH3_ASSET_SHA256, TAEH3_ASSET_BYTE_LENGTH, 3)]
+
+
+def test_protocol2_decoder_factory_rehashes_on_non_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asset_path = tmp_path / "taeh3.safetensors"
+    asset_path.write_bytes(b"host-retained exact bytes")
+    asset = ExternalAsset(
+        asset_id="taeh3",
+        path=str(asset_path),
+        sha256=TAEH3_ASSET_SHA256,
+        byte_length=TAEH3_ASSET_BYTE_LENGTH,
+    )
+    decoder = FakeDecoder()
+    observed: list[tuple[str, str, int, int]] = []
+
+    def full_hash_load(
+        cls: type[H3Decoder],
+        path: str,
+        sha256: str,
+        byte_length: int,
+        device_ordinal: int,
+    ) -> FakeDecoder:
+        del cls
+        observed.append((path, sha256, byte_length, device_ordinal))
+        return decoder
+
+    def unexpected_host_validated_load(cls: type[H3Decoder], *_args: object) -> H3Decoder:
+        del cls
+        raise AssertionError("non-Windows Protocol 2 skipped the conservative payload hash")
+
+    monkeypatch.setattr(adapter_module.sys, "platform", "linux")
+    monkeypatch.setattr(H3Decoder, "load", classmethod(full_hash_load))
+    monkeypatch.setattr(
+        H3Decoder,
+        "load_host_validated",
+        classmethod(unexpected_host_validated_load),
+    )
+
+    assert H3CodecAdapter._load_decoder(asset, 4) is decoder
+    assert observed == [(str(asset_path), TAEH3_ASSET_SHA256, TAEH3_ASSET_BYTE_LENGTH, 4)]
 
 
 def test_invalid_h3_semantics_fail_before_decoder_allocation(tmp_path: Path) -> None:

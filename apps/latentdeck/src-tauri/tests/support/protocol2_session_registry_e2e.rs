@@ -143,7 +143,16 @@ async fn library_options_and_open_reuse_one_exact_lc_validation_and_package_leas
     .expect("Open exact preflight");
     assert_eq!(opened.validation_work.full_cartridge_validations, 0);
     assert_eq!(opened.validation_work.retained_handle_clones, 1);
-    assert_eq!(active_packages.stats().cold_full_hash_passes, 2);
+    #[cfg(target_os = "windows")]
+    {
+        assert_eq!(active_packages.stats().cold_full_hash_passes, 1);
+        assert_eq!(active_packages.stats().persistent_fast_checkouts, 1);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        assert_eq!(active_packages.stats().cold_full_hash_passes, 2);
+        assert_eq!(active_packages.stats().persistent_fast_checkouts, 0);
+    }
     assert_eq!(active_packages.stats().cached_checkouts, 0);
 
     let repeated_open_source = library
@@ -171,7 +180,8 @@ async fn library_options_and_open_reuse_one_exact_lc_validation_and_package_leas
         assert_eq!(library.deck_source_cache_stats().full_validations, 1);
         assert_eq!(library.deck_source_cache_stats().cached_checkouts, 1);
         assert_eq!(library.deck_source_cache_stats().retained_entries, 1);
-        assert_eq!(active_packages.stats().cold_full_hash_passes, 2);
+        assert_eq!(active_packages.stats().cold_full_hash_passes, 1);
+        assert_eq!(active_packages.stats().persistent_fast_checkouts, 1);
         assert_eq!(active_packages.stats().cached_checkouts, 2);
     }
     #[cfg(not(target_os = "windows"))]
