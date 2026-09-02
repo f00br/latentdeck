@@ -36,3 +36,6 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["B", "E", "F", "I", "SIM", "UP"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["latentdeck_operator_q4"]
