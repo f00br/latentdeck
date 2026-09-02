@@ -844,6 +844,10 @@ h1 {
   text-transform: uppercase;
 }
 
+.extension-state strong.verification-required {
+  color: #d6c66f;
+}
+
 .remove-extension:not(:disabled) {
   border-color: #74473f;
   color: #e3a69c;

@@ -117,14 +117,14 @@ pub struct PlayerLaunchInputs<'a> {
 }
 
 /// Codec-neutral retained source identity used to construct a Protocol 2
-/// session from a fresh integrity-validated read-only handle.
+/// session from an already integrity-validated read-only handle.
 pub struct PlayerProtocol2SourceInputs<'a> {
-    pub cartridge_path: &'a Path,
+    pub retained_cartridge: &'a IntegrityValidatedCartridge,
     pub cartridge: &'a CartridgeSummary,
 }
 
 struct LoadedCartridge {
-    _validated: IntegrityValidatedCartridge,
+    validated: IntegrityValidatedCartridge,
     path: PathBuf,
     summary: CartridgeSummary,
 }
@@ -327,7 +327,7 @@ impl PlayerCoordinator {
             audio_present: !matches!(manifest.audio, AudioDisposition::SourceAbsent),
         };
         self.cartridge = Some(LoadedCartridge {
-            _validated: validated,
+            validated,
             path: path.to_path_buf(),
             summary,
         });
@@ -365,9 +365,9 @@ impl PlayerCoordinator {
         })
     }
 
-    /// Return only the exact cartridge path and path-free UI summary needed
-    /// for a fresh Protocol 2 integrity validation. Codec selection and asset
-    /// trust remain owned by the common Extensions Manager.
+    /// Borrow the already integrity-validated cartridge and its path-free UI
+    /// summary for a fresh Protocol 2 session. Codec selection and asset trust
+    /// remain owned by the common Extensions Manager.
     ///
     /// # Errors
     ///
@@ -379,14 +379,14 @@ impl PlayerCoordinator {
             PlayerCoordinatorError::new("slot.cartridge_missing", "No cartridge is loaded")
         })?;
         Ok(PlayerProtocol2SourceInputs {
-            cartridge_path: &cartridge.path,
+            retained_cartridge: &cartridge.validated,
             cartridge: &cartridge.summary,
         })
     }
 
     /// Replace the visible codec summary with one exact Protocol 2 package
-    /// selection. The package usage lease is intentionally acquired later by
-    /// runtime startup and never inferred here.
+    /// selection. The application owns the process-local package lease; Core
+    /// never infers one from this path-free summary.
     ///
     /// # Errors
     ///
@@ -786,6 +786,32 @@ mod tests {
         assert!(!cartridge.audio_present);
         let encoded = serde_json::to_string(&player.view()).expect("serialize view");
         assert!(!encoded.contains(directory.path().to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn protocol2_source_reuses_the_retained_integrity_handle() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("synthetic.lc");
+        fs::write(&path, synthetic_lc()).expect("synthetic cartridge");
+        let mut player = PlayerCoordinator::without_codec();
+        player.open_cartridge(&path).expect("validated cartridge");
+
+        let source = player
+            .protocol2_source_inputs()
+            .expect("Protocol 2 retained source");
+        let retained = source
+            .retained_cartridge
+            .try_clone_retained()
+            .expect("duplicate retained handle without reopening the path");
+
+        assert_eq!(
+            retained.receipt().archive_sha256.to_string(),
+            source.cartridge.archive_sha256
+        );
+        assert_eq!(
+            retained.manifest().cartridge_id.0,
+            source.cartridge.cartridge_id
+        );
     }
 
     #[test]

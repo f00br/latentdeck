@@ -1,4 +1,4 @@
-use std::{fs::File, path::PathBuf};
+use std::{fs::File, path::PathBuf, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
@@ -462,6 +462,7 @@ pub struct InstallReceipt {
 #[serde(rename_all = "snake_case")]
 pub enum PackageHealth {
     Healthy,
+    VerificationRequired,
     Corrupt,
     Untrusted,
 }
@@ -532,44 +533,71 @@ impl ValidatedInstalledPackage {
 /// validated paths until this value is dropped. This is not an OS sandbox and
 /// does not prevent the same user from creating a new child name; subsequent
 /// closed-tree validation detects that addition.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ActiveInstalledPackage {
+    inner: Arc<ActiveInstalledPackageInner>,
+}
+
+#[derive(Debug)]
+struct ActiveInstalledPackageInner {
     package: ValidatedInstalledPackage,
+    expected_files: std::collections::BTreeMap<String, crate::archive::FileMeasurement>,
+    full_hash_passes: u64,
     _usage_lock: File,
-    _retained_tree_handles: Vec<File>,
+    retained_tree_handles: Vec<File>,
 }
 
 impl ActiveInstalledPackage {
     pub(crate) fn new(
         package: ValidatedInstalledPackage,
+        expected_files: std::collections::BTreeMap<String, crate::archive::FileMeasurement>,
+        full_hash_passes: u64,
         usage_lock: File,
         retained_tree_handles: Vec<File>,
     ) -> Self {
         Self {
-            package,
-            _usage_lock: usage_lock,
-            _retained_tree_handles: retained_tree_handles,
+            inner: Arc::new(ActiveInstalledPackageInner {
+                package,
+                expected_files,
+                full_hash_passes,
+                _usage_lock: usage_lock,
+                retained_tree_handles,
+            }),
         }
     }
 
     #[must_use]
-    pub const fn package(&self) -> &ValidatedInstalledPackage {
-        &self.package
+    pub fn package(&self) -> &ValidatedInstalledPackage {
+        &self.inner.package
     }
 
     #[must_use]
     pub fn root(&self) -> &std::path::Path {
-        self.package.root()
+        self.inner.package.root()
     }
 
     #[must_use]
-    pub const fn manifest(&self) -> &PackageManifest {
-        self.package.manifest()
+    pub fn manifest(&self) -> &PackageManifest {
+        self.inner.package.manifest()
     }
 
     #[must_use]
-    pub const fn trust_receipt(&self) -> &TrustReceipt {
-        self.package.trust_receipt()
+    pub fn trust_receipt(&self) -> &TrustReceipt {
+        self.inner.package.trust_receipt()
+    }
+
+    pub(crate) fn expected_files(
+        &self,
+    ) -> &std::collections::BTreeMap<String, crate::archive::FileMeasurement> {
+        &self.inner.expected_files
+    }
+
+    pub(crate) fn full_hash_passes(&self) -> u64 {
+        self.inner.full_hash_passes
+    }
+
+    pub(crate) fn retained_handle_count(&self) -> usize {
+        self.inner.retained_tree_handles.len().saturating_add(1)
     }
 }
 

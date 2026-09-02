@@ -7,7 +7,7 @@
 use std::{collections::HashSet, future::Future, time::Duration};
 
 #[cfg(windows)]
-use std::{collections::HashMap, fs::File};
+use std::collections::HashMap;
 
 use latentdeck_control::v2::{
     Ack, Capability, CodecDescriptorRequest, CodecLoad, Command, CommandName, DecodedAbi,
@@ -26,7 +26,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 #[cfg(windows)]
-use crate::external_asset_v2::{RetainedExternalAssetError, retain_exact_external_asset};
+use crate::external_asset_v2::{
+    IntegrityValidatedExternalAsset, RetainedExternalAssetError, retain_exact_external_asset,
+};
 use crate::{
     worker_client_v2::WorkerClientV2Error, worker_source_v2::WorkerSourceV2Error,
     worker_supervisor::WorkerSupervisorError,
@@ -632,7 +634,8 @@ fn validate_package_contract(
     package: &ActiveInstalledPackage,
     host: &PlayerSessionV2HostContract,
     external_assets: &[ExternalAssetBinding],
-) -> Result<(PlayerCodecSelectionV2, Vec<File>), PlayerSessionV2Error> {
+    retained_external_assets: &[IntegrityValidatedExternalAsset],
+) -> Result<(PlayerCodecSelectionV2, Vec<IntegrityValidatedExternalAsset>), PlayerSessionV2Error> {
     if !package.trust_receipt().enabled {
         return Err(PlayerSessionV2Error::IncompatiblePackage("disabled"));
     }
@@ -679,7 +682,8 @@ fn validate_package_contract(
     {
         return Err(PlayerSessionV2Error::CapabilityMismatch);
     }
-    let retained_assets = validate_external_assets(manifest, external_assets)?;
+    let retained_assets =
+        validate_external_assets(manifest, external_assets, retained_external_assets)?;
     Ok((codec_selection(manifest), retained_assets))
 }
 
@@ -687,7 +691,8 @@ fn validate_package_contract(
 fn validate_external_assets(
     manifest: &CodecPackManifest,
     bindings: &[ExternalAssetBinding],
-) -> Result<Vec<File>, PlayerSessionV2Error> {
+    retained_assets: &[IntegrityValidatedExternalAsset],
+) -> Result<Vec<IntegrityValidatedExternalAsset>, PlayerSessionV2Error> {
     if bindings.len() > MAX_EXTERNAL_ASSETS {
         return Err(PlayerSessionV2Error::InvalidExternalAsset(
             "too many bindings".to_owned(),
@@ -699,6 +704,19 @@ fn validate_external_assets(
         .map(|asset| (asset.asset_id.as_str(), asset))
         .collect();
     let mut seen = HashSet::new();
+    let retained: HashMap<_, _> = retained_assets
+        .iter()
+        .map(|asset| (asset.binding().asset_id.as_str(), asset))
+        .collect();
+    if retained.len() != retained_assets.len()
+        || retained
+            .keys()
+            .any(|asset_id| !bindings.iter().any(|binding| &binding.asset_id == asset_id))
+    {
+        return Err(PlayerSessionV2Error::InvalidExternalAsset(
+            "retained asset mismatch".to_owned(),
+        ));
+    }
     let mut retained_assets = Vec::with_capacity(bindings.len());
     for binding in bindings {
         if !seen.insert(binding.asset_id.as_str()) {
@@ -719,7 +737,16 @@ fn validate_external_assets(
                 binding.asset_id.clone(),
             ));
         }
-        retained_assets.push(validate_external_asset_file(binding)?);
+        if let Some(retained) = retained.get(binding.asset_id.as_str()) {
+            if retained.binding() != binding {
+                return Err(PlayerSessionV2Error::InvalidExternalAsset(
+                    binding.asset_id.clone(),
+                ));
+            }
+            retained_assets.push(retained.clone_retained());
+        } else {
+            retained_assets.push(validate_external_asset_file(binding)?);
+        }
     }
     if manifest
         .external_assets
@@ -736,9 +763,12 @@ fn validate_external_assets(
 #[cfg(windows)]
 fn validate_external_asset_file(
     binding: &ExternalAssetBinding,
-) -> Result<File, PlayerSessionV2Error> {
+) -> Result<IntegrityValidatedExternalAsset, PlayerSessionV2Error> {
     match retain_exact_external_asset(binding) {
-        Ok(file) => Ok(file),
+        Ok(file) => Ok(IntegrityValidatedExternalAsset::from_validated_file(
+            binding.clone(),
+            file,
+        )),
         Err(RetainedExternalAssetError::Invalid) => Err(
             PlayerSessionV2Error::InvalidExternalAsset(binding.asset_id.clone()),
         ),
@@ -750,8 +780,6 @@ fn validate_external_asset_file(
 
 #[cfg(windows)]
 mod windows_runtime {
-    use std::fs::File;
-
     use latentdeck_cartridge::reader::IntegrityValidatedCartridge;
     use latentdeck_control::v2::{Command, ExternalAssetBinding, RingConfigure, RingKind};
     use latentdeck_extension_manager::ActiveInstalledPackage;
@@ -767,6 +795,7 @@ mod windows_runtime {
         orchestrate_player_session_v2_startup, validate_package_contract, validate_source_identity,
     };
     use crate::{
+        external_asset_v2::IntegrityValidatedExternalAsset,
         worker_client_v2::WorkerClientV2,
         worker_source_v2::prepare_source_open,
         worker_supervisor::{ValidatedWorkerLaunch, spawn_worker_v2},
@@ -842,7 +871,7 @@ mod windows_runtime {
         client: WorkerClientV2,
         codec_package: ActiveInstalledPackage,
         cartridge: IntegrityValidatedCartridge,
-        _external_asset_handles: Vec<File>,
+        _external_asset_handles: Vec<IntegrityValidatedExternalAsset>,
         ring_owner: WindowsRgbRingV2Owner,
         ring_consumer: WindowsRgbRingV2Consumer,
         profile_receipt: latentdeck_control::v2::ProfileReceipt,
@@ -916,8 +945,36 @@ mod windows_runtime {
         host: PlayerSessionV2HostContract,
         external_assets: Vec<ExternalAssetBinding>,
     ) -> Result<PlayerSessionV2, PlayerSessionV2Error> {
-        let (selection, external_asset_handles) =
-            validate_package_contract(&package, &host, &external_assets)?;
+        start_player_session_v2_with_retained_assets(
+            package,
+            cartridge,
+            host,
+            external_assets,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Spawn a Player session while reusing exact external-asset integrity
+    /// evidence retained by the host selection UI.
+    ///
+    /// # Errors
+    ///
+    /// Rejects evidence that does not exactly match the wire binding and
+    /// current Codec Pack declaration before worker or GPU allocation.
+    pub async fn start_player_session_v2_with_retained_assets(
+        package: ActiveInstalledPackage,
+        cartridge: IntegrityValidatedCartridge,
+        host: PlayerSessionV2HostContract,
+        external_assets: Vec<ExternalAssetBinding>,
+        retained_external_assets: Vec<IntegrityValidatedExternalAsset>,
+    ) -> Result<PlayerSessionV2, PlayerSessionV2Error> {
+        let (selection, external_asset_handles) = validate_package_contract(
+            &package,
+            &host,
+            &external_assets,
+            &retained_external_assets,
+        )?;
         let manifest_profile = match package.manifest() {
             latentdeck_extension_manager::PackageManifest::Codec(manifest) => {
                 &manifest.compatibility
@@ -982,4 +1039,6 @@ mod windows_runtime {
 }
 
 #[cfg(windows)]
-pub use windows_runtime::{PlayerSessionV2, start_player_session_v2};
+pub use windows_runtime::{
+    PlayerSessionV2, start_player_session_v2, start_player_session_v2_with_retained_assets,
+};

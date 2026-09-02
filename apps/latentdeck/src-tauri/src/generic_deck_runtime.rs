@@ -25,7 +25,9 @@ use latentdeck_control::v2::{
 use latentdeck_core::{
     deck_runtime_v2::DeckLoadRequest,
     deck_selection_v2::PreparedDeckSelectionV2,
-    deck_session_v2::{DeckSessionV2, DeckSessionV2LoadRequest, start_deck_session_v2},
+    deck_session_v2::{
+        DeckSessionV2, DeckSessionV2LoadRequest, start_deck_session_v2_with_retained_assets,
+    },
     realtime_diagnostics::{
         DiagnosticCodecIdentity, DiagnosticGpuIdentity, Protocol2DeckSessionIdentity,
         RealtimeSessionMetrics, SanitizedToken, Sha256Token,
@@ -325,12 +327,13 @@ impl GenericDeckRuntime {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| GenericDeckRuntimeError::diagnostics())?;
 
-        let mut session = start_deck_session_v2(
+        let mut session = start_deck_session_v2_with_retained_assets(
             prepared.codec_package,
             prepared.deck_runtime,
             prepared.cartridges,
             prepared.host,
             prepared.external_assets,
+            prepared.retained_external_assets,
             load,
         )
         .await

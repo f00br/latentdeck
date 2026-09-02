@@ -26,6 +26,12 @@ const CODEC: ExtensionPackageReference = {
   packageVersion: "2.0.0",
 };
 
+const CODEC_NEXT: ExtensionPackageReference = {
+  kind: "codec_pack",
+  packageId: "org.example.codec-next",
+  packageVersion: "2.1.0",
+};
+
 const DECK_COMPATIBLE: ExtensionPackageReference = {
   kind: "deck_pack",
   packageId: "org.example.deck-compatible",
@@ -136,6 +142,42 @@ function text(root: ParentNode): string {
   return root.textContent?.replace(/\s+/g, " ").trim() ?? "";
 }
 
+function rawImportOptions(packageReference: ExtensionPackageReference) {
+  return {
+    packageId: packageReference.packageId,
+    packageVersion: packageReference.packageVersion,
+    adapterId: `${packageReference.packageId}.adapter`,
+    adapterVersion: packageReference.packageVersion,
+    displayName: packageReference.packageId,
+    profiles: [
+      {
+        codecFamily: packageReference.packageId,
+        profile: "latent",
+        profileVersion: packageReference.packageVersion,
+      },
+    ],
+  };
+}
+
+function playerViewFor(
+  packageReference: ExtensionPackageReference | null,
+  revision: number,
+) {
+  return {
+    ...EMPTY_PLAYER_VIEW,
+    revision,
+    codec:
+      packageReference === null
+        ? EMPTY_PLAYER_VIEW.codec
+        : {
+            ...EMPTY_PLAYER_VIEW.codec,
+            state: "missing" as const,
+            packId: packageReference.packageId,
+            packVersion: packageReference.packageVersion,
+          },
+  };
+}
+
 function deferred<T>(): {
   promise: Promise<T>;
   resolve: (value: T) => void;
@@ -162,6 +204,288 @@ describe("mounted LatentPlayer Extensions Manager", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("defers extension and raw-import discovery until the user opens those workspaces", async () => {
+    native.invoke.mockImplementation(async (command: string) => {
+      switch (command) {
+        case "player_viewport_session_begin":
+          return { epoch: 1 };
+        case "player_viewport_set_bounds":
+          return undefined;
+        case "player_snapshot":
+          return EMPTY_PLAYER_VIEW;
+        case "player_fullscreen_status":
+        case "player_spout_status":
+        case "player_conversion_snapshot":
+          return null;
+        case "extensions_snapshot":
+          return { packages: [], matrix: [] } satisfies ExtensionsSnapshot;
+        case "player_raw_import_options":
+          return {
+            packageId: CODEC.packageId,
+            packageVersion: CODEC.packageVersion,
+            adapterId: "org.example.adapter",
+            adapterVersion: "2.0.0",
+            displayName: "Example Codec",
+            profiles: [],
+          };
+        default:
+          throw new Error(`Unexpected native command ${command}`);
+      }
+    });
+
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(App, { target });
+    await settle();
+
+    expect(native.invoke).not.toHaveBeenCalledWith("extensions_snapshot");
+    expect(native.invoke).not.toHaveBeenCalledWith("player_raw_import_options");
+
+    await click(target, "Extensions");
+    expect(native.invoke).toHaveBeenCalledWith("extensions_snapshot");
+    expect(native.invoke).not.toHaveBeenCalledWith("player_raw_import_options");
+
+    await click(target, "Prepare");
+    expect(native.invoke).toHaveBeenCalledWith("player_raw_import_options");
+
+    await click(target, "Play");
+    await click(target, "Extensions");
+    await click(target, "Play");
+    await click(target, "Prepare");
+    expect(
+      native.invoke.mock.calls.filter(
+        ([name]) => name === "extensions_snapshot",
+      ),
+    ).toHaveLength(1);
+    expect(
+      native.invoke.mock.calls.filter(
+        ([name]) => name === "player_raw_import_options",
+      ),
+    ).toHaveLength(1);
+
+    await unmount(component);
+    target.remove();
+  });
+
+  it("reloads raw-import authority after the user selects another exact codec", async () => {
+    const snapshot: ExtensionsSnapshot = {
+      packages: [
+        summary(CODEC, { enabled: true }),
+        summary(CODEC_NEXT, { enabled: true }),
+      ],
+      matrix: [],
+    };
+    let selected: ExtensionPackageReference | null = null;
+    let revision = 0;
+    let rawImportOptionsCount = 0;
+    native.open
+      .mockResolvedValueOnce(["fixtures/source.syntheticraw"])
+      .mockResolvedValueOnce("fixtures/output");
+    native.invoke.mockImplementation(
+      async (command: string, arguments_?: Record<string, unknown>) => {
+        switch (command) {
+          case "player_viewport_session_begin":
+            return { epoch: 1 };
+          case "player_viewport_set_bounds":
+            return undefined;
+          case "player_snapshot":
+            return playerViewFor(selected, revision);
+          case "player_fullscreen_status":
+          case "player_spout_status":
+          case "player_conversion_snapshot":
+            return null;
+          case "extensions_snapshot":
+            return snapshot;
+          case "player_select_codec_exact":
+            selected = {
+              kind: "codec_pack",
+              packageId: String(arguments_?.packageId),
+              packageVersion: String(arguments_?.packageVersion),
+            };
+            revision += 1;
+            return undefined;
+          case "player_raw_import_options":
+            rawImportOptionsCount += 1;
+            if (selected === null) throw new Error("no exact codec selected");
+            return rawImportOptions(selected);
+          case "player_conversion_plan": {
+            const authority = rawImportOptions(CODEC);
+            return {
+              phase: "planned",
+              selection: {
+                packageId: authority.packageId,
+                packageVersion: authority.packageVersion,
+                adapterId: authority.adapterId,
+                adapterVersion: authority.adapterVersion,
+                profile: authority.profiles[0],
+              },
+              items: [
+                {
+                  sourceName: "source.syntheticraw",
+                  relativeOutput: "source.lc",
+                  status: "ready",
+                  metadata: null,
+                  error: null,
+                  archiveSha256: null,
+                },
+              ],
+              completed: 0,
+              failed: 0,
+              activeIndex: null,
+              stopRequested: false,
+            };
+          }
+          default:
+            throw new Error(`Unexpected native command ${command}`);
+        }
+      },
+    );
+
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(App, { target });
+    await settle();
+    await click(target, "Extensions");
+
+    let codecCard = extensionCard(target, CODEC.packageId);
+    let device = codecCard.querySelector<HTMLSelectElement>("select")!;
+    device.value = "cuda";
+    device.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+    await click(codecCard, "Use in Player");
+    await click(target, "Prepare");
+    expect(text(target)).toContain(
+      `${CODEC.packageId} ${CODEC.packageVersion}`,
+    );
+    expect(rawImportOptionsCount).toBe(1);
+
+    const profile = target.querySelector<HTMLSelectElement>(
+      '[aria-label="Raw import codec selection"] select',
+    )!;
+    profile.value = profile.options[1].value;
+    profile.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+    expect(profile.value).not.toBe("");
+    await click(target, "Add raw files");
+    await click(target, "Choose output folder");
+    await click(target, "Validate batch");
+    expect(text(target)).toContain("1 of 1 file ready");
+
+    await click(target, "Extensions");
+    codecCard = extensionCard(target, CODEC_NEXT.packageId);
+    device = codecCard.querySelector<HTMLSelectElement>("select")!;
+    device.value = "cuda";
+    device.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+    await click(codecCard, "Use in Player");
+    expect(rawImportOptionsCount).toBe(1);
+    expect(text(target)).toContain("No conversion prepared");
+
+    await click(target, "Prepare");
+    expect(rawImportOptionsCount).toBe(2);
+    expect(text(target)).toContain(
+      `${CODEC_NEXT.packageId} ${CODEC_NEXT.packageVersion}`,
+    );
+    expect(
+      target.querySelector<HTMLSelectElement>(
+        '[aria-label="Raw import codec selection"] select',
+      )!.value,
+    ).toBe("");
+
+    await unmount(component);
+    target.remove();
+  });
+
+  it("ignores an older in-flight raw-import discovery after exact codec selection changes", async () => {
+    const snapshot: ExtensionsSnapshot = {
+      packages: [
+        summary(CODEC, { enabled: true }),
+        summary(CODEC_NEXT, { enabled: true }),
+      ],
+      matrix: [],
+    };
+    const olderOptions = deferred<ReturnType<typeof rawImportOptions>>();
+    let selected: ExtensionPackageReference | null = null;
+    let revision = 0;
+    let rawImportOptionsCount = 0;
+    native.invoke.mockImplementation(
+      async (command: string, arguments_?: Record<string, unknown>) => {
+        switch (command) {
+          case "player_viewport_session_begin":
+            return { epoch: 1 };
+          case "player_viewport_set_bounds":
+            return undefined;
+          case "player_snapshot":
+            return playerViewFor(selected, revision);
+          case "player_fullscreen_status":
+          case "player_spout_status":
+          case "player_conversion_snapshot":
+            return null;
+          case "extensions_snapshot":
+            return snapshot;
+          case "player_select_codec_exact":
+            selected = {
+              kind: "codec_pack",
+              packageId: String(arguments_?.packageId),
+              packageVersion: String(arguments_?.packageVersion),
+            };
+            revision += 1;
+            return undefined;
+          case "player_raw_import_options": {
+            rawImportOptionsCount += 1;
+            if (selected === null) throw new Error("no exact codec selected");
+            const requested = selected;
+            return requested.packageId === CODEC.packageId
+              ? olderOptions.promise
+              : rawImportOptions(requested);
+          }
+          default:
+            throw new Error(`Unexpected native command ${command}`);
+        }
+      },
+    );
+
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(App, { target });
+    await settle();
+    await click(target, "Extensions");
+
+    let codecCard = extensionCard(target, CODEC.packageId);
+    let device = codecCard.querySelector<HTMLSelectElement>("select")!;
+    device.value = "cuda";
+    device.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+    await click(codecCard, "Use in Player");
+    await click(target, "Prepare");
+    expect(rawImportOptionsCount).toBe(1);
+
+    await click(target, "Extensions");
+    codecCard = extensionCard(target, CODEC_NEXT.packageId);
+    device = codecCard.querySelector<HTMLSelectElement>("select")!;
+    device.value = "cuda";
+    device.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+    await click(codecCard, "Use in Player");
+    await click(target, "Prepare");
+    expect(rawImportOptionsCount).toBe(2);
+    expect(text(target)).toContain(
+      `${CODEC_NEXT.packageId} ${CODEC_NEXT.packageVersion}`,
+    );
+
+    olderOptions.resolve(rawImportOptions(CODEC));
+    await settle();
+    expect(text(target)).toContain(
+      `${CODEC_NEXT.packageId} ${CODEC_NEXT.packageVersion}`,
+    );
+    expect(text(target)).not.toContain(
+      `${CODEC.packageId} ${CODEC.packageVersion}`,
+    );
+
+    await unmount(component);
+    target.remove();
   });
 
   it("keeps cached package actions disabled while a snapshot owns the lifecycle lock", async () => {
@@ -206,6 +530,7 @@ describe("mounted LatentPlayer Extensions Manager", () => {
     document.body.append(target);
     const component = mount(App, { target });
     await settle();
+    await click(target, "Extensions");
 
     let codecCard = extensionCard(target, CODEC.packageId);
     const device = codecCard.querySelector<HTMLSelectElement>("select")!;
@@ -237,7 +562,7 @@ describe("mounted LatentPlayer Extensions Manager", () => {
       packageVersion: CODEC.packageVersion,
       device: "cuda",
     });
-    expect(rawImportOptionsCount).toBe(1);
+    expect(rawImportOptionsCount).toBe(0);
     expect(button(target, "Open cartridge").disabled).toBe(false);
 
     await unmount(component);
@@ -393,6 +718,9 @@ describe("mounted LatentPlayer Extensions Manager", () => {
     expect(target.textContent).toContain("Unsupported signal geometry");
 
     let codecCard = extensionCard(target, CODEC.packageId);
+    const snapshotsBeforeVerify = native.invoke.mock.calls.filter(
+      ([name]) => name === "extensions_snapshot",
+    ).length;
     await click(codecCard, "Verify");
     expect(native.invoke).toHaveBeenCalledWith("extensions_verify", {
       package: CODEC,
@@ -400,6 +728,11 @@ describe("mounted LatentPlayer Extensions Manager", () => {
     expect(text(target)).toContain(
       "Verified org.example.codec 2.0.0: healthy.",
     );
+    expect(
+      native.invoke.mock.calls.filter(
+        ([name]) => name === "extensions_snapshot",
+      ),
+    ).toHaveLength(snapshotsBeforeVerify);
 
     codecCard = extensionCard(target, CODEC.packageId);
     await click(codecCard, "Enable");
@@ -455,6 +788,95 @@ describe("mounted LatentPlayer Extensions Manager", () => {
     )!;
     acknowledgement.checked = true;
     acknowledgement.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+    expect(remove.disabled).toBe(false);
+    remove.click();
+    await settle();
+    expect(native.invoke).toHaveBeenCalledWith("extensions_remove", {
+      package: CODEC,
+      allowCorrupt: true,
+    });
+    expect(target.textContent).not.toContain("org.example.codec · 2.0.0");
+
+    await unmount(component);
+    target.remove();
+  });
+
+  it("keeps a disabled verification-required Codec actionable when strict checks fail", async () => {
+    let snapshot: ExtensionsSnapshot = {
+      packages: [
+        summary(CODEC, {
+          health: "verification_required",
+          enabled: false,
+        }),
+      ],
+      matrix: [],
+    };
+    native.invoke.mockImplementation(
+      async (command: string, arguments_?: Record<string, unknown>) => {
+        switch (command) {
+          case "player_viewport_session_begin":
+            return { epoch: 1 };
+          case "player_viewport_set_bounds":
+            return undefined;
+          case "player_snapshot":
+            return EMPTY_PLAYER_VIEW;
+          case "player_fullscreen_status":
+          case "player_spout_status":
+          case "player_conversion_snapshot":
+            return null;
+          case "extensions_snapshot":
+            return snapshot;
+          case "extensions_verify":
+          case "extensions_enable":
+            throw {
+              code: "extension.integrity_failed",
+              detail: "Installed bytes changed.",
+            };
+          case "extensions_remove":
+            snapshot = { packages: [], matrix: [] };
+            return snapshot;
+          default:
+            throw new Error(
+              `Unexpected native command ${command} ${JSON.stringify(arguments_)}`,
+            );
+        }
+      },
+    );
+
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(App, { target });
+    await settle();
+    await click(target, "Extensions");
+
+    let codecCard = extensionCard(target, CODEC.packageId);
+    expect(text(codecCard)).toContain("verification required");
+    expect(text(codecCard)).toContain(
+      "Verify or Enable performs strict full payload validation before use.",
+    );
+    expect(button(codecCard, "Enable").disabled).toBe(false);
+    expect(button(codecCard, "Repair…").disabled).toBe(false);
+    expect(
+      Array.from(codecCard.querySelectorAll("button")).some(
+        (candidate) => candidate.textContent?.trim() === "Use in Player",
+      ),
+    ).toBe(false);
+
+    await click(codecCard, "Verify");
+    expect(text(target)).toContain("extension.integrity_failed");
+    codecCard = extensionCard(target, CODEC.packageId);
+    await click(codecCard, "Enable");
+    expect(text(target)).toContain("extension.integrity_failed");
+
+    codecCard = extensionCard(target, CODEC.packageId);
+    const remove = button(codecCard, "Remove exact version");
+    expect(remove.disabled).toBe(true);
+    const acknowledgement = codecCard.querySelector<HTMLInputElement>(
+      '.corrupt-removal-confirmation input[type="checkbox"]',
+    );
+    expect(acknowledgement).not.toBeNull();
+    acknowledgement!.click();
     flushSync();
     expect(remove.disabled).toBe(false);
     remove.click();

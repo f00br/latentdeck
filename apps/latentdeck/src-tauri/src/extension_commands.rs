@@ -6,12 +6,10 @@ use std::{
 };
 
 use latentdeck_extension_manager::{
-    CodecCapability, CompatibilityPair, CompatibilityReason, DeckPackManifest,
+    ActivePackageCache, CodecCapability, CompatibilityPair, CompatibilityReason, DeckPackManifest,
     ErrorCode as ExtensionErrorCode, ExtensionError, ExtensionRoots, InstallRequest,
     InstalledPackageSummary, PackageHealth, PackageKind, PackageReference, PublisherIdentityClaim,
-    RemoveOptions, disable, enable, inspect as inspect_extension_archive, install,
-    inventory as extension_inventory, list as list_extensions, remove, repair, resolve_active,
-    verify,
+    RemoveOptions, inspect as inspect_extension_archive, install, remove, repair, verify,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -21,15 +19,23 @@ use crate::library_state::CommandError;
 #[derive(Debug)]
 pub(crate) struct ExtensionManagerState {
     roots: ExtensionRoots,
+    active_packages: ActivePackageCache,
 }
 
 impl ExtensionManagerState {
-    pub(crate) const fn new(roots: ExtensionRoots) -> Self {
-        Self { roots }
+    pub(crate) fn new(roots: ExtensionRoots) -> Self {
+        Self {
+            roots,
+            active_packages: ActivePackageCache::new(),
+        }
     }
 
     pub(crate) const fn roots(&self) -> &ExtensionRoots {
         &self.roots
+    }
+
+    pub(crate) const fn active_packages(&self) -> &ActivePackageCache {
+        &self.active_packages
     }
 }
 
@@ -87,6 +93,10 @@ impl From<InstalledPackageSummary> for ExtensionPackageSummaryView {
         // only stable, path-free guidance; detailed evidence remains in local logs.
         let error_detail = value.error_detail.as_ref().map(|_| match value.health {
             PackageHealth::Healthy => "The exact package version is healthy.".to_owned(),
+            PackageHealth::VerificationRequired => {
+                "The disabled exact package needs full payload verification before enable or use."
+                    .to_owned()
+            }
             PackageHealth::Corrupt => {
                 "The installed package tree is corrupt; verify or repair this exact version."
                     .to_owned()
@@ -374,8 +384,11 @@ enum DeckFaceplateCaptureMode {
 
 fn extension_snapshot_for(
     roots: &ExtensionRoots,
+    active_packages: &ActivePackageCache,
 ) -> Result<ExtensionManagerSnapshot, CommandError> {
-    let inventory = extension_inventory(roots).map_err(extension_command_error)?;
+    let inventory = active_packages
+        .runtime_inventory(roots)
+        .map_err(extension_command_error)?;
     let packages = inventory.packages.into_iter().map(Into::into).collect();
     let matrix = inventory.matrix.into_iter().map(Into::into).collect();
     Ok(ExtensionManagerSnapshot { packages, matrix })
@@ -442,17 +455,17 @@ fn inspected_extension_view(
     }
 }
 
-fn deck_ui_catalog_for(roots: &ExtensionRoots) -> Result<DeckUiCatalogView, CommandError> {
+fn deck_ui_catalog_for(
+    roots: &ExtensionRoots,
+    active_packages: &ActivePackageCache,
+) -> Result<DeckUiCatalogView, CommandError> {
     let mut decks = Vec::new();
     let mut issues = Vec::new();
-    let candidates = list_extensions(roots)
+    let candidates = active_packages
+        .runtime_list_kind(roots, PackageKind::DeckPack)
         .map_err(extension_command_error)?
         .into_iter()
-        .filter(|summary| {
-            summary.package.kind == PackageKind::DeckPack
-                && summary.enabled
-                && summary.health == PackageHealth::Healthy
-        })
+        .filter(|summary| summary.enabled && summary.health == PackageHealth::Healthy)
         .collect::<Vec<_>>();
     if candidates.len() > MAX_DECK_UI_CATALOG_ENTRIES {
         return Err(deck_ui_catalog_limit());
@@ -460,7 +473,12 @@ fn deck_ui_catalog_for(roots: &ExtensionRoots) -> Result<DeckUiCatalogView, Comm
     let mut remaining_json_bytes = MAX_DECK_UI_CATALOG_JSON_BYTES;
     for summary in candidates {
         let package = summary.package;
-        match deck_ui_package_from_active(roots, &package, &mut remaining_json_bytes) {
+        match deck_ui_package_from_active(
+            roots,
+            active_packages,
+            &package,
+            &mut remaining_json_bytes,
+        ) {
             Ok(deck) => decks.push(deck),
             Err(DeckUiPackageLoadError::Package) => issues.push(DeckUiCatalogIssueView {
                 package: (&package).into(),
@@ -498,10 +516,12 @@ enum DeckUiPackageLoadError {
 
 fn deck_ui_package_from_active(
     roots: &ExtensionRoots,
+    active_packages: &ActivePackageCache,
     package: &PackageReference,
     remaining_json_bytes: &mut u64,
 ) -> Result<DeckUiPackageView, DeckUiPackageLoadError> {
-    let active = resolve_active(roots, package)
+    let active = active_packages
+        .resolve_active(roots, package)
         .map_err(extension_command_error)
         .map_err(|_| DeckUiPackageLoadError::Package)?;
     let latentdeck_extension_manager::PackageManifest::Deck(manifest) = active.manifest() else {
@@ -1034,7 +1054,8 @@ pub(crate) async fn extensions_deck_catalog(
     state: State<'_, ExtensionManagerState>,
 ) -> Result<DeckUiCatalogView, CommandError> {
     let roots = state.roots().clone();
-    tauri::async_runtime::spawn_blocking(move || deck_ui_catalog_for(&roots))
+    let active_packages = state.active_packages().clone();
+    tauri::async_runtime::spawn_blocking(move || deck_ui_catalog_for(&roots, &active_packages))
         .await
         .map_err(|_| extension_task_failed())?
 }
@@ -1045,7 +1066,8 @@ pub(crate) async fn extensions_snapshot(
     state: State<'_, ExtensionManagerState>,
 ) -> Result<ExtensionManagerSnapshot, CommandError> {
     let roots = state.roots().clone();
-    tauri::async_runtime::spawn_blocking(move || extension_snapshot_for(&roots))
+    let active_packages = state.active_packages().clone();
+    tauri::async_runtime::spawn_blocking(move || extension_snapshot_for(&roots, &active_packages))
         .await
         .map_err(|_| extension_task_failed())?
 }
@@ -1071,6 +1093,7 @@ pub(crate) async fn extensions_install(
     expected_sha256: String,
 ) -> Result<ExtensionManagerSnapshot, CommandError> {
     let roots = state.roots().clone();
+    let active_packages = state.active_packages().clone();
     tauri::async_runtime::spawn_blocking(move || {
         install(
             &roots,
@@ -1080,7 +1103,7 @@ pub(crate) async fn extensions_install(
             },
         )
         .map_err(extension_command_error)?;
-        extension_snapshot_for(&roots)
+        extension_snapshot_for(&roots, &active_packages)
     })
     .await
     .map_err(|_| extension_task_failed())?
@@ -1094,7 +1117,9 @@ pub(crate) async fn extensions_repair(
     expected_sha256: String,
 ) -> Result<ExtensionManagerSnapshot, CommandError> {
     let roots = state.roots().clone();
+    let active_packages = state.active_packages().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        active_packages.invalidate_all();
         repair(
             &roots,
             &InstallRequest {
@@ -1103,7 +1128,7 @@ pub(crate) async fn extensions_repair(
             },
         )
         .map_err(extension_command_error)?;
-        extension_snapshot_for(&roots)
+        extension_snapshot_for(&roots, &active_packages)
     })
     .await
     .map_err(|_| extension_task_failed())?
@@ -1134,9 +1159,12 @@ pub(crate) async fn extensions_enable(
 ) -> Result<ExtensionManagerSnapshot, CommandError> {
     let roots = state.roots().clone();
     let package = package.into_reference();
+    let active_packages = state.active_packages().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        enable(&roots, &package).map_err(extension_command_error)?;
-        extension_snapshot_for(&roots)
+        active_packages
+            .enable_and_prime(&roots, &package)
+            .map_err(extension_command_error)?;
+        extension_snapshot_for(&roots, &active_packages)
     })
     .await
     .map_err(|_| extension_task_failed())?
@@ -1150,9 +1178,12 @@ pub(crate) async fn extensions_disable(
 ) -> Result<ExtensionManagerSnapshot, CommandError> {
     let roots = state.roots().clone();
     let package = package.into_reference();
+    let active_packages = state.active_packages().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        disable(&roots, &package).map_err(extension_command_error)?;
-        extension_snapshot_for(&roots)
+        active_packages
+            .disable(&roots, &package)
+            .map_err(extension_command_error)?;
+        extension_snapshot_for(&roots, &active_packages)
     })
     .await
     .map_err(|_| extension_task_failed())?
@@ -1167,10 +1198,12 @@ pub(crate) async fn extensions_remove(
 ) -> Result<ExtensionManagerSnapshot, CommandError> {
     let roots = state.roots().clone();
     let package = package.into_reference();
+    let active_packages = state.active_packages().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _ = active_packages.invalidate_exact(&roots, &package);
         remove(&roots, &package, RemoveOptions { allow_corrupt })
             .map_err(extension_command_error)?;
-        extension_snapshot_for(&roots)
+        extension_snapshot_for(&roots, &active_packages)
     })
     .await
     .map_err(|_| extension_task_failed())?

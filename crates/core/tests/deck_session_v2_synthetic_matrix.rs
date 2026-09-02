@@ -47,22 +47,22 @@ use latentdeck_control::{
 use latentdeck_core::{
     deck_selection_v2::{
         DeckPackageSelectionV2, DeckSelectionV2Error, DeckSourceSelectionV2,
-        prepare_exact_deck_selection,
+        prepare_exact_deck_selection, prepare_exact_deck_selection_with_cache,
     },
     deck_session_v2::{DeckSessionV2LoadRequest, start_deck_session_v2},
     player_session_v2::{PlayerSessionV2HostContract, start_player_session_v2},
 };
 use latentdeck_extension_manager::{
-    Architecture, BundledPackageEntry, BundledPackageIndex, CodecAdapterDescriptor,
-    CodecCapability, CodecCompatibility, CodecPackManifest, CodecWorkerDescriptor,
-    DeckCompatibility, DeckPackManifest, DeckRoleDescriptor, DeckRuntimeDescriptor,
-    DeckRuntimeKind, DeckSignalDescriptor, ExtensionRoots, InstallRequest, IntegrityCatalog,
-    IntegrityDescriptor, IntegrityFile, LicenseDescriptor, OperatingSystem, PackRequest,
-    PackageKind, PackageReference, PlatformDescriptor, ProfileKey as ManifestProfileKey,
-    PublisherDescriptor, PublisherIdentityClaim, PythonConstraint, PythonImplementation,
-    RuntimeLockDescriptor, SignalGeometry as ManifestSignalGeometry, TensorDevice,
-    TensorDtype as ManifestTensorDtype, TimingDescriptor, enable, install,
-    install_from_bundled_index, pack, resolve_active,
+    ActivePackageCache, Architecture, BundledPackageEntry, BundledPackageIndex,
+    CodecAdapterDescriptor, CodecCapability, CodecCompatibility, CodecPackManifest,
+    CodecWorkerDescriptor, DeckCompatibility, DeckPackManifest, DeckRoleDescriptor,
+    DeckRuntimeDescriptor, DeckRuntimeKind, DeckSignalDescriptor, ExtensionRoots, InstallRequest,
+    IntegrityCatalog, IntegrityDescriptor, IntegrityFile, LicenseDescriptor, OperatingSystem,
+    PackRequest, PackageKind, PackageReference, PlatformDescriptor,
+    ProfileKey as ManifestProfileKey, PublisherDescriptor, PublisherIdentityClaim,
+    PythonConstraint, PythonImplementation, RuntimeLockDescriptor,
+    SignalGeometry as ManifestSignalGeometry, TensorDevice, TensorDtype as ManifestTensorDtype,
+    TimingDescriptor, enable, install, install_from_bundled_index, pack, resolve_active,
 };
 use latentdeck_gpu::{
     ring_v2::{ReadV2Status, WriteV2Status, control_mapping_bytes},
@@ -160,7 +160,10 @@ async fn installed_non_h3_codec_runs_external_decks_without_p1_fallback() {
     }
 
     let cartridge = write_synthetic_cartridge(temp.path());
-    let sources = repeated_sources(&cartridge, 2);
+    let library_validated =
+        open_integrity_validated(&cartridge.path, &ValidationOptions::default())
+            .expect("Library-equivalent retained validation");
+    let sources = repeated_retained_sources(&cartridge, &library_validated, 2);
 
     assert_refused(
         &roots,
@@ -186,10 +189,40 @@ async fn installed_non_h3_codec_runs_external_decks_without_p1_fallback() {
     );
 
     let exact = selection(COMPATIBLE_DECK_ID);
-    let prepared = prepare_exact_deck_selection(&roots, &exact, &sources, APP_VERSION)
-        .expect("exact synthetic Deck/Codec pair");
+    let active_packages = ActivePackageCache::new();
+    let prepared = prepare_exact_deck_selection_with_cache(
+        &roots,
+        &active_packages,
+        &exact,
+        &sources,
+        APP_VERSION,
+    )
+    .expect("exact synthetic Deck/Codec pair");
     assert_eq!(prepared.sources.len(), 2);
     assert_eq!(prepared.cartridges.len(), 2);
+    assert_eq!(prepared.validation_work.full_cartridge_validations, 0);
+    assert_eq!(prepared.validation_work.retained_handle_clones, 2);
+    assert_eq!(active_packages.stats().cold_full_hash_passes, 2);
+    assert_eq!(active_packages.stats().cached_checkouts, 0);
+
+    let repeated_preflight = prepare_exact_deck_selection_with_cache(
+        &roots,
+        &active_packages,
+        &exact,
+        &sources,
+        APP_VERSION,
+    )
+    .expect("repeat exact preflight through process cache");
+    assert_eq!(
+        repeated_preflight
+            .validation_work
+            .full_cartridge_validations,
+        0
+    );
+    assert_eq!(repeated_preflight.validation_work.retained_handle_clones, 2);
+    assert_eq!(active_packages.stats().cold_full_hash_passes, 2);
+    assert_eq!(active_packages.stats().cached_checkouts, 2);
+    drop(repeated_preflight);
     assert_eq!(prepared.host.profile_key, protocol_profile());
     assert_eq!(prepared.host.signal_geometry, protocol_signal());
     assert_eq!(prepared.host.tensor_abi, tensor_abi());
@@ -395,7 +428,7 @@ async fn installed_non_h3_codec_runs_external_decks_without_p1_fallback() {
     assert!(exit.success, "synthetic worker exits cleanly: {exit}");
     drop(session);
 
-    let four_sources = repeated_sources(&cartridge, 4);
+    let four_sources = repeated_retained_sources(&cartridge, &library_validated, 4);
     let prepared = prepare_exact_deck_selection(
         &roots,
         &selection(COMPATIBLE_DECK4_ID),
@@ -404,6 +437,8 @@ async fn installed_non_h3_codec_runs_external_decks_without_p1_fallback() {
     )
     .expect("exact four-source synthetic Deck/Codec pair");
     assert_eq!(prepared.sources.len(), 4);
+    assert_eq!(prepared.validation_work.full_cartridge_validations, 0);
+    assert_eq!(prepared.validation_work.retained_handle_clones, 4);
     let four_session_id = prepared.host.deck_session_id;
     let four_ring_id = prepared.host.ring_id;
     let four_generation = prepared.host.stream_generation;
@@ -1196,6 +1231,22 @@ fn repeated_sources(cartridge: &CartridgeFixture, count: usize) -> Vec<DeckSourc
             path: &cartridge.path,
             cartridge_id: &cartridge.cartridge_id,
             archive_sha256: &cartridge.archive_sha256,
+            validated_cartridge: None,
+        })
+        .collect()
+}
+
+fn repeated_retained_sources<'a>(
+    cartridge: &'a CartridgeFixture,
+    validated: &'a latentdeck_cartridge::reader::IntegrityValidatedCartridge,
+    count: usize,
+) -> Vec<DeckSourceSelectionV2<'a>> {
+    (0..count)
+        .map(|_| DeckSourceSelectionV2 {
+            path: &cartridge.path,
+            cartridge_id: &cartridge.cartridge_id,
+            archive_sha256: &cartridge.archive_sha256,
+            validated_cartridge: Some(validated),
         })
         .collect()
 }

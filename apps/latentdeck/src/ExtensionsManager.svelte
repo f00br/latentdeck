@@ -66,7 +66,6 @@
     snapshotPending = true;
     try {
       snapshot = await invoke<ExtensionsSnapshot>("extensions_snapshot");
-      onPackagesChanged();
       if (reportError) errorMessage = "";
     } catch (error) {
       if (reportError) {
@@ -179,7 +178,6 @@
         { package: summary.package },
       );
       snapshot = replaceVerifiedSummary(snapshot, verified);
-      await refreshSnapshot(false);
       statusMessage = `Verified ${summary.package.packageId} ${summary.package.packageVersion}: ${verified.health}.`;
     } catch (error) {
       errorMessage = describeError(error, "extensions.verify_failed");
@@ -218,7 +216,9 @@
     summary: ExtensionPackageSummary,
   ): Promise<void> {
     const exactKey = extensionPackageKey(summary.package);
-    const allowCorrupt = summary.health === "corrupt";
+    const allowCorrupt =
+      summary.health === "corrupt" ||
+      summary.health === "verification_required";
     if (allowCorrupt && corruptRemovalAcknowledgement !== exactKey) return;
 
     busy = true;
@@ -384,7 +384,11 @@
           <p class="placeholder">No installed Deck or Codec Pack versions.</p>
         {:else}
           {#each snapshot.packages as summary (extensionPackageKey(summary.package))}
-            <article class:corrupt={summary.health === "corrupt"}>
+            <article
+              class:corrupt={summary.health === "corrupt"}
+              class:verification-required={summary.health ===
+                "verification_required"}
+            >
               <header>
                 <div>
                   <span>{summary.package.kind}</span>
@@ -398,7 +402,11 @@
                 </div>
                 <div class="state">
                   <span>{summary.enabled ? "enabled" : "disabled"}</span>
-                  <strong>{summary.health}</strong>
+                  <strong
+                    >{summary.health === "verification_required"
+                      ? "verification required"
+                      : summary.health}</strong
+                  >
                 </div>
               </header>
               <p>
@@ -411,13 +419,22 @@
                     "No detail"}</code
                 >
               {/if}
+              {#if summary.health === "verification_required"}
+                <p>
+                  Payload is not read while this Codec Pack is disabled. Verify
+                  or Enable performs strict full payload validation before use.
+                </p>
+              {/if}
               <div class="actions">
                 <button
                   disabled={controlsBusy}
                   onclick={() => verifyExtension(summary)}>Verify</button
                 >
                 <button
-                  disabled={controlsBusy || summary.health !== "healthy"}
+                  disabled={controlsBusy ||
+                    (!summary.enabled &&
+                      summary.health !== "healthy" &&
+                      summary.health !== "verification_required")}
                   onclick={() => setExtensionEnabled(summary, !summary.enabled)}
                   >{summary.enabled ? "Disable" : "Enable"}</button
                 >
@@ -428,14 +445,15 @@
                 <button
                   class="remove"
                   disabled={controlsBusy ||
-                    (summary.health === "corrupt" &&
+                    ((summary.health === "corrupt" ||
+                      summary.health === "verification_required") &&
                       corruptRemovalAcknowledgement !==
                         extensionPackageKey(summary.package))}
                   onclick={() => removeExtension(summary)}
                   >Remove exact version</button
                 >
               </div>
-              {#if summary.health === "corrupt"}
+              {#if summary.health === "corrupt" || summary.health === "verification_required"}
                 <label class="corrupt-confirmation">
                   <input
                     type="checkbox"
@@ -449,7 +467,9 @@
                         : null;
                     }}
                   />
-                  Allow removing this corrupt exact version
+                  {summary.health === "corrupt"
+                    ? "Allow removing this corrupt exact version"
+                    : "Allow removing this disabled exact version without payload verification"}
                 </label>
               {/if}
             </article>
@@ -767,6 +787,10 @@
 
   .corrupt .state strong {
     color: #ff8677;
+  }
+
+  .verification-required .state strong {
+    color: #d6c66f;
   }
 
   .remove {

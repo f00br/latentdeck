@@ -32,6 +32,9 @@ describe("generic Deck production surface", () => {
       "codecVersion: selectedCodec.codecVersion",
     );
     expect(workspaceSource).toContain("profileKey: selectedProfile");
+    expect(workspaceSource).toContain(
+      "if (extensionsRefreshPending !== null) return extensionsRefreshPending",
+    );
   });
 
   it("exposes explicit four-session foreground and close operations", () => {

@@ -137,6 +137,35 @@ fn retained_handle_access_receipt_round_trips_exact_bounded_ranges() {
 }
 
 #[test]
+fn retained_clone_reuses_validated_identity_with_an_owned_handle() {
+    let (archive, _, expected_manifest) = support::synthetic_non_h3_lc();
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("retained-clone.lc");
+    fs::write(&path, archive).expect("write synthetic LC");
+    let validated = open_integrity_validated(&path, &ValidationOptions::default())
+        .expect("codec-neutral full validation");
+    let expected_receipt = validated.receipt().clone();
+    let expected_access = validated.access_receipt().clone();
+
+    let mut retained_clone = validated
+        .try_clone_retained()
+        .expect("clone already-validated retained handle");
+    drop(validated);
+
+    assert_eq!(retained_clone.manifest(), &expected_manifest);
+    assert_eq!(retained_clone.receipt(), &expected_receipt);
+    assert_eq!(retained_clone.access_receipt(), &expected_access);
+    let mut tensor = retained_clone
+        .tensor_reader("latent_state")
+        .expect("cloned retained tensor stream");
+    let mut bytes = Vec::new();
+    tensor
+        .read_to_end(&mut bytes)
+        .expect("read cloned retained tensor without revalidation");
+    assert_eq!(bytes.len(), 7 * 3 * 4);
+}
+
+#[test]
 fn malicious_access_receipt_ranges_and_file_length_are_rejected() {
     let (archive, _, _) = support::synthetic_non_h3_lc();
     let directory = tempfile::tempdir().expect("temporary directory");

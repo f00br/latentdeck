@@ -7,27 +7,30 @@ use std::{
     sync::Arc,
 };
 
-use latentdeck_cartridge::hash::hash_path;
 use latentdeck_control::{
     DeckPresetDocument,
     v2::{
-        CaptureMode, ControlBinding, DeviceKind, ProfileKey, RoleBinding, SourceTransportBinding,
+        CaptureMode, ControlBinding, DeviceKind, ExternalAssetBinding, ProfileKey, RoleBinding,
+        SourceTransportBinding,
     },
 };
 use latentdeck_core::{
     deck_selection_v2::{
         DeckPackageSelectionV2, DeckSelectionV2Error, DeckSourceSelectionV2,
-        PreparedDeckSelectionV2, prepare_exact_deck_selection,
+        PreparedDeckSelectionV2, check_indexed_deck_source_compatibility,
+        prepare_exact_deck_selection_with_cache,
     },
     deck_session_v2::DeckSessionV2LoadRequest,
+    external_asset_v2::IntegrityValidatedExternalAsset,
 };
 use latentdeck_deck_runtime_contracts::{
     BrokerError, ContractId, ForegroundLease, MAX_WARM_SESSIONS, OutputPinKind, OutputPinToken,
     PackageIdentity, SessionBroker, SessionId, WarmSession, WorkerId,
 };
 use latentdeck_extension_manager::{
-    CompatibilityReason, ExtensionRoots, PackageKind, PackageManifest, PackageReference,
-    compatibility_matrix, resolve_active,
+    ActiveInstalledPackage, ActivePackageCache, CompatibilityReason,
+    ErrorCode as ExtensionErrorCode, ExtensionError, ExtensionRoots, ExternalAssetDescriptor,
+    PackageKind, PackageManifest, PackageReference,
 };
 use latentdeck_library::{CartridgeKey, DeckSourceIdentity, ResolvedDeckSource};
 use latentdeck_native_output::{HostFullscreenController, NativeSpoutStatus};
@@ -55,7 +58,10 @@ use crate::{
 
 const MAX_RECENT_FAULTS: usize = 32;
 const MAX_JS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
-const MAX_SOURCE_OPTIONS: usize = 256;
+// The Library view is bounded to 1,000 rows and a preset may contribute four
+// exact sources outside that active Bank. Eligibility is metadata-only, so the
+// command can safely preserve the complete host-visible set.
+const MAX_SOURCE_OPTIONS: usize = 1_004;
 
 #[derive(Debug, Default)]
 struct GenericSessionRegistry {
@@ -141,9 +147,7 @@ struct ExternalAssetKey {
 
 #[derive(Clone, Debug)]
 struct BoundExternalAsset {
-    path: PathBuf,
-    sha256: String,
-    byte_length: u64,
+    validated: IntegrityValidatedExternalAsset,
 }
 
 struct GenericSessionRecord {
@@ -180,6 +184,8 @@ struct GenericDeckController {
     registry: GenericSessionRegistry,
     sessions: BTreeMap<SessionId, GenericSessionRecord>,
     external_assets: BTreeMap<ExternalAssetKey, BoundExternalAsset>,
+    external_asset_full_validations: usize,
+    external_asset_retained_checkouts: usize,
     recent_faults: VecDeque<GenericDeckFaultView>,
     closing: BTreeSet<SessionId>,
     lifecycle_transition: Option<u64>,
@@ -209,12 +215,21 @@ impl GenericDeckController {
         self.registry.cancel_reservation(session_id);
     }
 
-    fn asset_paths(&self, codec_id: &str, codec_version: &str) -> Vec<(String, PathBuf)> {
-        self.external_assets
+    fn retained_assets(
+        &mut self,
+        codec_id: &str,
+        codec_version: &str,
+    ) -> Vec<IntegrityValidatedExternalAsset> {
+        let assets = self
+            .external_assets
             .iter()
             .filter(|(key, _)| key.codec_id == codec_id && key.codec_version == codec_version)
-            .map(|(key, asset)| (key.asset_id.clone(), asset.path.clone()))
-            .collect()
+            .map(|(_, asset)| asset.validated.clone_retained())
+            .collect::<Vec<_>>();
+        self.external_asset_retained_checkouts = self
+            .external_asset_retained_checkouts
+            .saturating_add(assets.len());
+        assets
     }
 
     fn bind_asset(&mut self, key: ExternalAssetKey, asset: BoundExternalAsset) {
@@ -223,6 +238,21 @@ impl GenericDeckController {
 
     fn clear_asset(&mut self, key: &ExternalAssetKey) -> bool {
         self.external_assets.remove(key).is_some()
+    }
+
+    fn prune_stale_assets(
+        &mut self,
+        codec_id: &str,
+        codec_version: &str,
+        descriptors: &[ExternalAssetDescriptor],
+    ) {
+        self.external_assets.retain(|key, asset| {
+            key.codec_id != codec_id
+                || key.codec_version != codec_version
+                || descriptors.iter().any(|descriptor| {
+                    retained_external_asset_matches_descriptor(&asset.validated, descriptor)
+                })
+        });
     }
 
     fn asset_view(&self, key: &ExternalAssetKey) -> GenericExternalAssetView {
@@ -240,8 +270,8 @@ impl GenericDeckController {
                 codec_version: key.codec_version.clone(),
                 asset_id: key.asset_id.clone(),
                 bound: true,
-                sha256: Some(asset.sha256.clone()),
-                byte_length: Some(asset.byte_length),
+                sha256: Some(asset.validated.binding().sha256.clone()),
+                byte_length: Some(asset.validated.binding().byte_length),
             },
         )
     }
@@ -616,6 +646,14 @@ impl GenericProfileKeyInput {
             && self.profile == value.profile
             && self.profile_version == value.profile_version
     }
+
+    fn to_wire(&self) -> ProfileKey {
+        ProfileKey {
+            codec_family: self.codec_family.clone(),
+            profile: self.profile.clone(),
+            profile_version: self.profile_version.clone(),
+        }
+    }
 }
 
 impl From<&latentdeck_extension_manager::ProfileKey> for GenericProfileKeyInput {
@@ -959,10 +997,7 @@ pub(crate) async fn deck_generic_runtime_options(
     state: State<'_, GenericDeckAppState>,
     request: GenericRuntimeOptionsRequest,
 ) -> Result<GenericRuntimeOptionsView, CommandError> {
-    if request.sources.len() > MAX_SOURCE_OPTIONS
-        || (request.profile_key.is_none() && !request.sources.is_empty())
-        || (request.device == DeviceKind::Cpu && request.device_ordinal != 0)
-    {
+    if !runtime_options_request_is_bounded(&request) {
         return Err(CommandError::new(
             "deck.input_invalid",
             "Runtime discovery requires a bounded exact profile and Library identity set.",
@@ -978,24 +1013,38 @@ pub(crate) async fn deck_generic_runtime_options(
         package_id: request.codec_id.clone(),
         package_version: request.codec_version.clone(),
     };
-    let matrix = compatibility_matrix(extensions.roots()).map_err(extension_command_error)?;
-    let mut reason = matrix
-        .iter()
-        .find(|pair| pair.deck == deck_reference && pair.codec == codec_reference)
-        .map_or(CompatibilityReason::Untrusted, |pair| pair.reason);
-
-    let deck = resolve_active(extensions.roots(), &deck_reference).ok();
-    let codec = resolve_active(extensions.roots(), &codec_reference).ok();
-    let (deck_manifest, codec_manifest) = match (
-        deck.as_ref()
-            .map(latentdeck_extension_manager::ActiveInstalledPackage::manifest),
-        codec
-            .as_ref()
-            .map(latentdeck_extension_manager::ActiveInstalledPackage::manifest),
-    ) {
-        (Some(PackageManifest::Deck(deck)), Some(PackageManifest::Codec(codec))) => {
-            reason = discovery_reason(deck, codec, request.device, reason);
-            (Some(deck.clone()), Some(codec.clone()))
+    let deck = resolve_discovery_package(
+        extensions.active_packages(),
+        extensions.roots(),
+        &deck_reference,
+    )?;
+    let codec = resolve_discovery_package(
+        extensions.active_packages(),
+        extensions.roots(),
+        &codec_reference,
+    )?;
+    let mut reason = match (&deck, &codec) {
+        (DiscoveryPackage::Refused(CompatibilityReason::PackageInvalid), _)
+        | (_, DiscoveryPackage::Refused(CompatibilityReason::PackageInvalid)) => {
+            CompatibilityReason::PackageInvalid
+        }
+        (DiscoveryPackage::Refused(reason), _) | (_, DiscoveryPackage::Refused(reason)) => *reason,
+        (DiscoveryPackage::Active(_), DiscoveryPackage::Active(_)) => {
+            CompatibilityReason::Compatible
+        }
+    };
+    let (deck_manifest, codec_manifest) = match (&deck, &codec) {
+        (DiscoveryPackage::Active(deck), DiscoveryPackage::Active(codec)) => {
+            if let (PackageManifest::Deck(deck), PackageManifest::Codec(codec)) =
+                (deck.manifest(), codec.manifest())
+            {
+                reason =
+                    discovery_reason(deck, codec, request.device, CompatibilityReason::Compatible);
+                (Some(deck.clone()), Some(codec.clone()))
+            } else {
+                reason = CompatibilityReason::PackageInvalid;
+                (None, None)
+            }
         }
         _ => (None, None),
     };
@@ -1003,7 +1052,9 @@ pub(crate) async fn deck_generic_runtime_options(
         .as_ref()
         .zip(codec_manifest.as_ref())
         .map_or_else(Vec::new, |(deck, codec)| compatible_profiles(deck, codec));
-    if let Some(selected) = &request.profile_key
+    if reason == CompatibilityReason::Compatible && profiles.is_empty() {
+        reason = CompatibilityReason::UnsupportedProfile;
+    } else if let Some(selected) = &request.profile_key
         && !profiles.iter().any(|profile| profile == selected)
     {
         reason = CompatibilityReason::UnsupportedProfile;
@@ -1012,6 +1063,13 @@ pub(crate) async fn deck_generic_runtime_options(
     let bound_assets = {
         let mut controller = state.controller.lock().await;
         controller.reap_closed();
+        if let Some(manifest) = &codec_manifest {
+            controller.prune_stale_assets(
+                &request.codec_id,
+                &request.codec_version,
+                &manifest.external_assets,
+            );
+        }
         controller
             .external_assets
             .iter()
@@ -1034,7 +1092,7 @@ pub(crate) async fn deck_generic_runtime_options(
                     byte_length: asset.byte_length,
                     required: asset.required,
                     bound: bound.is_some(),
-                    bound_sha256: bound.map(|value| value.sha256.clone()),
+                    bound_sha256: bound.map(|value| value.validated.binding().sha256.clone()),
                 }
             })
             .collect()
@@ -1053,18 +1111,51 @@ pub(crate) async fn deck_generic_runtime_options(
     let slots = deck_manifest
         .as_ref()
         .map_or(0, |manifest| manifest.signal.slots);
-    let mut source_views = Vec::with_capacity(request.sources.len());
-    for source in &request.sources {
-        let source_reason = if reason == CompatibilityReason::Compatible {
-            source_option_reason(
-                extensions.roots().clone(),
-                &library,
-                &request,
-                source,
-                slots,
-                &bound_assets,
+    let source_identities = request
+        .sources
+        .iter()
+        .map(|source| source_identity(source).ok())
+        .collect::<Vec<_>>();
+    let indexed_sources = if reason == CompatibilityReason::Compatible {
+        library
+            .indexed_deck_source_manifests(
+                source_identities.iter().filter_map(Clone::clone).collect(),
             )
-            .await
+            .await?
+    } else {
+        Vec::new()
+    };
+    let indexed_sources = align_indexed_source_results(&source_identities, indexed_sources);
+    let mut source_views = Vec::with_capacity(request.sources.len());
+    for ((source, identity), indexed) in request
+        .sources
+        .iter()
+        .zip(source_identities)
+        .zip(indexed_sources)
+    {
+        let source_reason = if reason == CompatibilityReason::Compatible {
+            if let Some(identity) = identity {
+                match (
+                    indexed,
+                    deck_manifest.as_ref(),
+                    codec_manifest.as_ref(),
+                    request.profile_key.as_ref(),
+                ) {
+                    (Some(indexed), Some(deck), Some(codec), Some(profile)) => {
+                        indexed_source_option_reason(
+                            indexed,
+                            &identity,
+                            profile,
+                            deck,
+                            codec,
+                            request.device,
+                        )
+                    }
+                    _ => "package_invalid".to_owned(),
+                }
+            } else {
+                "package_invalid".to_owned()
+            }
         } else {
             compatibility_reason_code(reason).to_owned()
         };
@@ -1086,65 +1177,53 @@ pub(crate) async fn deck_generic_runtime_options(
     })
 }
 
-async fn source_option_reason(
-    roots: ExtensionRoots,
-    library: &AppState,
-    request: &GenericRuntimeOptionsRequest,
-    source: &GenericDeckSourceInput,
-    slots: u8,
-    assets: &BTreeMap<String, BoundExternalAsset>,
-) -> String {
-    let Some(profile) = request.profile_key.clone() else {
-        return "unsupported_profile".to_owned();
-    };
-    if slots == 0 || slots > 16 {
-        return "unsupported_signal".to_owned();
-    }
-    let Ok(identity) = source_identity(source) else {
-        return "package_invalid".to_owned();
-    };
-    let Ok(resolved) = library.resolve_deck_source(identity).await else {
-        return "package_invalid".to_owned();
-    };
-    let deck_id = request.deck_id.clone();
-    let deck_version = request.deck_version.clone();
-    let codec_id = request.codec_id.clone();
-    let codec_version = request.codec_version.clone();
-    let device = request.device;
-    let device_ordinal = request.device_ordinal;
-    let assets = assets
+fn align_indexed_source_results<T>(
+    identities: &[Option<DeckSourceIdentity>],
+    indexed_sources: Vec<T>,
+) -> Vec<Option<T>> {
+    let mut indexed_sources = indexed_sources.into_iter();
+    identities
         .iter()
-        .map(|(asset_id, asset)| (asset_id.clone(), asset.path.clone()))
-        .collect::<Vec<_>>();
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut selection =
-            DeckPackageSelectionV2::new(deck_id, deck_version, codec_id, codec_version, device);
-        selection.set_device_ordinal(device_ordinal);
-        for (asset_id, path) in assets {
-            selection.bind_external_asset(asset_id, path);
-        }
-        let source_inputs = (0..slots)
-            .map(|_| DeckSourceSelectionV2 {
-                path: resolved.path(),
-                cartridge_id: resolved.identity().cartridge_id(),
-                archive_sha256: resolved.identity().archive_sha256().as_str(),
-            })
-            .collect::<Vec<_>>();
-        match prepare_exact_deck_selection(
-            &roots,
-            &selection,
-            &source_inputs,
-            latentdeck_core::product_version(),
-        ) {
-            Ok(prepared) if profile.matches_wire(&prepared.host.profile_key) => {
-                "compatible".to_owned()
+        .map(|identity| {
+            if identity.is_some() {
+                indexed_sources.next()
+            } else {
+                None
             }
-            Ok(_) => "unsupported_profile".to_owned(),
-            Err(error) => error.code().to_owned(),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "package_invalid".to_owned())
+        })
+        .collect()
+}
+
+fn runtime_options_request_is_bounded(request: &GenericRuntimeOptionsRequest) -> bool {
+    request.sources.len() <= MAX_SOURCE_OPTIONS
+        && (request.profile_key.is_some() || request.sources.is_empty())
+        && (request.device != DeviceKind::Cpu || request.device_ordinal == 0)
+}
+
+fn indexed_source_option_reason(
+    indexed: Result<latentdeck_cartridge::manifest::ManifestV0_1, CommandError>,
+    identity: &DeckSourceIdentity,
+    profile: &GenericProfileKeyInput,
+    deck: &latentdeck_extension_manager::DeckPackManifest,
+    codec: &latentdeck_extension_manager::CodecPackManifest,
+    device: DeviceKind,
+) -> String {
+    let Ok(manifest) = indexed else {
+        return "package_invalid".to_owned();
+    };
+    check_indexed_deck_source_compatibility(
+        codec,
+        deck,
+        &manifest,
+        identity.cartridge_id(),
+        identity.archive_sha256().as_str(),
+        &profile.to_wire(),
+        device,
+    )
+    .map_or_else(
+        |error| error.code().to_owned(),
+        |()| "compatible".to_owned(),
+    )
 }
 
 fn compatible_profiles(
@@ -1163,6 +1242,47 @@ fn compatible_profiles(
         })
         .map(GenericProfileKeyInput::from)
         .collect()
+}
+
+enum DiscoveryPackage {
+    Active(ActiveInstalledPackage),
+    Refused(CompatibilityReason),
+}
+
+fn resolve_discovery_package(
+    cache: &ActivePackageCache,
+    roots: &ExtensionRoots,
+    package: &PackageReference,
+) -> Result<DiscoveryPackage, CommandError> {
+    match cache.resolve_active(roots, package) {
+        Ok(active) => Ok(DiscoveryPackage::Active(active)),
+        Err(error) => match discovery_reason_for_extension_error(&error) {
+            Some(reason) => Ok(DiscoveryPackage::Refused(reason)),
+            None => Err(CommandError::new(
+                error.code().as_str(),
+                "The exact extension lifecycle is busy or unavailable; retry this discovery.",
+            )),
+        },
+    }
+}
+
+const fn discovery_reason_for_extension_error(
+    error: &ExtensionError,
+) -> Option<CompatibilityReason> {
+    match error.code() {
+        ExtensionErrorCode::InvalidArguments
+        | ExtensionErrorCode::ArchiveInvalid
+        | ExtensionErrorCode::ManifestInvalid
+        | ExtensionErrorCode::IntegrityFailed => Some(CompatibilityReason::PackageInvalid),
+        ExtensionErrorCode::PackageMissing
+        | ExtensionErrorCode::PackageDisabled
+        | ExtensionErrorCode::PackageUntrusted => Some(CompatibilityReason::Untrusted),
+        ExtensionErrorCode::PackageExists
+        | ExtensionErrorCode::PackageActive
+        | ExtensionErrorCode::LifecycleBusy
+        | ExtensionErrorCode::LifecycleConflict
+        | ExtensionErrorCode::Io => None,
+    }
 }
 
 fn discovery_reason(
@@ -1280,13 +1400,6 @@ fn source_identity(input: &GenericDeckSourceInput) -> Result<DeckSourceIdentity,
     })
 }
 
-fn extension_command_error(_error: latentdeck_extension_manager::ExtensionError) -> CommandError {
-    CommandError::new(
-        "package_invalid",
-        "LatentDeck could not inspect the exact installed extension set safely.",
-    )
-}
-
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) async fn deck_generic_external_asset_select(
@@ -1307,12 +1420,15 @@ pub(crate) async fn deck_generic_external_asset_select(
         package_id: request.codec_id.clone(),
         package_version: request.codec_version.clone(),
     };
-    let package = resolve_active(extensions.roots(), &reference).map_err(|_| {
-        CommandError::new(
-            "untrusted",
-            "The exact Codec Pack version is not active and trusted.",
-        )
-    })?;
+    let package = extensions
+        .active_packages()
+        .resolve_active(extensions.roots(), &reference)
+        .map_err(|_| {
+            CommandError::new(
+                "untrusted",
+                "The exact Codec Pack version is not active and trusted.",
+            )
+        })?;
     let PackageManifest::Codec(manifest) = package.manifest() else {
         return Err(CommandError::new(
             "package_invalid",
@@ -1340,35 +1456,66 @@ pub(crate) async fn deck_generic_external_asset_select(
             "The native picker did not return a usable external asset file.",
         )
     })?;
-    let selected = validate_external_asset_path(&selected)?;
-    let measurement = hash_path(&selected).map_err(|_| {
-        CommandError::new(
-            "missing_asset",
-            "LatentDeck could not measure the selected external asset safely.",
-        )
-    })?;
-    let sha256 = measurement.sha256.to_string();
-    if measurement.byte_length != descriptor.byte_length || sha256 != descriptor.sha256 {
-        return Err(CommandError::new(
-            "missing_asset",
-            "The selected external asset does not match the Codec Pack's exact hash and length.",
-        ));
-    }
     let key = ExternalAssetKey {
         codec_id: request.codec_id,
         codec_version: request.codec_version,
         asset_id: request.asset_id,
     };
+    retain_and_bind_external_asset(
+        &state,
+        key,
+        selected,
+        descriptor.sha256,
+        descriptor.byte_length,
+    )
+    .await
+    .map(Some)
+}
+
+async fn retain_and_bind_external_asset(
+    state: &GenericDeckAppState,
+    key: ExternalAssetKey,
+    selected: PathBuf,
+    expected_sha256: String,
+    expected_byte_length: u64,
+) -> Result<GenericExternalAssetView, CommandError> {
+    {
+        let mut controller = state.controller.lock().await;
+        controller.external_asset_full_validations =
+            controller.external_asset_full_validations.saturating_add(1);
+    }
+    let asset_id = key.asset_id.clone();
+    let validated = tauri::async_runtime::spawn_blocking(move || {
+        let selected = validate_external_asset_path(&selected)?;
+        let path = selected.to_str().ok_or_else(|| {
+            CommandError::new(
+                "missing_asset",
+                "The selected external asset identity is not valid Unicode.",
+            )
+        })?;
+        IntegrityValidatedExternalAsset::validate_and_retain(ExternalAssetBinding {
+            asset_id,
+            path: path.to_owned(),
+            sha256: expected_sha256,
+            byte_length: expected_byte_length,
+        })
+        .map_err(|_| {
+            CommandError::new(
+                "missing_asset",
+                "The selected external asset does not match the Codec Pack's exact hash and length.",
+            )
+        })
+    })
+    .await
+    .map_err(|_| {
+        CommandError::new(
+            "missing_asset",
+            "LatentDeck could not measure the selected external asset safely.",
+        )
+    })??;
     let mut controller = state.controller.lock().await;
-    controller.bind_asset(
-        key.clone(),
-        BoundExternalAsset {
-            path: selected,
-            sha256,
-            byte_length: measurement.byte_length,
-        },
-    );
-    Ok(Some(controller.asset_view(&key)))
+    controller.bind_asset(key.clone(), BoundExternalAsset { validated });
+    Ok(controller.asset_view(&key))
 }
 
 #[tauri::command]
@@ -1419,6 +1566,16 @@ fn validate_external_asset_path(path: &Path) -> Result<PathBuf, CommandError> {
             "The selected external asset identity cannot be retained safely.",
         )
     })
+}
+
+fn retained_external_asset_matches_descriptor(
+    retained: &IntegrityValidatedExternalAsset,
+    descriptor: &ExternalAssetDescriptor,
+) -> bool {
+    let binding = retained.binding();
+    binding.asset_id == descriptor.asset_id
+        && binding.sha256 == descriptor.sha256
+        && binding.byte_length == descriptor.byte_length
 }
 
 #[cfg(target_os = "windows")]
@@ -1474,11 +1631,12 @@ pub(crate) async fn deck_generic_open(
                     .await?,
             );
         }
-        let asset_paths = {
-            let controller = state.controller.lock().await;
-            controller.asset_paths(&request.codec_id, &request.codec_version)
+        let retained_assets = {
+            let mut controller = state.controller.lock().await;
+            controller.retained_assets(&request.codec_id, &request.codec_version)
         };
         let roots = extensions.roots().clone();
+        let active_packages = extensions.active_packages().clone();
         let deck_id = request.deck_id.clone();
         let deck_version = request.deck_version.clone();
         let codec_id = request.codec_id.clone();
@@ -1489,6 +1647,7 @@ pub(crate) async fn deck_generic_open(
         let prepared = tauri::async_runtime::spawn_blocking(move || {
             prepare_open_selection(
                 &roots,
+                &active_packages,
                 deck_id,
                 deck_version,
                 codec_id,
@@ -1496,7 +1655,7 @@ pub(crate) async fn deck_generic_open(
                 &profile,
                 device,
                 device_ordinal,
-                asset_paths,
+                retained_assets,
                 &resolved,
             )
         })
@@ -1582,6 +1741,7 @@ pub(crate) async fn deck_generic_open(
 #[allow(clippy::too_many_arguments)]
 fn prepare_open_selection(
     roots: &ExtensionRoots,
+    active_packages: &ActivePackageCache,
     deck_id: String,
     deck_version: String,
     codec_id: String,
@@ -1589,14 +1749,14 @@ fn prepare_open_selection(
     profile: &GenericProfileKeyInput,
     device: DeviceKind,
     device_ordinal: u8,
-    asset_paths: Vec<(String, PathBuf)>,
+    retained_assets: Vec<IntegrityValidatedExternalAsset>,
     sources: &[ResolvedDeckSource],
 ) -> Result<latentdeck_core::deck_selection_v2::PreparedDeckSelectionV2, CommandError> {
     let mut selection =
         DeckPackageSelectionV2::new(deck_id, deck_version, codec_id, codec_version, device);
     selection.set_device_ordinal(device_ordinal);
-    for (asset_id, path) in asset_paths {
-        selection.bind_external_asset(asset_id, path);
+    for asset in retained_assets {
+        selection.bind_integrity_validated_external_asset(asset);
     }
     let source_inputs = sources
         .iter()
@@ -1604,10 +1764,12 @@ fn prepare_open_selection(
             path: source.path(),
             cartridge_id: source.identity().cartridge_id(),
             archive_sha256: source.identity().archive_sha256().as_str(),
+            validated_cartridge: Some(source.validated_cartridge()),
         })
         .collect::<Vec<_>>();
-    let prepared = prepare_exact_deck_selection(
+    let prepared = prepare_exact_deck_selection_with_cache(
         roots,
+        active_packages,
         &selection,
         &source_inputs,
         latentdeck_core::product_version(),
@@ -2312,8 +2474,11 @@ pub(crate) fn deck_generic_preset_load(
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use latentdeck_deck_runtime_contracts::{ContractId, PackageIdentity};
     use semver::Version;
+    use sha2::{Digest as _, Sha256};
 
     use super::*;
 
@@ -2355,6 +2520,170 @@ mod tests {
         assert_eq!(deck.signal.geometry_allowlist.len(), 4);
         assert!(geometry_allowlist_supports_device(&deck, DeviceKind::Cuda));
         assert!(!geometry_allowlist_supports_device(&deck, DeviceKind::Cpu));
+    }
+
+    #[test]
+    fn exact_discovery_preserves_package_invalid_and_untrusted_reasons() {
+        for code in [
+            ExtensionErrorCode::InvalidArguments,
+            ExtensionErrorCode::ArchiveInvalid,
+            ExtensionErrorCode::ManifestInvalid,
+            ExtensionErrorCode::IntegrityFailed,
+        ] {
+            let error = ExtensionError::new(code, "private detail");
+            assert_eq!(
+                discovery_reason_for_extension_error(&error),
+                Some(CompatibilityReason::PackageInvalid)
+            );
+        }
+        for code in [
+            ExtensionErrorCode::PackageMissing,
+            ExtensionErrorCode::PackageDisabled,
+            ExtensionErrorCode::PackageUntrusted,
+        ] {
+            let error = ExtensionError::new(code, "private detail");
+            assert_eq!(
+                discovery_reason_for_extension_error(&error),
+                Some(CompatibilityReason::Untrusted)
+            );
+        }
+        for code in [
+            ExtensionErrorCode::PackageExists,
+            ExtensionErrorCode::PackageActive,
+            ExtensionErrorCode::LifecycleBusy,
+            ExtensionErrorCode::LifecycleConflict,
+            ExtensionErrorCode::Io,
+        ] {
+            let error = ExtensionError::new(code, "private detail");
+            assert_eq!(discovery_reason_for_extension_error(&error), None);
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn external_asset_select_and_repeated_load_checkout_hash_exact_bytes_once() {
+        let root = tempfile::tempdir().expect("temporary external asset root");
+        let path = root.path().join("decoder.safetensors");
+        let bytes = b"exact retained decoder asset";
+        fs::write(&path, bytes).expect("write external asset");
+        let mut sha256 = String::with_capacity(64);
+        for byte in Sha256::digest(bytes) {
+            write!(&mut sha256, "{byte:02x}").expect("write digest text");
+        }
+        let state = GenericDeckAppState::new(root.path().join("app-data"));
+        let key = ExternalAssetKey {
+            codec_id: "org.example.codec".to_owned(),
+            codec_version: "1.2.3".to_owned(),
+            asset_id: "decoder".to_owned(),
+        };
+
+        let view = retain_and_bind_external_asset(
+            &state,
+            key.clone(),
+            path.clone(),
+            sha256.clone(),
+            u64::try_from(bytes.len()).expect("asset length"),
+        )
+        .await
+        .expect("select and retain exact asset");
+        assert!(view.bound);
+
+        let first_load = state
+            .controller
+            .lock()
+            .await
+            .retained_assets(&key.codec_id, &key.codec_version);
+        let repeat_load = state
+            .controller
+            .lock()
+            .await
+            .retained_assets(&key.codec_id, &key.codec_version);
+        assert_eq!(first_load.len(), 1);
+        assert_eq!(repeat_load.len(), 1);
+        assert_eq!(first_load[0].binding(), repeat_load[0].binding());
+        {
+            let controller = state.controller.lock().await;
+            assert_eq!(controller.external_asset_full_validations, 1);
+            assert_eq!(controller.external_asset_retained_checkouts, 2);
+        }
+        assert!(
+            fs::write(&path, vec![b'x'; bytes.len()]).is_err(),
+            "retained evidence must deny mutation between Select and Load"
+        );
+        assert!(
+            fs::remove_file(&path).is_err(),
+            "retained evidence must deny replacement by delete"
+        );
+
+        drop(first_load);
+        drop(repeat_load);
+        let changed_descriptor = ExternalAssetDescriptor {
+            asset_id: key.asset_id.clone(),
+            display_name: "Changed decoder".to_owned(),
+            required: true,
+            byte_length: u64::try_from(bytes.len()).expect("asset length"),
+            sha256: "ff".repeat(32),
+            source_url: None,
+            license_label: "test-only".to_owned(),
+            license_url: None,
+        };
+        {
+            let mut controller = state.controller.lock().await;
+            controller.prune_stale_assets(&key.codec_id, &key.codec_version, &[changed_descriptor]);
+            assert!(
+                !controller.asset_view(&key).bound,
+                "repair/reinstall with a changed descriptor must require an explicit rebind"
+            );
+            assert!(
+                controller
+                    .retained_assets(&key.codec_id, &key.codec_version)
+                    .is_empty()
+            );
+        }
+        fs::remove_file(path).expect("descriptor change releases the stale retained UI handle");
+    }
+
+    #[test]
+    fn invalid_source_before_valid_source_keeps_indexed_results_aligned() {
+        let valid = DeckSourceIdentity::new(
+            "550e8400-e29b-41d4-a716-446655440001",
+            CartridgeKey::new_unchecked("aa".repeat(32)),
+        )
+        .expect("valid exact identity");
+        let identities = vec![None, Some(valid)];
+
+        let aligned = align_indexed_source_results(&identities, vec!["valid-compatible"]);
+
+        assert_eq!(aligned, vec![None, Some("valid-compatible")]);
+    }
+
+    #[test]
+    fn runtime_options_accept_the_complete_bounded_library_view() {
+        let request = |source_count| GenericRuntimeOptionsRequest {
+            deck_id: "org.example.deck".to_owned(),
+            deck_version: "1.0.0".to_owned(),
+            codec_id: "org.example.codec".to_owned(),
+            codec_version: "2.0.0".to_owned(),
+            profile_key: Some(GenericProfileKeyInput {
+                codec_family: "example".to_owned(),
+                profile: "latent".to_owned(),
+                profile_version: "1.0.0".to_owned(),
+            }),
+            device: DeviceKind::Cpu,
+            device_ordinal: 0,
+            sources: vec![
+                GenericDeckSourceInput {
+                    cartridge_id: "550e8400-e29b-41d4-a716-446655440001".to_owned(),
+                    archive_sha256: "aa".repeat(32),
+                };
+                source_count
+            ],
+        };
+
+        assert!(runtime_options_request_is_bounded(&request(257)));
+        assert!(runtime_options_request_is_bounded(&request(1_000)));
+        assert!(runtime_options_request_is_bounded(&request(1_004)));
+        assert!(!runtime_options_request_is_bounded(&request(1_005)));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 export type ExtensionPackageKind = "deck_pack" | "codec_pack";
-export type ExtensionPackageHealth = "healthy" | "corrupt" | "untrusted";
+export type ExtensionPackageHealth =
+  "healthy" | "verification_required" | "corrupt" | "untrusted";
 export type ExtensionCodecDevice = "cpu" | "cuda";
 
 export type ExtensionCompatibilityReason =

@@ -28,6 +28,7 @@ use latentdeck_control::{
 use latentdeck_core::{
     deck_selection_v2::{
         DeckPackageSelectionV2, DeckSourceSelectionV2, prepare_exact_deck_selection,
+        prepare_exact_deck_selection_with_cache,
     },
     deck_session_v2::{DeckSessionV2, DeckSessionV2LoadRequest, start_deck_session_v2},
 };
@@ -35,8 +36,8 @@ use latentdeck_deck_runtime_contracts::{
     BrokerError, ContractId, OutputPinKind, PackageIdentity, SessionId, WarmSession, WorkerId,
 };
 use latentdeck_extension_manager::{
-    Architecture, CodecAdapterDescriptor, CodecCapability, CodecCompatibility, CodecPackManifest,
-    CodecWorkerDescriptor, DeckCompatibility, DeckPackManifest, DeckRoleDescriptor,
+    ActivePackageCache, Architecture, CodecAdapterDescriptor, CodecCapability, CodecCompatibility,
+    CodecPackManifest, CodecWorkerDescriptor, DeckCompatibility, DeckPackManifest, DeckRoleDescriptor,
     DeckRuntimeDescriptor, DeckRuntimeKind, DeckSignalDescriptor, ExtensionRoots, InstallRequest,
     IntegrityCatalog, IntegrityDescriptor, IntegrityFile, LicenseDescriptor, OperatingSystem,
     PackRequest, PackageKind, PackageReference, PlatformDescriptor,
@@ -54,7 +55,11 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use super::super::GenericSessionRegistry;
+use latentdeck_library::{CartridgeKey, DeckSourceIdentity, Library};
+
+use super::super::{
+    AppState, GenericProfileKeyInput, GenericSessionRegistry, prepare_open_selection,
+};
 
 const APP_VERSION: &str = "0.2.0";
 const CODEC_ID: &str = "dev.latentdeck.registry-test.codec";
@@ -84,6 +89,166 @@ struct ManagedSession {
     runtime: DeckSessionV2,
 }
 
+#[tokio::test]
+async fn library_options_and_open_reuse_one_exact_lc_validation_and_package_leases() {
+    let temp = TempDir::new().expect("temporary validation-cache root");
+    let roots = ExtensionRoots::for_base_root(temp.path().join("LatentDeck"));
+    let current_test_exe = std::env::current_exe().expect("current LatentDeck test executable");
+    install_codec(&roots, temp.path(), &current_test_exe);
+    install_deck(&roots, temp.path());
+    let cartridge = write_synthetic_cartridge(temp.path());
+    let mut library = Library::in_memory().expect("in-memory Library");
+    library
+        .import_file(&cartridge.path)
+        .expect("import exact synthetic LC");
+    let identity = DeckSourceIdentity::new(
+        cartridge.cartridge_id.clone(),
+        CartridgeKey::new_unchecked(cartridge.archive_sha256.clone()),
+    )
+    .expect("exact Library identity");
+    let library = AppState::new(library);
+    let active_packages = ActivePackageCache::new();
+    let profile = GenericProfileKeyInput {
+        codec_family: PROFILE_FAMILY.to_owned(),
+        profile: PROFILE_NAME.to_owned(),
+        profile_version: PROFILE_VERSION.to_owned(),
+    };
+
+    let indexed = library
+        .indexed_deck_source_manifests(vec![identity.clone()])
+        .await
+        .expect("runtime-options indexed Library lookup");
+    assert_eq!(indexed.len(), 1);
+    assert!(indexed[0].is_ok());
+    assert_eq!(library.deck_source_cache_stats().full_validations, 0);
+    assert_eq!(library.deck_source_cache_stats().retained_entries, 0);
+
+    let open_source = library
+        .resolve_deck_source(identity.clone())
+        .await
+        .expect("Open performs the sole full Library validation");
+    let opened = prepare_open_selection(
+        &roots,
+        &active_packages,
+        DECK_ID.to_owned(),
+        DECK_VERSION.to_owned(),
+        CODEC_ID.to_owned(),
+        CODEC_VERSION.to_owned(),
+        &profile,
+        latentdeck_control::v2::DeviceKind::Cpu,
+        0,
+        Vec::new(),
+        &[open_source],
+    )
+    .expect("Open exact preflight");
+    assert_eq!(opened.validation_work.full_cartridge_validations, 0);
+    assert_eq!(opened.validation_work.retained_handle_clones, 1);
+    assert_eq!(active_packages.stats().cold_full_hash_passes, 2);
+    assert_eq!(active_packages.stats().cached_checkouts, 0);
+
+    let repeated_open_source = library
+        .resolve_deck_source(identity)
+        .await
+        .expect("repeated Open checks out the retained exact LC");
+    let repeated = prepare_open_selection(
+        &roots,
+        &active_packages,
+        DECK_ID.to_owned(),
+        DECK_VERSION.to_owned(),
+        CODEC_ID.to_owned(),
+        CODEC_VERSION.to_owned(),
+        &profile,
+        latentdeck_control::v2::DeviceKind::Cpu,
+        0,
+        Vec::new(),
+        &[repeated_open_source],
+    )
+    .expect("repeated Open exact preflight");
+    assert_eq!(repeated.validation_work.full_cartridge_validations, 0);
+    assert_eq!(repeated.validation_work.retained_handle_clones, 1);
+    #[cfg(target_os = "windows")]
+    {
+        assert_eq!(library.deck_source_cache_stats().full_validations, 1);
+        assert_eq!(library.deck_source_cache_stats().cached_checkouts, 1);
+        assert_eq!(library.deck_source_cache_stats().retained_entries, 1);
+        assert_eq!(active_packages.stats().cold_full_hash_passes, 2);
+        assert_eq!(active_packages.stats().cached_checkouts, 2);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        assert_eq!(library.deck_source_cache_stats().full_validations, 2);
+        assert_eq!(library.deck_source_cache_stats().cached_checkouts, 0);
+        assert_eq!(library.deck_source_cache_stats().retained_entries, 0);
+        assert_eq!(active_packages.stats().cold_full_hash_passes, 4);
+        assert_eq!(active_packages.stats().cached_checkouts, 0);
+    }
+}
+
+#[tokio::test]
+async fn tamper_between_indexed_eligibility_and_open_is_package_invalid() {
+    let temp = TempDir::new().expect("temporary tamper root");
+    let roots = ExtensionRoots::for_base_root(temp.path().join("LatentDeck"));
+    let current_test_exe = std::env::current_exe().expect("current LatentDeck test executable");
+    install_codec(&roots, temp.path(), &current_test_exe);
+    install_deck(&roots, temp.path());
+    let cartridge = write_synthetic_cartridge(temp.path());
+    let mut library = Library::in_memory().expect("in-memory Library");
+    library
+        .import_file(&cartridge.path)
+        .expect("import exact synthetic LC");
+    let identity = DeckSourceIdentity::new(
+        cartridge.cartridge_id,
+        CartridgeKey::new_unchecked(cartridge.archive_sha256),
+    )
+    .expect("exact Library identity");
+    let library = AppState::new(library);
+    let indexed = library
+        .indexed_deck_source_manifests(vec![identity.clone()])
+        .await
+        .expect("metadata-only eligibility");
+    assert!(indexed[0].is_ok());
+    assert_eq!(library.deck_source_cache_stats().full_validations, 0);
+
+    let source = library
+        .resolve_deck_source(identity)
+        .await
+        .expect("selected source full validation");
+    let operator = roots
+        .decks_root
+        .join(DECK_ID)
+        .join(DECK_VERSION)
+        .join("python/registry_operator.py");
+    fs::write(&operator, b"tampered between eligibility and exact Open")
+        .expect("tamper installed Deck before its first active lease");
+    let selection = DeckPackageSelectionV2::new(
+        DECK_ID.to_owned(),
+        DECK_VERSION.to_owned(),
+        CODEC_ID.to_owned(),
+        CODEC_VERSION.to_owned(),
+        latentdeck_control::v2::DeviceKind::Cpu,
+    );
+    let sources = [DeckSourceSelectionV2 {
+        path: source.path(),
+        cartridge_id: source.identity().cartridge_id(),
+        archive_sha256: source.identity().archive_sha256().as_str(),
+        validated_cartridge: Some(source.validated_cartridge()),
+    }];
+
+    let error = prepare_exact_deck_selection_with_cache(
+        &roots,
+        &ActivePackageCache::new(),
+        &selection,
+        &sources,
+        APP_VERSION,
+    )
+    .err()
+    .expect("tampered exact package must fail before worker or GPU allocation");
+    assert_eq!(
+        error,
+        latentdeck_core::deck_selection_v2::DeckSelectionV2Error::PackageInvalid
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(
     clippy::too_many_lines,
@@ -110,6 +275,7 @@ async fn production_registry_with_four_real_protocol2_workers_enforces_capacity_
             path: &cartridge.path,
             cartridge_id: &cartridge.cartridge_id,
             archive_sha256: &cartridge.archive_sha256,
+            validated_cartridge: None,
         }];
         let prepared = prepare_exact_deck_selection(
             &roots,

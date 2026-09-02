@@ -160,7 +160,7 @@ fn require_capabilities(
 
 #[cfg(windows)]
 mod windows_runtime {
-    use std::{collections::HashMap, fs::File};
+    use std::collections::HashMap;
 
     use super::{
         Capability, DeckSessionV2Error, DeckSessionV2HostContract, DeckSessionV2LoadRequest,
@@ -169,7 +169,7 @@ mod windows_runtime {
     };
     use crate::{
         deck_runtime_v2::{ActiveDeckRuntime, DeckLoadRequest},
-        external_asset_v2::retain_exact_external_asset,
+        external_asset_v2::{IntegrityValidatedExternalAsset, retain_exact_external_asset},
         worker_client_v2::WorkerClientV2,
         worker_source_v2::prepare_source_open,
         worker_supervisor::{ValidatedWorkerLaunch, spawn_worker_v2},
@@ -216,7 +216,7 @@ mod windows_runtime {
         codec_package: ActiveInstalledPackage,
         deck_runtime: ActiveDeckRuntime,
         cartridges: Vec<IntegrityValidatedCartridge>,
-        _external_asset_handles: Vec<File>,
+        _external_asset_handles: Vec<IntegrityValidatedExternalAsset>,
         ring_owner: WindowsRgbRingV2Owner,
         ring_consumer: WindowsRgbRingV2Consumer,
         profile_receipts: Vec<ProfileReceipt>,
@@ -298,10 +298,43 @@ mod windows_runtime {
         external_assets: Vec<ExternalAssetBinding>,
         load: DeckSessionV2LoadRequest,
     ) -> Result<DeckSessionV2, DeckSessionV2Error> {
+        start_deck_session_v2_with_retained_assets(
+            codec_package,
+            deck_runtime,
+            cartridges,
+            host,
+            external_assets,
+            Vec::new(),
+            load,
+        )
+        .await
+    }
+
+    /// Spawn a Deck session while reusing exact external-asset integrity
+    /// evidence retained by the host selection UI.
+    ///
+    /// # Errors
+    ///
+    /// Rejects any retained evidence that does not exactly match the wire
+    /// binding and Codec Pack declaration before worker or GPU allocation.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub async fn start_deck_session_v2_with_retained_assets(
+        codec_package: ActiveInstalledPackage,
+        deck_runtime: ActiveDeckRuntime,
+        cartridges: Vec<IntegrityValidatedCartridge>,
+        host: DeckSessionV2HostContract,
+        external_assets: Vec<ExternalAssetBinding>,
+        retained_external_assets: Vec<IntegrityValidatedExternalAsset>,
+        load: DeckSessionV2LoadRequest,
+    ) -> Result<DeckSessionV2, DeckSessionV2Error> {
         validate_deck_host_contract(&host)?;
         validate_load_shape(&load, cartridges.len())?;
-        let (selection, external_asset_handles) =
-            validate_codec_package(&codec_package, &host, &external_assets)?;
+        let (selection, external_asset_handles) = validate_codec_package(
+            &codec_package,
+            &host,
+            &external_assets,
+            &retained_external_assets,
+        )?;
         validate_deck_package(&deck_runtime, &host, cartridges.len())?;
         let identities = source_identities(&cartridges, &load.source_transport)?;
 
@@ -716,7 +749,8 @@ mod windows_runtime {
         package: &ActiveInstalledPackage,
         host: &DeckSessionV2HostContract,
         assets: &[ExternalAssetBinding],
-    ) -> Result<(CodecSelection, Vec<File>), DeckSessionV2Error> {
+        retained_assets: &[IntegrityValidatedExternalAsset],
+    ) -> Result<(CodecSelection, Vec<IntegrityValidatedExternalAsset>), DeckSessionV2Error> {
         if !package.trust_receipt().enabled {
             return Err(DeckSessionV2Error::IncompatiblePackage("disabled codec"));
         }
@@ -743,7 +777,7 @@ mod windows_runtime {
             &manifest.compatibility.app_min_inclusive,
             &manifest.compatibility.app_max_exclusive,
         )?;
-        let external_asset_handles = validate_external_assets(manifest, assets)?;
+        let external_asset_handles = validate_external_assets(manifest, assets, retained_assets)?;
         Ok((
             CodecSelection {
                 pack_id: manifest.pack_id.clone(),
@@ -841,7 +875,8 @@ mod windows_runtime {
     fn validate_external_assets(
         manifest: &CodecPackManifest,
         bindings: &[ExternalAssetBinding],
-    ) -> Result<Vec<File>, DeckSessionV2Error> {
+        retained_assets: &[IntegrityValidatedExternalAsset],
+    ) -> Result<Vec<IntegrityValidatedExternalAsset>, DeckSessionV2Error> {
         if bindings.len() > MAX_EXTERNAL_ASSETS {
             return Err(DeckSessionV2Error::ExternalAssetInvalid);
         }
@@ -851,6 +886,17 @@ mod windows_runtime {
             .map(|asset| (asset.asset_id.as_str(), asset))
             .collect();
         let mut seen = HashSet::new();
+        let retained: HashMap<_, _> = retained_assets
+            .iter()
+            .map(|asset| (asset.binding().asset_id.as_str(), asset))
+            .collect();
+        if retained.len() != retained_assets.len()
+            || retained
+                .keys()
+                .any(|asset_id| !bindings.iter().any(|binding| &binding.asset_id == asset_id))
+        {
+            return Err(DeckSessionV2Error::ExternalAssetInvalid);
+        }
         let mut retained_handles = Vec::with_capacity(bindings.len());
         for binding in bindings {
             if !seen.insert(binding.asset_id.as_str()) {
@@ -865,7 +911,14 @@ mod windows_runtime {
             {
                 return Err(DeckSessionV2Error::ExternalAssetInvalid);
             }
-            retained_handles.push(validate_external_asset_file(binding)?);
+            if let Some(retained) = retained.get(binding.asset_id.as_str()) {
+                if retained.binding() != binding {
+                    return Err(DeckSessionV2Error::ExternalAssetInvalid);
+                }
+                retained_handles.push(retained.clone_retained());
+            } else {
+                retained_handles.push(validate_external_asset_file(binding)?);
+            }
         }
         if manifest
             .external_assets
@@ -879,8 +932,13 @@ mod windows_runtime {
 
     fn validate_external_asset_file(
         binding: &ExternalAssetBinding,
-    ) -> Result<File, DeckSessionV2Error> {
-        retain_exact_external_asset(binding).map_err(|_| DeckSessionV2Error::ExternalAssetInvalid)
+    ) -> Result<IntegrityValidatedExternalAsset, DeckSessionV2Error> {
+        let file = retain_exact_external_asset(binding)
+            .map_err(|_| DeckSessionV2Error::ExternalAssetInvalid)?;
+        Ok(IntegrityValidatedExternalAsset::from_validated_file(
+            binding.clone(),
+            file,
+        ))
     }
 
     fn is_sha256(value: &str) -> bool {
@@ -892,7 +950,9 @@ mod windows_runtime {
 }
 
 #[cfg(windows)]
-pub use windows_runtime::{DeckSessionV2, start_deck_session_v2};
+pub use windows_runtime::{
+    DeckSessionV2, start_deck_session_v2, start_deck_session_v2_with_retained_assets,
+};
 
 #[cfg(test)]
 mod tests {

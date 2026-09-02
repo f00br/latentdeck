@@ -66,6 +66,33 @@ fn production_composition_root_registers_only_generic_deck_commands() {
 }
 
 #[test]
+fn extensions_matrix_and_generic_runtime_share_one_active_package_cache() {
+    let extensions = include_str!("../src/extension_commands.rs");
+    let runtime = include_str!("../src/generic_deck_state.rs");
+
+    assert!(extensions.contains("active_packages: ActivePackageCache"));
+    assert_eq!(
+        extensions.matches("ActivePackageCache::new()").count(),
+        1,
+        "Deck must construct one process cache"
+    );
+    let snapshot = extensions
+        .split("fn extension_snapshot_for(")
+        .nth(1)
+        .expect("extension snapshot helper exists")
+        .split("\n}")
+        .next()
+        .expect("extension snapshot helper closes");
+    assert!(snapshot.contains("active_packages"));
+    assert!(snapshot.contains(".runtime_inventory(roots)"));
+    assert!(extensions.contains(".runtime_list_kind(roots, PackageKind::DeckPack)"));
+    assert!(extensions.contains(".enable_and_prime(&roots, &package)"));
+    assert!(extensions.contains(".disable(&roots, &package)"));
+    assert!(runtime.contains("extensions.active_packages()"));
+    assert!(runtime.contains("prepare_exact_deck_selection_with_cache"));
+}
+
+#[test]
 fn production_generic_actor_is_exact_protocol2_without_h3_or_p1_fallback() {
     let actor = include_str!("../src/generic_deck_runtime.rs");
     let state = include_str!("../src/generic_deck_state.rs");

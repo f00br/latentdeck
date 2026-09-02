@@ -22,11 +22,10 @@ use latentdeck_core::{
     realtime_diagnostics::RealtimeDiagnosticError,
 };
 use latentdeck_extension_manager::{
-    CompatibilityPair, CompatibilityReason, ErrorCode as ExtensionErrorCode, ExtensionError,
-    ExtensionRoots, InstallRequest, InstalledPackageSummary, PackageHealth, PackageKind,
-    PackageReference, PublisherIdentityClaim, RemoveOptions, disable, enable,
-    inspect as inspect_extension_archive, install, inventory as extension_inventory, remove,
-    repair, verify,
+    ActivePackageCache, CompatibilityPair, CompatibilityReason, ErrorCode as ExtensionErrorCode,
+    ExtensionError, ExtensionRoots, InstallRequest, InstalledPackageSummary, PackageHealth,
+    PackageKind, PackageReference, PublisherIdentityClaim, RemoveOptions,
+    inspect as inspect_extension_archive, install, remove, repair, verify,
 };
 use latentdeck_native_output::{HostFullscreenController, NativeSpoutStatus};
 use playback_runtime_v2::{PlaybackLaunchConfig, PlaybackRuntime, PlaybackRuntimeError};
@@ -47,7 +46,8 @@ use crate::native_output::{
     ViewportStoreError, validate_viewport_bounds,
 };
 use crate::player_selection_v2::{
-    PlayerCodecSelectionV2, PlayerSelectionV2Error, prepare_exact_launch, validate_exact_selection,
+    PlayerCodecSelectionV2, PlayerSelectionV2Error, prepare_exact_launch, select_external_asset,
+    validate_exact_selection,
 };
 use crate::raw_import_runtime::{
     RawImportCodecOptions, RawImportRuntimeError, RawImportSelectionRequest,
@@ -65,6 +65,7 @@ struct AppState {
     fullscreen: HostFullscreenController,
     conversion: ConversionSlot,
     extension_roots: Option<ExtensionRoots>,
+    active_packages: ActivePackageCache,
     codec_selection: Arc<Mutex<Option<PlayerCodecSelectionV2>>>,
     raw_import_staging_parent: Option<PathBuf>,
     exit_gate: ExitGate,
@@ -87,6 +88,7 @@ impl AppState {
             fullscreen: HostFullscreenController::new(),
             conversion: Arc::new(Mutex::new(None)),
             extension_roots,
+            active_packages: ActivePackageCache::new(),
             codec_selection: Arc::new(Mutex::new(None)),
             raw_import_staging_parent,
             exit_gate: ExitGate::new(),
@@ -297,6 +299,7 @@ fn selected_codec_reference(
 
 fn launch_config(
     player: &Arc<Mutex<PlayerCoordinator>>,
+    cache: &ActivePackageCache,
     roots: &ExtensionRoots,
     selection: &Arc<Mutex<Option<PlayerCodecSelectionV2>>>,
 ) -> Result<PlaybackLaunchConfig, CommandError> {
@@ -309,6 +312,7 @@ fn launch_config(
         )
     })?;
     prepare_exact_launch(
+        cache,
         roots,
         selection.as_ref(),
         &source,
@@ -392,6 +396,10 @@ impl From<InstalledPackageSummary> for ExtensionPackageSummaryView {
     fn from(value: InstalledPackageSummary) -> Self {
         let error_detail = value.error_detail.as_ref().map(|_| match value.health {
             PackageHealth::Healthy => "The exact package version is healthy.".to_owned(),
+            PackageHealth::VerificationRequired => {
+                "The disabled exact package needs full payload verification before enable or use."
+                    .to_owned()
+            }
             PackageHealth::Corrupt => {
                 "The installed package tree is corrupt; verify or repair this exact version."
                     .to_owned()
@@ -468,8 +476,11 @@ struct InspectedExtensionView {
 
 fn extension_snapshot_for(
     roots: &ExtensionRoots,
+    active_packages: &ActivePackageCache,
 ) -> Result<ExtensionManagerSnapshot, CommandError> {
-    let inventory = extension_inventory(roots).map_err(extension_command_error)?;
+    let inventory = active_packages
+        .runtime_inventory(roots)
+        .map_err(extension_command_error)?;
     let packages = inventory.packages.into_iter().map(Into::into).collect();
     let matrix = inventory.matrix.into_iter().map(Into::into).collect();
     Ok(ExtensionManagerSnapshot { packages, matrix })
@@ -566,10 +577,11 @@ async fn start_runtime(
     app: &AppHandle,
     player: &Arc<Mutex<PlayerCoordinator>>,
     viewport: &PlayerViewportStore,
+    cache: &ActivePackageCache,
     roots: &ExtensionRoots,
     selection: &Arc<Mutex<Option<PlayerCodecSelectionV2>>>,
 ) -> Result<PlaybackRuntime, CommandError> {
-    let config = launch_config(player, roots, selection)?;
+    let config = launch_config(player, cache, roots, selection)?;
     let viewport = viewport.current_visible().map_err(viewport_store_error)?;
     let parent = main_window(app)?;
     Box::pin(PlaybackRuntime::start_protocol2(
@@ -587,10 +599,14 @@ async fn start_and_restart(
     app: &AppHandle,
     player: &Arc<Mutex<PlayerCoordinator>>,
     viewport: &PlayerViewportStore,
+    cache: &ActivePackageCache,
     roots: &ExtensionRoots,
     selection: &Arc<Mutex<Option<PlayerCodecSelectionV2>>>,
 ) -> Result<(PlaybackRuntime, PlayerView), CommandError> {
-    let runtime = Box::pin(start_runtime(app, player, viewport, roots, selection)).await?;
+    let runtime = Box::pin(start_runtime(
+        app, player, viewport, cache, roots, selection,
+    ))
+    .await?;
     match runtime.restart().await {
         Ok(view) => Ok((runtime, view)),
         Err(error) => {
@@ -611,7 +627,8 @@ async fn extensions_snapshot(
     state: State<'_, AppState>,
 ) -> Result<ExtensionManagerSnapshot, CommandError> {
     let roots = extension_roots(&state)?.clone();
-    tauri::async_runtime::spawn_blocking(move || extension_snapshot_for(&roots))
+    let cache = state.active_packages.clone();
+    tauri::async_runtime::spawn_blocking(move || extension_snapshot_for(&roots, &cache))
         .await
         .map_err(|_| extension_task_failed())?
 }
@@ -635,6 +652,7 @@ async fn extensions_install(
     expected_sha256: String,
 ) -> Result<ExtensionManagerSnapshot, CommandError> {
     let roots = extension_roots(&state)?.clone();
+    let cache = state.active_packages.clone();
     tauri::async_runtime::spawn_blocking(move || {
         install(
             &roots,
@@ -644,7 +662,7 @@ async fn extensions_install(
             },
         )
         .map_err(extension_command_error)?;
-        extension_snapshot_for(&roots)
+        extension_snapshot_for(&roots, &cache)
     })
     .await
     .map_err(|_| extension_task_failed())?
@@ -658,7 +676,9 @@ async fn extensions_repair(
     expected_sha256: String,
 ) -> Result<ExtensionManagerSnapshot, CommandError> {
     let roots = extension_roots(&state)?.clone();
+    let cache = state.active_packages.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        cache.invalidate_all();
         repair(
             &roots,
             &InstallRequest {
@@ -667,7 +687,7 @@ async fn extensions_repair(
             },
         )
         .map_err(extension_command_error)?;
-        extension_snapshot_for(&roots)
+        extension_snapshot_for(&roots, &cache)
     })
     .await
     .map_err(|_| extension_task_failed())?
@@ -698,9 +718,12 @@ async fn extensions_enable(
 ) -> Result<ExtensionManagerSnapshot, CommandError> {
     let roots = extension_roots(&state)?.clone();
     let package = package.into_reference();
+    let cache = state.active_packages.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        enable(&roots, &package).map_err(extension_command_error)?;
-        extension_snapshot_for(&roots)
+        cache
+            .enable_and_prime(&roots, &package)
+            .map_err(extension_command_error)?;
+        extension_snapshot_for(&roots, &cache)
     })
     .await
     .map_err(|_| extension_task_failed())?
@@ -714,9 +737,12 @@ async fn extensions_disable(
 ) -> Result<ExtensionManagerSnapshot, CommandError> {
     let roots = extension_roots(&state)?.clone();
     let package = package.into_reference();
+    let cache = state.active_packages.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        disable(&roots, &package).map_err(extension_command_error)?;
-        extension_snapshot_for(&roots)
+        cache
+            .disable(&roots, &package)
+            .map_err(extension_command_error)?;
+        extension_snapshot_for(&roots, &cache)
     })
     .await
     .map_err(|_| extension_task_failed())?
@@ -731,10 +757,12 @@ async fn extensions_remove(
 ) -> Result<ExtensionManagerSnapshot, CommandError> {
     let roots = extension_roots(&state)?.clone();
     let package = package.into_reference();
+    let cache = state.active_packages.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _ = cache.invalidate_exact(&roots, &package);
         remove(&roots, &package, RemoveOptions { allow_corrupt })
             .map_err(extension_command_error)?;
-        extension_snapshot_for(&roots)
+        extension_snapshot_for(&roots, &cache)
     })
     .await
     .map_err(|_| extension_task_failed())?
@@ -834,9 +862,11 @@ async fn player_raw_import_options(
     state: State<'_, AppState>,
 ) -> Result<RawImportCodecOptions, CommandError> {
     let roots = extension_roots(&state)?.clone();
+    let cache = state.active_packages.clone();
     let selected = selected_codec_reference(&state.codec_selection)?;
     tauri::async_runtime::spawn_blocking(move || {
         raw_import_options_for(
+            &cache,
             &roots,
             selected.as_ref(),
             latentdeck_core::product_version(),
@@ -879,10 +909,12 @@ async fn player_conversion_plan(
         recursive,
     };
     let roots = extension_roots(&state)?.clone();
+    let cache = state.active_packages.clone();
     let selected = selected_codec_reference(&state.codec_selection)?;
     let prepared_selection = selection.clone();
     let prepared = tauri::async_runtime::spawn_blocking(move || {
         prepare_exact_raw_import(
+            &cache,
             &roots,
             prepared_selection,
             selected.as_ref(),
@@ -939,10 +971,12 @@ async fn player_conversion_start(
         })?
     };
     let roots = extension_roots(&state)?.clone();
+    let cache = state.active_packages.clone();
     let selected = selected_codec_reference(&state.codec_selection)?;
     let selection = coordinator.selection().clone();
     let prepared = tauri::async_runtime::spawn_blocking(move || {
         prepare_exact_raw_import(
+            &cache,
             &roots,
             selection,
             selected.as_ref(),
@@ -1020,6 +1054,7 @@ async fn player_select_decoder(
             )
         })?;
     let roots = extension_roots(&state)?.clone();
+    let cache = state.active_packages.clone();
     let selection = Arc::clone(&state.codec_selection);
     let player = Arc::clone(&state.player);
     tauri::async_runtime::spawn_blocking(move || {
@@ -1033,8 +1068,13 @@ async fn player_select_decoder(
             let selected = selected
                 .as_mut()
                 .ok_or(PlayerSelectionV2Error::MissingSelection)?;
-            selected.bind_external_asset(asset_id, PathBuf::from(path));
-            validate_exact_selection(&roots, selected)?
+            select_external_asset(
+                &cache,
+                &roots,
+                selected,
+                asset_id,
+                PathBuf::from(path).as_path(),
+            )?
         };
         lock_player(&player)?
             .set_protocol2_codec_summary(summary)
@@ -1071,17 +1111,25 @@ async fn player_select_codec_exact(
         }
     };
     let roots = extension_roots(&state)?.clone();
+    let cache = state.active_packages.clone();
     let selection_slot = Arc::clone(&state.codec_selection);
     let player = Arc::clone(&state.player);
     tauri::async_runtime::spawn_blocking(move || {
         let selection = PlayerCodecSelectionV2::new(package_id, package_version, device);
-        let summary = validate_exact_selection(&roots, &selection)?;
-        *selection_slot.lock().map_err(|_| {
-            CommandError::new(
-                "codec.selection_unavailable",
-                "Codec selection state is unavailable.",
-            )
-        })? = Some(selection);
+        let summary = validate_exact_selection(&cache, &roots, &selection)?;
+        let selected_package = selection.package().clone();
+        let previous = selection_slot
+            .lock()
+            .map_err(|_| {
+                CommandError::new(
+                    "codec.selection_unavailable",
+                    "Codec selection state is unavailable.",
+                )
+            })?
+            .replace(selection);
+        if let Some(previous) = previous.filter(|value| value.package() != &selected_package) {
+            let _ = cache.invalidate_exact(&roots, previous.package());
+        }
         lock_player(&player)?
             .set_protocol2_codec_summary(summary)
             .map_err(Into::into)
@@ -1129,6 +1177,7 @@ async fn player_play(
         &app,
         &state.player,
         &state.viewport,
+        &state.active_packages,
         extension_roots(&state)?,
         &state.codec_selection,
     ))
@@ -1177,6 +1226,7 @@ async fn player_restart(
         &app,
         &state.player,
         &state.viewport,
+        &state.active_packages,
         extension_roots(&state)?,
         &state.codec_selection,
     ))
@@ -1504,7 +1554,8 @@ mod tests {
         let directory = tempfile::tempdir().expect("extension root");
         let roots = ExtensionRoots::for_base_root(directory.path().join("LatentDeck"));
 
-        let snapshot = extension_snapshot_for(&roots).expect("empty extension snapshot");
+        let snapshot = extension_snapshot_for(&roots, &ActivePackageCache::default())
+            .expect("empty extension snapshot");
         let value = serde_json::to_value(snapshot).expect("serialize snapshot");
 
         assert_eq!(value, serde_json::json!({ "packages": [], "matrix": [] }));

@@ -95,7 +95,7 @@ mod windows {
         ShutdownReason,
     };
     use latentdeck_core::{
-        player_session_v2::{PlayerSessionV2, start_player_session_v2},
+        player_session_v2::{PlayerSessionV2, start_player_session_v2_with_retained_assets},
         worker_client_v2::WorkerClientV2Error,
     };
     use latentdeck_gpu::{
@@ -151,11 +151,12 @@ mod windows {
                 config.host.signal_geometry.decoded_width,
                 config.host.signal_geometry.decoded_height,
             );
-            let session = start_player_session_v2(
+            let session = start_player_session_v2_with_retained_assets(
                 config.package,
                 config.cartridge,
                 config.host,
                 config.external_assets,
+                config.retained_external_assets,
             )
             .await
             .map_err(|_| PlaybackRuntimeError::protocol())?;

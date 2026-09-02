@@ -1,9 +1,9 @@
 use std::fs;
 
 use latentdeck_extension_manager::{
-    BundledPackageIndex, ErrorCode, ExtensionError, ExtensionRoots, InstallRequest,
-    InstalledPackageSummary, PackageHealth, PackageKind, PackageReference,
-    enable_if_only_installed_version, install_from_bundled_index, list, resolve_installed,
+    BundledPackageIndex, ErrorCode, ExtensionError, ExtensionRoots, InstallRequest, PackageKind,
+    PackageReference, enable_if_only_installed_version, install_from_bundled_index, list_kind,
+    resolve_installed,
 };
 
 include!(concat!(
@@ -74,23 +74,41 @@ pub(crate) struct BundledDeckProvisionIssue {
 pub(crate) fn provision_bundled_decks(
     roots: &ExtensionRoots,
 ) -> Result<BundledDeckProvisionReport, ExtensionError> {
-    let initial = list(roots)?;
     let index = bundled_index()?;
+    let installed_decks = list_kind(roots, PackageKind::DeckPack)?;
     let mut report = BundledDeckProvisionReport::default();
     for deck in embedded_bundled_decks() {
         let package = deck_reference(deck);
-        if let Some(existing) = find_exact(&initial, deck) {
-            match validate_existing_exact(roots, deck, existing) {
-                Ok(()) => report.preserved.push(package),
-                Err(error) => push_issue(&mut report, package, &error),
+        let another_version_exists = installed_decks.iter().any(|installed| {
+            installed.package.package_id == package.package_id
+                && installed.package.package_version != package.package_version
+        });
+        match resolve_installed(roots, &package) {
+            Ok(existing) => {
+                if existing.trust_receipt().archive_sha256 == deck.archive_sha256 {
+                    report.preserved.push(package);
+                } else {
+                    push_issue(
+                        &mut report,
+                        package,
+                        &ExtensionError::new(
+                            ErrorCode::PackageUntrusted,
+                            format!(
+                                "installed bundled Deck {}@{} has a different immutable archive hash",
+                                deck.package_id, deck.package_version
+                            ),
+                        ),
+                    );
+                }
+                continue;
             }
-            continue;
+            Err(error) if error.code() == ErrorCode::PackageMissing => {}
+            Err(error) => {
+                push_issue(&mut report, package, &error);
+                continue;
+            }
         }
 
-        let another_version_exists = initial.iter().any(|candidate| {
-            candidate.package.kind == PackageKind::DeckPack
-                && candidate.package.package_id == deck.package_id
-        });
         let temporary = match tempfile::Builder::new()
             .prefix("latentdeck-bundled-deck-")
             .tempdir()
@@ -142,31 +160,7 @@ pub(crate) fn provision_bundled_decks(
             continue;
         }
         report.installed.push(package.clone());
-
-        let after_install = list(roots)?;
-        let Some(exact) = find_exact(&after_install, deck) else {
-            push_issue(
-                &mut report,
-                package,
-                &ExtensionError::new(
-                    ErrorCode::PackageMissing,
-                    "bundled Deck disappeared immediately after installation",
-                ),
-            );
-            continue;
-        };
-        if let Err(error) = validate_existing_exact(roots, deck, exact) {
-            push_issue(&mut report, package, &error);
-            continue;
-        }
-        let same_id_count = after_install
-            .iter()
-            .filter(|candidate| {
-                candidate.package.kind == PackageKind::DeckPack
-                    && candidate.package.package_id == deck.package_id
-            })
-            .count();
-        if !another_version_exists && same_id_count == 1 {
+        if !another_version_exists {
             match enable_if_only_installed_version(roots, &package) {
                 Ok(_) => report.enabled.push(package),
                 Err(error) => push_issue(&mut report, package, &error),
@@ -174,54 +168,6 @@ pub(crate) fn provision_bundled_decks(
         }
     }
     Ok(report)
-}
-
-fn find_exact<'a>(
-    packages: &'a [InstalledPackageSummary],
-    deck: &EmbeddedBundledDeck,
-) -> Option<&'a InstalledPackageSummary> {
-    packages
-        .iter()
-        .find(|candidate| candidate.package == deck_reference(deck))
-}
-
-fn validate_existing_exact(
-    roots: &ExtensionRoots,
-    deck: &EmbeddedBundledDeck,
-    existing: &InstalledPackageSummary,
-) -> Result<(), ExtensionError> {
-    match &existing.health {
-        PackageHealth::Healthy => {}
-        PackageHealth::Corrupt => {
-            return Err(ExtensionError::new(
-                ErrorCode::IntegrityFailed,
-                format!(
-                    "installed bundled Deck {}@{} is corrupt and will not be overwritten",
-                    deck.package_id, deck.package_version
-                ),
-            ));
-        }
-        PackageHealth::Untrusted => {
-            return Err(ExtensionError::new(
-                ErrorCode::PackageUntrusted,
-                format!(
-                    "installed bundled Deck {}@{} is untrusted and will not be overwritten",
-                    deck.package_id, deck.package_version
-                ),
-            ));
-        }
-    }
-    let validated = resolve_installed(roots, &existing.package)?;
-    if validated.trust_receipt().archive_sha256 != deck.archive_sha256 {
-        return Err(ExtensionError::new(
-            ErrorCode::PackageUntrusted,
-            format!(
-                "installed bundled Deck {}@{} has a different immutable archive hash",
-                deck.package_id, deck.package_version
-            ),
-        ));
-    }
-    Ok(())
 }
 
 fn io_error(context: &str, error: &std::io::Error) -> ExtensionError {
@@ -331,6 +277,28 @@ mod tests {
             assert_eq!(package.health, PackageHealth::Healthy);
             assert!(package.enabled);
         }
+    }
+
+    #[test]
+    fn bundled_deck_provisioning_does_not_discover_codec_packages() {
+        let temporary = tempfile::tempdir().expect("temporary extension roots");
+        let roots = ExtensionRoots::for_base_root(temporary.path().join("LatentDeck"));
+        provision_bundled_decks(&roots).expect("initial bundled Deck provision");
+        fs::remove_dir(&roots.codec_packs_root).expect("remove empty codec root");
+        fs::write(&roots.codec_packs_root, b"must remain completely untouched")
+            .expect("install poisoned codec root sentinel");
+
+        let report = provision_bundled_decks(&roots)
+            .expect("Deck-only provisioning must not inspect the CodecPacks root");
+
+        assert!(report.installed.is_empty());
+        assert!(report.enabled.is_empty());
+        assert_eq!(report.preserved.len(), 2);
+        assert!(report.issues.is_empty());
+        assert_eq!(
+            fs::read(&roots.codec_packs_root).expect("read untouched codec sentinel"),
+            b"must remain completely untouched"
+        );
     }
 
     #[test]

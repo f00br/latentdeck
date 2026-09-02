@@ -24,8 +24,8 @@ use latentdeck_core::{
     worker_supervisor::{ValidatedWorkerLaunch, WorkerSupervisorError, spawn_worker_v2},
 };
 use latentdeck_extension_manager::{
-    ActiveInstalledPackage, CodecCapability, CodecPackManifest, ExtensionError, ExtensionRoots,
-    PackageKind, PackageManifest, PackageReference, resolve_active,
+    ActiveInstalledPackage, ActivePackageCache, CodecCapability, CodecPackManifest, ExtensionError,
+    ExtensionRoots, PackageKind, PackageManifest, PackageReference,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -275,12 +275,13 @@ pub struct PreparedRawImportCodec {
 }
 
 pub fn raw_import_options_for(
+    cache: &ActivePackageCache,
     roots: &ExtensionRoots,
     selected_package: Option<&PackageReference>,
     app_version: &str,
 ) -> Result<RawImportCodecOptions, RawImportRuntimeError> {
     let reference = selected_package.ok_or(RawImportRuntimeError::SelectionMissing)?;
-    let package = resolve_active(roots, reference)?;
+    let package = cache.resolve_active(roots, reference)?;
     let manifest = codec_manifest(&package)?;
     validate_manifest_base(manifest, app_version)?;
     if !manifest.capabilities.contains(&CodecCapability::RawImport) {
@@ -302,6 +303,7 @@ pub fn raw_import_options_for(
 }
 
 pub fn prepare_exact_raw_import(
+    cache: &ActivePackageCache,
     roots: &ExtensionRoots,
     request: RawImportSelectionRequest,
     selected_package: Option<&PackageReference>,
@@ -311,7 +313,7 @@ pub fn prepare_exact_raw_import(
     if selected != &request.package_reference() {
         return Err(RawImportRuntimeError::SelectionMismatch);
     }
-    let package = resolve_active(roots, selected)?;
+    let package = cache.resolve_active(roots, selected)?;
     let manifest = codec_manifest(&package)?;
     validate_manifest_base(manifest, app_version)?;
     validate_exact_request(manifest, &request)?;

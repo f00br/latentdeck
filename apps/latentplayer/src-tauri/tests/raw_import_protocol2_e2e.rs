@@ -11,6 +11,8 @@
 
 #[path = "../src/conversion.rs"]
 mod conversion;
+#[path = "../src/player_selection_v2.rs"]
+mod player_selection_v2;
 #[path = "../src/raw_import_runtime.rs"]
 mod raw_import_runtime;
 
@@ -25,16 +27,13 @@ use std::{
 };
 
 use conversion::{ConversionCoordinator, ConversionPhase, ConversionPlanRequest, ConversionStatus};
-use latentdeck_cartridge::{
-    hash::{hash_path, hash_reader},
-    reader::{ValidationOptions, open_integrity_validated},
-};
+use latentdeck_cartridge::hash::{hash_path, hash_reader};
 use latentdeck_control::{
     WireUuid,
     v2::{
         Ack, AckReply, Capability, CaptureState, CodecDescriptor, CodecLoaded, CodecState, Command,
-        DeckState, DecodedAbi, Envelope, Event, EventMessage, LimitedVec, MAX_CAPABILITIES,
-        MAX_FRAME_BYTES, MAX_PROFILES, Message, PROTOCOL_VERSION, PlayerState,
+        DeckState, DecodedAbi, DeviceKind, Envelope, Event, EventMessage, LimitedVec,
+        MAX_CAPABILITIES, MAX_FRAME_BYTES, MAX_PROFILES, Message, PROTOCOL_VERSION, PlayerState,
         PlayerStatusSnapshot, PlayerStep, PlayerStepAck, ProfileInspection, ProfileKey,
         ProfileReceipt, RawImportAborted, RawImportArtifact, RawImportAudioPolicy,
         RawImportMetadata, RawImportPreflight, RawImportStorageDtype, RawImportTensor,
@@ -43,23 +42,29 @@ use latentdeck_control::{
         TensorDtype, WorkerHello, WorkerHelloAuthToken, decode_messagepack, encode_messagepack,
     },
 };
-use latentdeck_core::player_session_v2::{PlayerSessionV2HostContract, start_player_session_v2};
+use latentdeck_core::{
+    player::{CodecState as PlayerCodecState, PlayerCoordinator},
+    player_session_v2::start_player_session_v2_with_retained_assets,
+};
 use latentdeck_extension_manager::{
-    Architecture, CodecAdapterDescriptor, CodecCapability, CodecCompatibility, CodecPackManifest,
-    CodecWorkerDescriptor, ExtensionRoots, InstallRequest, IntegrityCatalog, IntegrityDescriptor,
-    IntegrityFile, LicenseDescriptor, OperatingSystem, PackRequest, PackageKind, PackageReference,
-    PlatformDescriptor, ProfileKey as ManifestProfileKey, PublisherDescriptor,
-    PublisherIdentityClaim, PythonConstraint, PythonImplementation, RuntimeLockDescriptor, enable,
-    install, pack, resolve_active,
+    ActivePackageCache, Architecture, CodecAdapterDescriptor, CodecCapability, CodecCompatibility,
+    CodecPackManifest, CodecWorkerDescriptor, ExtensionRoots, ExternalAssetDescriptor,
+    InstallRequest, IntegrityCatalog, IntegrityDescriptor, IntegrityFile, LicenseDescriptor,
+    OperatingSystem, PackRequest, PackageKind, PackageReference, PlatformDescriptor,
+    ProfileKey as ManifestProfileKey, PublisherDescriptor, PublisherIdentityClaim,
+    PythonConstraint, PythonImplementation, RuntimeLockDescriptor, enable, install, pack,
 };
 use latentdeck_gpu::{
     ring_v2::{ReadV2Status, WriteV2Status, control_mapping_bytes},
     windows_ring::FramesReady,
     windows_ring_v2::WindowsRgbRingV2Producer,
 };
+use player_selection_v2::{
+    PlayerCodecSelectionV2, prepare_exact_launch, select_external_asset, validate_exact_selection,
+};
 use raw_import_runtime::{
     RawImportProfileView, RawImportSelectionRequest, preflight_conversion_plan,
-    prepare_exact_raw_import, run_conversion_batch,
+    prepare_exact_raw_import, raw_import_options_for, run_conversion_batch,
 };
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
@@ -79,27 +84,61 @@ const PROFILE_VERSION: &str = "0.2.0";
 const TIMING_CONTRACT: &str = "synthetic_step";
 const TORCH_BUILD: &str = "2.13.0+cu130";
 const WORKER_HELPER: &str = "raw_import_protocol2_worker_child";
+const DECODER_ASSET_ID: &str = "synthetic_decoder";
+const DECODER_BYTES: &[u8] = b"bounded synthetic decoder asset";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn installed_synthetic_codec_imports_and_replays_raw_source() {
     let temp = TempDir::new().expect("temporary raw import root");
     let roots = ExtensionRoots::for_base_root(temp.path().join("LatentDeck"));
     let current_test_exe = std::env::current_exe().expect("current integration test executable");
-    install_codec(&roots, temp.path(), &current_test_exe);
+    let decoder_path = install_codec(&roots, temp.path(), &current_test_exe);
     let package = package_reference();
     let selection = selection();
+    let cache = ActivePackageCache::new();
+    let mut player_selection = PlayerCodecSelectionV2::new(
+        CODEC_ID.to_owned(),
+        CODEC_VERSION.to_owned(),
+        DeviceKind::Cuda,
+    );
+    let missing = validate_exact_selection(&cache, &roots, &player_selection)
+        .expect("first exact activation");
+    assert_eq!(missing.state, PlayerCodecState::Missing);
+    assert_cache_work(&cache, 1, 0, "initial exact selection");
+
+    let ready = select_external_asset(
+        &cache,
+        &roots,
+        &mut player_selection,
+        DECODER_ASSET_ID.to_owned(),
+        &decoder_path,
+    )
+    .expect("decoder selection validates and retains exact bytes once");
+    assert_eq!(ready.state, PlayerCodecState::Ready);
+    assert_cache_work(&cache, 1, 1, "decoder bind");
+    assert!(
+        fs::write(&decoder_path, vec![b'x'; DECODER_BYTES.len()]).is_err(),
+        "selected decoder evidence must deny mutation before Player launch"
+    );
+
+    let options = raw_import_options_for(&cache, &roots, Some(&package), env!("CARGO_PKG_VERSION"))
+        .expect("raw import options reuse selected package");
+    assert_eq!(options.package_id, CODEC_ID);
+    assert_cache_work(&cache, 1, 2, "raw import options");
     let source = temp.path().join("performance.syntheticraw");
     let output_root = temp.path().join("converted");
     fs::write(&source, b"bounded synthetic raw source").expect("raw source");
     fs::create_dir(&output_root).expect("output root");
 
     let prepared = prepare_exact_raw_import(
+        &cache,
         &roots,
         selection.clone(),
         Some(&package),
         env!("CARGO_PKG_VERSION"),
     )
     .expect("exact installed raw-import Codec Pack");
+    assert_cache_work(&cache, 1, 3, "raw import preflight launch");
     let plan = preflight_conversion_plan(
         ConversionPlanRequest {
             inputs: vec![source],
@@ -126,9 +165,15 @@ async fn installed_synthetic_codec_imports_and_replays_raw_source() {
     coordinator
         .begin()
         .expect("begin production conversion queue");
-    let prepared =
-        prepare_exact_raw_import(&roots, selection, Some(&package), env!("CARGO_PKG_VERSION"))
-            .expect("exact package is re-resolved for conversion");
+    let prepared = prepare_exact_raw_import(
+        &cache,
+        &roots,
+        selection,
+        Some(&package),
+        env!("CARGO_PKG_VERSION"),
+    )
+    .expect("exact package is checked out from the same active lease for conversion");
+    assert_cache_work(&cache, 1, 4, "raw import execution launch");
     let snapshot = run_conversion_batch(
         Arc::clone(&coordinator),
         prepared,
@@ -143,16 +188,62 @@ async fn installed_synthetic_codec_imports_and_replays_raw_source() {
     assert!(snapshot.items[0].archive_sha256.is_some());
 
     let output = output_root.join("performance.lc");
-    let cartridge = open_integrity_validated(&output, &ValidationOptions::default())
-        .expect("Core-finalized raw import reopens");
-    assert_eq!(cartridge.manifest().codec.family.0, PROFILE_FAMILY);
-    let active = resolve_active(&roots, &package).expect("exact active package for replay");
-    let host = player_host_contract();
+    let mut player_coordinator = PlayerCoordinator::without_codec();
+    player_coordinator
+        .open_cartridge(&output)
+        .expect("Player validates and retains the finalized cartridge once");
+    let source = player_coordinator
+        .protocol2_source_inputs()
+        .expect("retained Player source");
+    assert_eq!(
+        source.retained_cartridge.manifest().codec.family.0,
+        PROFILE_FAMILY
+    );
+    let first_launch = prepare_exact_launch(
+        &cache,
+        &roots,
+        Some(&player_selection),
+        &source,
+        env!("CARGO_PKG_VERSION"),
+        false,
+    )
+    .expect("Player launch clones the retained LC and active package leases");
+    assert_eq!(first_launch.latent_slot_count, 1);
+    assert_eq!(
+        first_launch.cartridge.receipt(),
+        source.retained_cartridge.receipt()
+    );
+    assert_eq!(first_launch.retained_external_assets.len(), 1);
+    assert_cache_work(&cache, 1, 5, "Player launch preparation");
+    drop(first_launch);
+
+    let launch = prepare_exact_launch(
+        &cache,
+        &roots,
+        Some(&player_selection),
+        &source,
+        env!("CARGO_PKG_VERSION"),
+        false,
+    )
+    .expect("Player restart clones the same retained LC and active package leases");
+    assert_eq!(
+        launch.cartridge.receipt(),
+        source.retained_cartridge.receipt()
+    );
+    assert_eq!(launch.retained_external_assets.len(), 1);
+    assert_cache_work(&cache, 1, 6, "Player restart preparation");
+    let host = launch.host;
     let player_session_id = host.player_session_id;
     let generation = host.stream_generation;
-    let mut player = start_player_session_v2(active, cartridge, host, Vec::new())
-        .await
-        .expect("exact Player P2 replay startup");
+    let mut player = start_player_session_v2_with_retained_assets(
+        launch.package,
+        launch.cartridge,
+        host,
+        launch.external_assets,
+        launch.retained_external_assets,
+    )
+    .await
+    .expect("exact Player P2 replay startup");
     let Ack::PlayerStep(step) = player
         .client_mut()
         .call(
@@ -193,6 +284,23 @@ async fn installed_synthetic_codec_imports_and_replays_raw_source() {
     assert!(exit.success);
 }
 
+fn assert_cache_work(
+    cache: &ActivePackageCache,
+    cold_full_hash_passes: u64,
+    cached_checkouts: u64,
+    boundary: &str,
+) {
+    let stats = cache.stats();
+    assert_eq!(
+        stats.cold_full_hash_passes, cold_full_hash_passes,
+        "{boundary} must not repeat package payload hashes"
+    );
+    assert_eq!(
+        stats.cached_checkouts, cached_checkouts,
+        "{boundary} must reuse the process-local active lease"
+    );
+}
+
 fn selection() -> RawImportSelectionRequest {
     RawImportSelectionRequest {
         package_id: CODEC_ID.to_owned(),
@@ -215,32 +323,10 @@ fn package_reference() -> PackageReference {
     }
 }
 
-fn player_host_contract() -> PlayerSessionV2HostContract {
-    PlayerSessionV2HostContract {
-        app_version: env!("CARGO_PKG_VERSION").to_owned(),
-        player_session_id: Uuid::new_v4(),
-        ring_id: Uuid::new_v4(),
-        profile_key: protocol_profile(),
-        signal_geometry: protocol_signal(),
-        tensor_abi: tensor_abi(),
-        decoded_abi: DecodedAbi {
-            pixel_format: "rgba8".to_owned(),
-            maximum_batch: 24,
-        },
-        maximum_estimated_host_bytes: 1_024,
-        maximum_estimated_device_bytes: 1_024,
-        device_ordinal: 0,
-        ring_slot_count: 3,
-        stream_generation: 1,
-        loop_enabled: false,
-        heartbeat_interval_ms: 250,
-        heartbeat_hard_timeout_ms: 10_000,
-        command_timeout: Duration::from_secs(10),
-    }
-}
-
-fn install_codec(roots: &ExtensionRoots, root: &Path, current_test_exe: &Path) {
+fn install_codec(roots: &ExtensionRoots, root: &Path, current_test_exe: &Path) -> PathBuf {
     let source = root.join("raw-import-codec-source");
+    let decoder_path = root.join("synthetic-decoder.bin");
+    fs::write(&decoder_path, DECODER_BYTES).expect("synthetic decoder asset");
     fs::create_dir(&source).expect("codec source directory");
     write_file(&source, "LICENSE.txt", b"synthetic test package\n");
     write_file(
@@ -322,7 +408,16 @@ fn install_codec(roots: &ExtensionRoots, root: &Path, current_test_exe: &Path) {
             CodecCapability::LiveCapture,
             CodecCapability::RawImport,
         ],
-        external_assets: Vec::new(),
+        external_assets: vec![ExternalAssetDescriptor {
+            asset_id: DECODER_ASSET_ID.to_owned(),
+            display_name: "Synthetic decoder".to_owned(),
+            required: true,
+            byte_length: u64::try_from(DECODER_BYTES.len()).expect("decoder length"),
+            sha256: sha256(DECODER_BYTES),
+            source_url: None,
+            license_label: "Test-only".to_owned(),
+            license_url: None,
+        }],
         runtime_lock: RuntimeLockDescriptor {
             path: "runtime/runtime.lock".to_owned(),
             sha256: sha256(lock),
@@ -348,6 +443,7 @@ fn install_codec(roots: &ExtensionRoots, root: &Path, current_test_exe: &Path) {
     )
     .expect("install synthetic Codec Pack");
     enable(roots, &package_reference()).expect("enable exact synthetic Codec Pack");
+    decoder_path
 }
 
 fn write_integrity(root: &Path, paths: &[&str]) -> Vec<u8> {
@@ -688,7 +784,14 @@ impl SyntheticWorker {
                 }))
             }
             Command::CodecLoad(load) => {
-                assert!(load.external_assets.is_empty());
+                assert_eq!(load.external_assets.len(), 1);
+                let decoder = &load.external_assets.as_slice()[0];
+                assert_eq!(decoder.asset_id, DECODER_ASSET_ID);
+                assert_eq!(decoder.sha256, sha256(DECODER_BYTES));
+                assert_eq!(
+                    decoder.byte_length,
+                    u64::try_from(DECODER_BYTES.len()).expect("decoder length")
+                );
                 Ack::CodecLoad(CodecLoaded {
                     pack_id: load.pack_id,
                     pack_version: load.pack_version,

@@ -312,6 +312,9 @@ describe("mounted LatentDeck Extensions Manager", () => {
     );
     expect(target.textContent).toContain("1 exact versions");
 
+    const snapshotsBeforeVerify = invokeMock.mock.calls.filter(
+      ([command]) => command === "extensions_snapshot",
+    ).length;
     button(target, "Verify").click();
     await settleUi();
     expect(invokeMock).toHaveBeenCalledWith("extensions_verify", {
@@ -320,6 +323,11 @@ describe("mounted LatentDeck Extensions Manager", () => {
     expect(target.textContent).toContain(
       "Verified org.example.deck 1.2.3: healthy.",
     );
+    expect(
+      invokeMock.mock.calls.filter(
+        ([command]) => command === "extensions_snapshot",
+      ),
+    ).toHaveLength(snapshotsBeforeVerify);
 
     button(target, "Enable").click();
     await settleUi();
@@ -400,7 +408,90 @@ describe("mounted LatentDeck Extensions Manager", () => {
       "Removed exact version org.example.deck 1.2.3.",
     );
     expect(target.textContent).toContain("0 exact versions");
-    expect(onPackagesChanged).toHaveBeenCalledTimes(8);
+    expect(onPackagesChanged).toHaveBeenCalledTimes(5);
+
+    await unmount(component);
+    target.remove();
+  });
+
+  it("keeps a disabled verification-required Codec removable after strict checks fail", async () => {
+    const codec: ExtensionPackageReference = {
+      kind: "codec_pack",
+      packageId: "org.example.codec",
+      packageVersion: "2.0.0",
+    };
+    const verificationRequired: ExtensionPackageSummary = {
+      package: codec,
+      displayName: "Example Codec",
+      publisherName: "Example Publisher",
+      enabled: false,
+      health: "verification_required",
+      errorCode: null,
+      errorDetail: null,
+    };
+    let snapshot: ExtensionsSnapshot = {
+      packages: [verificationRequired],
+      matrix: [],
+    };
+    invokeMock.mockImplementation(
+      async (command: string, args?: Record<string, unknown>) => {
+        switch (command) {
+          case "extensions_snapshot":
+            return snapshot;
+          case "extensions_verify":
+          case "extensions_enable":
+            throw {
+              code: "extension.integrity_failed",
+              detail: "Installed bytes changed.",
+            };
+          case "extensions_remove":
+            snapshot = { packages: [], matrix: [] };
+            return snapshot;
+          default:
+            throw new Error(
+              `Unexpected command ${command} ${JSON.stringify(args)}`,
+            );
+        }
+      },
+    );
+
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(ExtensionsManager, { target });
+    await settleUi();
+
+    expect(target.textContent?.replace(/\s+/gu, " ")).toContain(
+      "verification required",
+    );
+    expect(target.textContent?.replace(/\s+/gu, " ")).toContain(
+      "Verify or Enable performs strict full payload validation before use.",
+    );
+    expect(button(target, "Enable").disabled).toBe(false);
+    expect(button(target, "Repair…").disabled).toBe(false);
+
+    button(target, "Verify").click();
+    await settleUi();
+    expect(target.textContent).toContain("extension.integrity_failed");
+    button(target, "Enable").click();
+    await settleUi();
+    expect(target.textContent).toContain("extension.integrity_failed");
+
+    const remove = button(target, "Remove exact version");
+    expect(remove.disabled).toBe(true);
+    const acknowledgement = target.querySelector<HTMLInputElement>(
+      ".corrupt-confirmation input",
+    );
+    expect(acknowledgement).not.toBeNull();
+    acknowledgement!.click();
+    flushSync();
+    expect(remove.disabled).toBe(false);
+    remove.click();
+    await settleUi();
+    expect(invokeMock).toHaveBeenCalledWith("extensions_remove", {
+      package: codec,
+      allowCorrupt: true,
+    });
+    expect(target.textContent).toContain("0 exact versions");
 
     await unmount(component);
     target.remove();

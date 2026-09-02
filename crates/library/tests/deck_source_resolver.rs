@@ -2,6 +2,7 @@ mod support;
 
 use latentdeck_library::{
     CartridgeKey, DeckSourceIdentity, ErrorCode, Library, MAX_DECK_SOURCE_PATH_CANDIDATES,
+    MAX_INDEXED_DECK_SOURCE_QUERY_CHUNK, MAX_INDEXED_DECK_SOURCES,
 };
 use tempfile::tempdir;
 
@@ -25,6 +26,71 @@ fn resolves_a_present_registered_source_by_immutable_identity() {
     assert_eq!(
         resolved.path(),
         path.canonicalize().expect("canonical path")
+    );
+    assert_eq!(
+        resolved
+            .validated_cartridge()
+            .receipt()
+            .archive_sha256
+            .to_string(),
+        identity.archive_sha256().as_str()
+    );
+    let retained_clone = resolved
+        .try_clone_retained()
+        .expect("clone backend-only validated source");
+    drop(resolved);
+    assert_eq!(retained_clone.identity(), &identity);
+    assert_eq!(
+        retained_clone
+            .validated_cartridge()
+            .receipt()
+            .archive_sha256
+            .to_string(),
+        identity.archive_sha256().as_str()
+    );
+}
+
+#[test]
+fn indexed_source_batch_is_chunked_bounded_and_preserves_input_alignment() {
+    assert_eq!(MAX_INDEXED_DECK_SOURCE_QUERY_CHUNK, 250);
+    assert_eq!(MAX_INDEXED_DECK_SOURCES, 1_004);
+    let temp = tempdir().expect("tempdir");
+    let first_path = temp.path().join("indexed-a.lc");
+    let second_path = temp.path().join("indexed-b.lc");
+    write_synthetic_lc(&first_path, ID_A);
+    write_synthetic_lc(&second_path, ID_B);
+    let mut library = Library::in_memory().expect("library");
+    let first = library.import_file(first_path).expect("import first");
+    let second = library.import_file(second_path).expect("import second");
+    let first_identity = DeckSourceIdentity::new(ID_A, first.key.clone()).expect("first identity");
+    let second_identity =
+        DeckSourceIdentity::new(ID_B, second.key.clone()).expect("second identity");
+    let wrong_first = DeckSourceIdentity::new(ID_C, first.key).expect("wrong indexed identity");
+    let mut requested = Vec::with_capacity(MAX_INDEXED_DECK_SOURCES);
+    requested.push(wrong_first);
+    for index in 1..MAX_INDEXED_DECK_SOURCES {
+        requested.push(if index.is_multiple_of(2) {
+            first_identity.clone()
+        } else {
+            second_identity.clone()
+        });
+    }
+
+    let indexed = library
+        .indexed_deck_sources(&requested)
+        .expect("bounded indexed batch");
+
+    assert_eq!(indexed.len(), requested.len());
+    assert_eq!(indexed[0].as_ref().unwrap_err().code, ErrorCode::Conflict);
+    for (result, expected) in indexed.iter().skip(1).zip(requested.iter().skip(1)) {
+        let result = result.as_ref().expect("aligned present indexed source");
+        assert_eq!(result.identity(), expected);
+        assert!(result.manifest_json().contains(expected.cartridge_id()));
+    }
+    let over_limit = vec![first_identity; MAX_INDEXED_DECK_SOURCES + 1];
+    assert_eq!(
+        library.indexed_deck_sources(&over_limit).unwrap_err().code,
+        ErrorCode::InvalidInput
     );
 }
 
@@ -170,6 +236,7 @@ fn chooses_registered_present_paths_by_path_id_with_bounded_fallback() {
         selected_first.path(),
         first.canonicalize().expect("canonical first")
     );
+    drop(selected_first);
 
     std::fs::remove_file(first).expect("make first registered path stale");
     let selected_second = library

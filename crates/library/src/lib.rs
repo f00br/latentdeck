@@ -13,7 +13,10 @@ mod resolver;
 pub use error::{ErrorCode, LibraryError, Result};
 pub use migrations::SCHEMA_VERSION;
 pub use model::*;
-pub use resolver::{DeckSourceIdentity, MAX_DECK_SOURCE_PATH_CANDIDATES, ResolvedDeckSource};
+pub use resolver::{
+    DeckSourceIdentity, IndexedDeckSource, MAX_DECK_SOURCE_PATH_CANDIDATES,
+    MAX_INDEXED_DECK_SOURCE_QUERY_CHUNK, MAX_INDEXED_DECK_SOURCES, ResolvedDeckSource,
+};
 
 use rusqlite::Connection;
 

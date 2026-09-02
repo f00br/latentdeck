@@ -8,17 +8,21 @@
 use std::{
     fs::{File, OpenOptions},
     io::Read,
-    os::windows::fs::OpenOptionsExt as _,
     path::Path,
+    sync::Arc,
 };
+
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt as _;
 
 use latentdeck_control::v2::ExternalAssetBinding;
 use sha2::{Digest, Sha256};
 
+#[cfg(windows)]
 const FILE_SHARE_READ_ONLY: u32 = 0x0000_0001;
 
 #[derive(Debug)]
-pub(crate) enum RetainedExternalAssetError {
+pub enum RetainedExternalAssetError {
     Invalid,
     Io(std::io::Error),
 }
@@ -26,6 +30,47 @@ pub(crate) enum RetainedExternalAssetError {
 impl From<std::io::Error> for RetainedExternalAssetError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct IntegrityValidatedExternalAsset {
+    binding: ExternalAssetBinding,
+    _file: Arc<File>,
+}
+
+impl IntegrityValidatedExternalAsset {
+    /// Hash and retain one exact external Codec asset without share-write or
+    /// share-delete access.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-regular paths, length or digest mismatches, and I/O
+    /// failures without returning the machine path in the error.
+    pub fn validate_and_retain(
+        binding: ExternalAssetBinding,
+    ) -> Result<Self, RetainedExternalAssetError> {
+        let file = retain_exact_external_asset(&binding)?;
+        Ok(Self::from_validated_file(binding, file))
+    }
+
+    pub(crate) fn from_validated_file(binding: ExternalAssetBinding, file: File) -> Self {
+        Self {
+            binding,
+            _file: Arc::new(file),
+        }
+    }
+
+    #[must_use]
+    pub const fn binding(&self) -> &ExternalAssetBinding {
+        &self.binding
+    }
+
+    /// Clone retained integrity evidence without reopening or rehashing the
+    /// external asset.
+    #[must_use]
+    pub fn clone_retained(&self) -> Self {
+        self.clone()
     }
 }
 
@@ -40,10 +85,11 @@ pub(crate) fn retain_exact_external_asset(
     if link_metadata.file_type().is_symlink() || !link_metadata.is_file() {
         return Err(RetainedExternalAssetError::Invalid);
     }
-    let mut file = OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ_ONLY)
-        .open(path)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    options.share_mode(FILE_SHARE_READ_ONLY);
+    let mut file = options.open(path)?;
     if file.metadata()?.len() != binding.byte_length {
         return Err(RetainedExternalAssetError::Invalid);
     }
@@ -62,7 +108,7 @@ pub(crate) fn retain_exact_external_asset(
     Ok(file)
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use std::{fs::OpenOptions, io::Write as _, os::windows::fs::OpenOptionsExt as _};
 

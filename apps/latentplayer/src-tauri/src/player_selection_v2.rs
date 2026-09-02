@@ -1,16 +1,17 @@
 //! Exact user-selected Codec Pack v2 and cartridge launch preparation.
 
-use std::{collections::BTreeMap, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use latentdeck_cartridge::{
     manifest::{DType, TensorStream},
-    reader::{IntegrityValidatedCartridge, ValidationOptions, open_integrity_validated},
+    reader::IntegrityValidatedCartridge,
 };
 use latentdeck_control::v2::{
     DecodedAbi, DeviceKind, ExternalAssetBinding, ProfileKey, SignalGeometry, TensorAbi,
     TensorDtype,
 };
 use latentdeck_core::{
+    external_asset_v2::IntegrityValidatedExternalAsset,
     player::{
         CartridgeSummary, CodecState, CodecSummary, DecoderVariantSummary,
         PlayerProtocol2SourceInputs,
@@ -18,8 +19,8 @@ use latentdeck_core::{
     player_session_v2::PlayerSessionV2HostContract,
 };
 use latentdeck_extension_manager::{
-    ActiveInstalledPackage, CodecCapability, ErrorCode as ExtensionErrorCode, ExtensionError,
-    ExtensionRoots, PackageKind, PackageManifest, PackageReference, resolve_active,
+    ActiveInstalledPackage, ActivePackageCache, CodecCapability, ErrorCode as ExtensionErrorCode,
+    ExtensionError, ExtensionRoots, PackageKind, PackageManifest, PackageReference,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -33,7 +34,7 @@ pub struct PlayerCodecSelectionV2 {
     package: PackageReference,
     device: DeviceKind,
     device_ordinal: u8,
-    external_assets: BTreeMap<String, PathBuf>,
+    retained_external_assets: BTreeMap<String, IntegrityValidatedExternalAsset>,
 }
 
 impl PlayerCodecSelectionV2 {
@@ -47,17 +48,13 @@ impl PlayerCodecSelectionV2 {
             },
             device,
             device_ordinal: 0,
-            external_assets: BTreeMap::new(),
+            retained_external_assets: BTreeMap::new(),
         }
     }
 
     #[must_use]
     pub const fn package(&self) -> &PackageReference {
         &self.package
-    }
-
-    pub fn bind_external_asset(&mut self, asset_id: String, path: PathBuf) {
-        self.external_assets.insert(asset_id, path);
     }
 }
 
@@ -66,6 +63,7 @@ pub struct PreparedPlayerV2Launch {
     pub cartridge: IntegrityValidatedCartridge,
     pub host: PlayerSessionV2HostContract,
     pub external_assets: Vec<ExternalAssetBinding>,
+    pub retained_external_assets: Vec<IntegrityValidatedExternalAsset>,
     pub cartridge_summary: CartridgeSummary,
     pub latent_slot_count: u64,
 }
@@ -109,15 +107,56 @@ impl PlayerSelectionV2Error {
 }
 
 pub fn validate_exact_selection(
+    cache: &ActivePackageCache,
     roots: &ExtensionRoots,
     selection: &PlayerCodecSelectionV2,
 ) -> Result<CodecSummary, PlayerSelectionV2Error> {
-    let package = resolve_active(roots, selection.package())
+    let package = cache
+        .resolve_active(roots, selection.package())
         .map_err(|error| package_resolution_error(&error))?;
     codec_summary(&package, selection)
 }
 
+/// Validate one exact external asset against the currently selected Codec Pack
+/// and retain the measured file handle for future Player launches.
+///
+/// The selection is updated only after the complete hash and length check has
+/// succeeded, so a failed retry cannot discard earlier valid evidence.
+pub fn select_external_asset(
+    cache: &ActivePackageCache,
+    roots: &ExtensionRoots,
+    selection: &mut PlayerCodecSelectionV2,
+    asset_id: String,
+    path: &Path,
+) -> Result<CodecSummary, PlayerSelectionV2Error> {
+    let package = cache
+        .resolve_active(roots, selection.package())
+        .map_err(|error| package_resolution_error(&error))?;
+    let manifest = codec_manifest(&package)?;
+    let descriptor = manifest
+        .external_assets
+        .iter()
+        .find(|asset| asset.asset_id == asset_id)
+        .ok_or(PlayerSelectionV2Error::AssetInvalid)?;
+    let path = path
+        .to_str()
+        .filter(|path| !path.is_empty())
+        .ok_or(PlayerSelectionV2Error::AssetInvalid)?;
+    let retained = IntegrityValidatedExternalAsset::validate_and_retain(ExternalAssetBinding {
+        asset_id: asset_id.clone(),
+        path: path.to_owned(),
+        sha256: descriptor.sha256.clone(),
+        byte_length: descriptor.byte_length,
+    })
+    .map_err(|_| PlayerSelectionV2Error::AssetInvalid)?;
+    selection
+        .retained_external_assets
+        .insert(asset_id, retained);
+    codec_summary(&package, selection)
+}
+
 pub fn prepare_exact_launch(
+    cache: &ActivePackageCache,
     roots: &ExtensionRoots,
     selection: Option<&PlayerCodecSelectionV2>,
     source: &PlayerProtocol2SourceInputs<'_>,
@@ -125,11 +164,15 @@ pub fn prepare_exact_launch(
     loop_enabled: bool,
 ) -> Result<PreparedPlayerV2Launch, PlayerSelectionV2Error> {
     let selection = selection.ok_or(PlayerSelectionV2Error::MissingSelection)?;
-    let package = resolve_active(roots, selection.package())
+    let package = cache
+        .resolve_active(roots, selection.package())
         .map_err(|error| package_resolution_error(&error))?;
     let manifest = codec_manifest(&package)?;
     let external_assets = external_asset_bindings(manifest, selection)?;
-    let cartridge = open_integrity_validated(source.cartridge_path, &ValidationOptions::default())
+    let retained_external_assets = retained_external_asset_bindings(&external_assets, selection)?;
+    let cartridge = source
+        .retained_cartridge
+        .try_clone_retained()
         .map_err(|_| PlayerSelectionV2Error::CartridgeInvalid)?;
     let host = host_contract(
         manifest,
@@ -153,6 +196,7 @@ pub fn prepare_exact_launch(
         cartridge,
         host,
         external_assets,
+        retained_external_assets,
         cartridge_summary: source.cartridge.clone(),
         latent_slot_count,
     })
@@ -190,7 +234,7 @@ fn codec_summary(
         .external_assets
         .iter()
         .filter(|asset| asset.required)
-        .all(|asset| selection.external_assets.contains_key(&asset.asset_id));
+        .all(|asset| retained_external_asset_matches_descriptor(selection, asset));
     let single_asset = (manifest.external_assets.len() == 1).then(|| &manifest.external_assets[0]);
     Ok(CodecSummary {
         state: if ready {
@@ -217,7 +261,7 @@ fn codec_summary(
                 source_url: asset.source_url.clone().unwrap_or_default(),
                 license_label: asset.license_label.clone(),
                 license_url: asset.license_url.clone().unwrap_or_default(),
-                selected: selection.external_assets.contains_key(&asset.asset_id),
+                selected: retained_external_asset_matches_descriptor(selection, asset),
             })
             .collect(),
     })
@@ -227,41 +271,83 @@ fn external_asset_bindings(
     manifest: &latentdeck_extension_manager::CodecPackManifest,
     selection: &PlayerCodecSelectionV2,
 ) -> Result<Vec<ExternalAssetBinding>, PlayerSelectionV2Error> {
-    if selection.external_assets.keys().any(|id| {
-        !manifest
-            .external_assets
-            .iter()
-            .any(|asset| &asset.asset_id == id)
-    }) {
+    external_asset_bindings_for_descriptors(&manifest.external_assets, selection)
+}
+
+fn external_asset_bindings_for_descriptors(
+    descriptors: &[latentdeck_extension_manager::ExternalAssetDescriptor],
+    selection: &PlayerCodecSelectionV2,
+) -> Result<Vec<ExternalAssetBinding>, PlayerSelectionV2Error> {
+    if selection
+        .retained_external_assets
+        .keys()
+        .any(|id| !descriptors.iter().any(|asset| &asset.asset_id == id))
+    {
         return Err(PlayerSelectionV2Error::AssetInvalid);
     }
-    manifest
-        .external_assets
+    descriptors
         .iter()
         .filter_map(|asset| {
-            selection.external_assets.get(&asset.asset_id).map_or_else(
-                || {
-                    if asset.required {
-                        Some(Err(PlayerSelectionV2Error::MissingAsset))
-                    } else {
-                        None
-                    }
-                },
-                |path| {
-                    Some(
-                        path.to_str()
-                            .ok_or(PlayerSelectionV2Error::AssetInvalid)
-                            .map(|path| ExternalAssetBinding {
-                                asset_id: asset.asset_id.clone(),
-                                path: path.to_owned(),
-                                sha256: asset.sha256.clone(),
-                                byte_length: asset.byte_length,
-                            }),
-                    )
-                },
-            )
+            selection
+                .retained_external_assets
+                .get(&asset.asset_id)
+                .filter(|retained| {
+                    retained.binding().sha256 == asset.sha256
+                        && retained.binding().byte_length == asset.byte_length
+                })
+                .map_or_else(
+                    || {
+                        if asset.required {
+                            Some(Err(PlayerSelectionV2Error::MissingAsset))
+                        } else {
+                            None
+                        }
+                    },
+                    |retained| Some(Ok(retained.binding().clone())),
+                )
         })
         .collect()
+}
+
+fn retained_external_asset_bindings(
+    bindings: &[ExternalAssetBinding],
+    selection: &PlayerCodecSelectionV2,
+) -> Result<Vec<IntegrityValidatedExternalAsset>, PlayerSelectionV2Error> {
+    let retained = bindings
+        .iter()
+        .map(|binding| {
+            selection
+                .retained_external_assets
+                .get(&binding.asset_id)
+                .filter(|retained| retained.binding() == binding)
+                .map(IntegrityValidatedExternalAsset::clone_retained)
+                .ok_or(PlayerSelectionV2Error::AssetInvalid)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    #[cfg(target_os = "windows")]
+    {
+        Ok(retained)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        drop(retained);
+        Ok(Vec::new())
+    }
+}
+
+fn retained_external_asset_matches_descriptor(
+    selection: &PlayerCodecSelectionV2,
+    descriptor: &latentdeck_extension_manager::ExternalAssetDescriptor,
+) -> bool {
+    selection
+        .retained_external_assets
+        .get(&descriptor.asset_id)
+        .is_some_and(|retained| {
+            let binding = retained.binding();
+            binding.asset_id == descriptor.asset_id
+                && binding.sha256 == descriptor.sha256
+                && binding.byte_length == descriptor.byte_length
+        })
 }
 
 fn host_contract(
@@ -372,6 +458,11 @@ fn host_contract(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
+    use latentdeck_cartridge::hash::hash_reader;
+    use latentdeck_extension_manager::ExternalAssetDescriptor;
+
     use super::*;
 
     #[test]
@@ -398,5 +489,55 @@ mod tests {
 
         assert!(matches!(mapped, PlayerSelectionV2Error::PackageBusy));
         assert_eq!(mapped.code(), "extension.lifecycle_busy");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn retained_decoder_is_accepted_only_for_the_exact_current_descriptor() {
+        let directory = tempfile::tempdir().expect("temporary decoder root");
+        let path = directory.path().join("decoder.safetensors");
+        let bytes = b"exact retained Player decoder";
+        std::fs::write(&path, bytes).expect("write decoder");
+        let sha256 = hash_reader(&mut Cursor::new(bytes))
+            .expect("hash decoder fixture")
+            .sha256
+            .to_string();
+        let descriptor = ExternalAssetDescriptor {
+            asset_id: "decoder".to_owned(),
+            display_name: "Decoder".to_owned(),
+            required: true,
+            byte_length: u64::try_from(bytes.len()).expect("decoder length"),
+            sha256: sha256.clone(),
+            source_url: None,
+            license_label: "test-only".to_owned(),
+            license_url: None,
+        };
+        let retained = IntegrityValidatedExternalAsset::validate_and_retain(ExternalAssetBinding {
+            asset_id: descriptor.asset_id.clone(),
+            path: path.to_string_lossy().into_owned(),
+            sha256,
+            byte_length: descriptor.byte_length,
+        })
+        .expect("retain exact decoder");
+        let mut selection = PlayerCodecSelectionV2::new(
+            "org.example.codec".to_owned(),
+            "2.0.0".to_owned(),
+            DeviceKind::Cuda,
+        );
+        selection
+            .retained_external_assets
+            .insert(descriptor.asset_id.clone(), retained);
+
+        let bindings =
+            external_asset_bindings_for_descriptors(std::slice::from_ref(&descriptor), &selection)
+                .expect("current descriptor accepts retained evidence");
+        assert_eq!(bindings.len(), 1);
+
+        let mut changed = descriptor;
+        changed.sha256 = "ff".repeat(32);
+        assert!(matches!(
+            external_asset_bindings_for_descriptors(&[changed], &selection),
+            Err(PlayerSelectionV2Error::MissingAsset)
+        ));
     }
 }

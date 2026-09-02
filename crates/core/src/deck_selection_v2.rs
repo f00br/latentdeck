@@ -12,7 +12,7 @@ use std::{
 };
 
 use latentdeck_cartridge::{
-    manifest::{DType, TensorStream},
+    manifest::{DType, ManifestV0_1, TensorStream},
     reader::{IntegrityValidatedCartridge, ValidationOptions, open_integrity_validated},
 };
 use latentdeck_control::v2::{
@@ -20,9 +20,9 @@ use latentdeck_control::v2::{
     TensorDtype,
 };
 use latentdeck_extension_manager::{
-    ActiveInstalledPackage, CodecPackManifest, DeckPackManifest, ExtensionRoots, PackageKind,
-    PackageManifest, PackageReference, TensorDevice, TensorDtype as ManifestTensorDtype,
-    resolve_active,
+    ActiveInstalledPackage, ActivePackageCache, CodecPackManifest, DeckPackManifest,
+    ErrorCode as ExtensionErrorCode, ExtensionError, ExtensionRoots, PackageKind, PackageManifest,
+    PackageReference, TensorDevice, TensorDtype as ManifestTensorDtype,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -30,6 +30,7 @@ use uuid::Uuid;
 use crate::{
     deck_runtime_v2::{ActiveDeckRuntime, DeckRuntimeError},
     deck_session_v2::DeckSessionV2HostContract,
+    external_asset_v2::IntegrityValidatedExternalAsset,
 };
 
 const MAX_SOURCES: usize = 16;
@@ -46,6 +47,7 @@ pub struct DeckPackageSelectionV2 {
     device: DeviceKind,
     device_ordinal: u8,
     external_assets: BTreeMap<String, PathBuf>,
+    retained_external_assets: BTreeMap<String, IntegrityValidatedExternalAsset>,
 }
 
 impl DeckPackageSelectionV2 {
@@ -71,6 +73,7 @@ impl DeckPackageSelectionV2 {
             device,
             device_ordinal: 0,
             external_assets: BTreeMap::new(),
+            retained_external_assets: BTreeMap::new(),
         }
     }
 
@@ -94,7 +97,18 @@ impl DeckPackageSelectionV2 {
     }
 
     pub fn bind_external_asset(&mut self, asset_id: String, path: PathBuf) {
+        self.retained_external_assets.remove(&asset_id);
         self.external_assets.insert(asset_id, path);
+    }
+
+    pub fn bind_integrity_validated_external_asset(
+        &mut self,
+        asset: IntegrityValidatedExternalAsset,
+    ) {
+        let binding = asset.binding();
+        self.external_assets.remove(&binding.asset_id);
+        self.retained_external_assets
+            .insert(binding.asset_id.clone(), asset);
     }
 }
 
@@ -105,6 +119,10 @@ pub struct DeckSourceSelectionV2<'a> {
     pub path: &'a Path,
     pub cartridge_id: &'a str,
     pub archive_sha256: &'a str,
+    /// Optional backend-retained result of the Library's exact source
+    /// resolution. Supplying it avoids reopening and hashing the same LC at
+    /// the Core boundary; identity and receipt fields are still cross-checked.
+    pub validated_cartridge: Option<&'a IntegrityValidatedCartridge>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,7 +144,20 @@ pub struct PreparedDeckSelectionV2 {
     pub cartridges: Vec<IntegrityValidatedCartridge>,
     pub host: DeckSessionV2HostContract,
     pub external_assets: Vec<ExternalAssetBinding>,
+    /// Exact no-share-write/delete evidence captured by the host UI. This is
+    /// reused only on Windows, where the retained handle prevents in-place
+    /// mutation; other platforms must revalidate at launch.
+    pub retained_external_assets: Vec<IntegrityValidatedExternalAsset>,
     pub sources: Vec<DeckSourceFactsV2>,
+    pub validation_work: DeckSelectionValidationWorkV2,
+}
+
+/// Observable heavy LC work performed for one exact Deck preparation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeckSelectionValidationWorkV2 {
+    pub full_cartridge_validations: usize,
+    pub retained_handle_clones: usize,
+    pub retained_external_asset_clones: usize,
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -151,6 +182,8 @@ pub enum DeckSelectionV2Error {
     UnsupportedTiming,
     #[error("the selected codec does not provide every required capability")]
     UnsupportedCapability,
+    #[error("the extension lifecycle is temporarily unavailable: {0:?}")]
+    ExtensionLifecycle(ExtensionErrorCode),
 }
 
 impl DeckSelectionV2Error {
@@ -167,6 +200,7 @@ impl DeckSelectionV2Error {
             Self::UnsupportedSignal => "unsupported_signal",
             Self::UnsupportedTiming => "unsupported_timing",
             Self::UnsupportedCapability => "unsupported_capability",
+            Self::ExtensionLifecycle(code) => code.as_str(),
         }
     }
 }
@@ -175,6 +209,53 @@ impl From<DeckRuntimeError> for DeckSelectionV2Error {
     fn from(_: DeckRuntimeError) -> Self {
         Self::PackageInvalid
     }
+}
+
+const fn selection_error_from_extension(error: &ExtensionError) -> DeckSelectionV2Error {
+    match error.code() {
+        ExtensionErrorCode::InvalidArguments
+        | ExtensionErrorCode::ArchiveInvalid
+        | ExtensionErrorCode::ManifestInvalid
+        | ExtensionErrorCode::IntegrityFailed => DeckSelectionV2Error::PackageInvalid,
+        ExtensionErrorCode::PackageMissing
+        | ExtensionErrorCode::PackageDisabled
+        | ExtensionErrorCode::PackageUntrusted => DeckSelectionV2Error::Untrusted,
+        code @ (ExtensionErrorCode::PackageExists
+        | ExtensionErrorCode::PackageActive
+        | ExtensionErrorCode::LifecycleBusy
+        | ExtensionErrorCode::LifecycleConflict
+        | ExtensionErrorCode::Io) => DeckSelectionV2Error::ExtensionLifecycle(code),
+    }
+}
+
+/// Check one immutable Library-index snapshot against the same profile,
+/// tensor, signal, and timing rules used by exact launch preparation.
+///
+/// This is a lightweight UI eligibility check only. The indexed manifest was
+/// fully validated when it entered the Library, but this function does not
+/// reopen or trust the current file bytes. Exact selected sources must still
+/// pass retained full validation before worker or GPU allocation.
+///
+/// # Errors
+///
+/// Returns the same stable source-compatibility reason as launch preparation.
+pub fn check_indexed_deck_source_compatibility(
+    codec: &CodecPackManifest,
+    deck: &DeckPackManifest,
+    manifest: &ManifestV0_1,
+    expected_cartridge_id: &str,
+    archive_sha256: &str,
+    selected_profile: &ProfileKey,
+    device: DeviceKind,
+) -> Result<(), DeckSelectionV2Error> {
+    let source = source_facts_from_manifest(manifest, archive_sha256, 0)?;
+    if source.cartridge_id != expected_cartridge_id {
+        return Err(DeckSelectionV2Error::PackageInvalid);
+    }
+    if source.profile_key != *selected_profile {
+        return Err(DeckSelectionV2Error::UnsupportedProfile);
+    }
+    validate_profile(codec, deck, &source, device)
 }
 
 /// Resolve and retain one exact Deck/Codec pair and all source cartridges.
@@ -189,6 +270,32 @@ pub fn prepare_exact_deck_selection(
     source_inputs: &[DeckSourceSelectionV2<'_>],
     app_version: &str,
 ) -> Result<PreparedDeckSelectionV2, DeckSelectionV2Error> {
+    prepare_exact_deck_selection_with_cache(
+        roots,
+        &ActivePackageCache::new(),
+        selection,
+        source_inputs,
+        app_version,
+    )
+}
+
+/// Resolve one exact selection through a process-owned active-package cache.
+///
+/// LC validation remains local to this preparation and deduplicates repeated
+/// physical selections while retaining an owned read-only handle for every
+/// logical slot.
+///
+/// # Errors
+///
+/// Returns the same exact compatibility refusal as
+/// [`prepare_exact_deck_selection`].
+pub fn prepare_exact_deck_selection_with_cache(
+    roots: &ExtensionRoots,
+    package_cache: &ActivePackageCache,
+    selection: &DeckPackageSelectionV2,
+    source_inputs: &[DeckSourceSelectionV2<'_>],
+    app_version: &str,
+) -> Result<PreparedDeckSelectionV2, DeckSelectionV2Error> {
     if source_inputs.is_empty()
         || source_inputs.len() > MAX_SOURCES
         || (selection.device == DeviceKind::Cpu && selection.device_ordinal != 0)
@@ -196,10 +303,12 @@ pub fn prepare_exact_deck_selection(
         return Err(DeckSelectionV2Error::PackageInvalid);
     }
 
-    let codec_package =
-        resolve_active(roots, &selection.codec).map_err(|_| DeckSelectionV2Error::Untrusted)?;
-    let deck_package =
-        resolve_active(roots, &selection.deck).map_err(|_| DeckSelectionV2Error::Untrusted)?;
+    let codec_package = package_cache
+        .resolve_active(roots, &selection.codec)
+        .map_err(|error| selection_error_from_extension(&error))?;
+    let deck_package = package_cache
+        .resolve_active(roots, &selection.deck)
+        .map_err(|error| selection_error_from_extension(&error))?;
     let deck_runtime = ActiveDeckRuntime::from_active_package(deck_package)?;
 
     let codec_manifest = match codec_package.manifest() {
@@ -218,7 +327,8 @@ pub fn prepare_exact_deck_selection(
     }
 
     let external_assets = external_asset_bindings(codec_manifest, selection)?;
-    let (cartridges, sources) = open_sources(source_inputs)?;
+    let retained_external_assets = retained_external_asset_bindings(&external_assets, selection)?;
+    let (cartridges, sources, validation_work) = open_sources(source_inputs)?;
     let first = sources
         .first()
         .ok_or(DeckSelectionV2Error::PackageInvalid)?;
@@ -233,6 +343,7 @@ pub fn prepare_exact_deck_selection(
         &external_assets,
         app_version,
     )?;
+    let retained_external_asset_clones = retained_external_assets.len();
 
     Ok(PreparedDeckSelectionV2 {
         codec_package,
@@ -240,7 +351,12 @@ pub fn prepare_exact_deck_selection(
         cartridges,
         host,
         external_assets,
+        retained_external_assets,
         sources,
+        validation_work: DeckSelectionValidationWorkV2 {
+            retained_external_asset_clones,
+            ..validation_work
+        },
     })
 }
 
@@ -276,22 +392,63 @@ fn validate_source_set(
 
 fn open_sources(
     source_inputs: &[DeckSourceSelectionV2<'_>],
-) -> Result<(Vec<IntegrityValidatedCartridge>, Vec<DeckSourceFactsV2>), DeckSelectionV2Error> {
-    let mut cartridges = Vec::with_capacity(source_inputs.len());
-    let mut sources = Vec::with_capacity(source_inputs.len());
+) -> Result<
+    (
+        Vec<IntegrityValidatedCartridge>,
+        Vec<DeckSourceFactsV2>,
+        DeckSelectionValidationWorkV2,
+    ),
+    DeckSelectionV2Error,
+> {
+    let mut cartridges = Vec::<IntegrityValidatedCartridge>::with_capacity(source_inputs.len());
+    let mut sources = Vec::<DeckSourceFactsV2>::with_capacity(source_inputs.len());
+    let mut validated = BTreeMap::<(PathBuf, String, String), usize>::new();
+    let mut validation_work = DeckSelectionValidationWorkV2::default();
     for source in source_inputs {
-        let cartridge = open_integrity_validated(source.path, &ValidationOptions::default())
-            .map_err(|_| DeckSelectionV2Error::PackageInvalid)?;
+        let key = (
+            source.path.to_path_buf(),
+            source.cartridge_id.to_owned(),
+            source.archive_sha256.to_owned(),
+        );
+        if let Some(index) = validated.get(&key).copied() {
+            let cartridge = cartridges[index]
+                .try_clone_retained()
+                .map_err(|_| DeckSelectionV2Error::PackageInvalid)?;
+            cartridges.push(cartridge);
+            sources.push(sources[index].clone());
+            validation_work.retained_handle_clones = validation_work
+                .retained_handle_clones
+                .checked_add(1)
+                .ok_or(DeckSelectionV2Error::PackageInvalid)?;
+            continue;
+        }
+        let cartridge = if let Some(validated_cartridge) = source.validated_cartridge {
+            validation_work.retained_handle_clones = validation_work
+                .retained_handle_clones
+                .checked_add(1)
+                .ok_or(DeckSelectionV2Error::PackageInvalid)?;
+            validated_cartridge
+                .try_clone_retained()
+                .map_err(|_| DeckSelectionV2Error::PackageInvalid)?
+        } else {
+            validation_work.full_cartridge_validations = validation_work
+                .full_cartridge_validations
+                .checked_add(1)
+                .ok_or(DeckSelectionV2Error::PackageInvalid)?;
+            open_integrity_validated(source.path, &ValidationOptions::default())
+                .map_err(|_| DeckSelectionV2Error::PackageInvalid)?
+        };
         let facts = source_facts(&cartridge)?;
         if facts.cartridge_id != source.cartridge_id
             || facts.archive_sha256 != source.archive_sha256
         {
             return Err(DeckSelectionV2Error::PackageInvalid);
         }
+        validated.insert(key, cartridges.len());
         cartridges.push(cartridge);
         sources.push(facts);
     }
-    Ok((cartridges, sources))
+    Ok((cartridges, sources, validation_work))
 }
 
 fn build_host(
@@ -502,6 +659,16 @@ fn external_asset_bindings(
         .external_assets
         .iter()
         .filter_map(|asset| {
+            if let Some(retained) = selection
+                .retained_external_assets
+                .get(&asset.asset_id)
+                .filter(|retained| {
+                    retained.binding().sha256 == asset.sha256
+                        && retained.binding().byte_length == asset.byte_length
+                })
+            {
+                return Some(Ok(retained.binding().clone()));
+            }
             selection.external_assets.get(&asset.asset_id).map_or_else(
                 || {
                     if asset.required {
@@ -528,10 +695,51 @@ fn external_asset_bindings(
         .collect()
 }
 
+fn retained_external_asset_bindings(
+    bindings: &[ExternalAssetBinding],
+    selection: &DeckPackageSelectionV2,
+) -> Result<Vec<IntegrityValidatedExternalAsset>, DeckSelectionV2Error> {
+    let retained = bindings
+        .iter()
+        .filter_map(|binding| {
+            selection
+                .retained_external_assets
+                .get(&binding.asset_id)
+                .map(|retained| {
+                    if retained.binding() == binding {
+                        Ok(retained.clone_retained())
+                    } else {
+                        Err(DeckSelectionV2Error::PackageInvalid)
+                    }
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    #[cfg(windows)]
+    {
+        Ok(retained)
+    }
+    #[cfg(not(windows))]
+    {
+        drop(retained);
+        Ok(Vec::new())
+    }
+}
+
 fn source_facts(
     cartridge: &IntegrityValidatedCartridge,
 ) -> Result<DeckSourceFactsV2, DeckSelectionV2Error> {
-    let manifest = cartridge.manifest();
+    source_facts_from_manifest(
+        cartridge.manifest(),
+        &cartridge.receipt().archive_sha256.to_string(),
+        cartridge.receipt().tensor_storage_bytes,
+    )
+}
+
+fn source_facts_from_manifest(
+    manifest: &ManifestV0_1,
+    archive_sha256: &str,
+    tensor_storage_bytes: u64,
+) -> Result<DeckSourceFactsV2, DeckSelectionV2Error> {
     let visual = manifest
         .tensors
         .iter()
@@ -553,7 +761,7 @@ fn source_facts(
     let video = &manifest.timing.decoded_video;
     Ok(DeckSourceFactsV2 {
         cartridge_id: manifest.cartridge_id.0.clone(),
-        archive_sha256: cartridge.receipt().archive_sha256.to_string(),
+        archive_sha256: archive_sha256.to_owned(),
         profile_key: ProfileKey {
             codec_family: manifest.codec.family.0.clone(),
             profile: manifest.codec.profile.0.clone(),
@@ -577,7 +785,7 @@ fn source_facts(
         },
         tensor_dtype,
         latent_slot_count: latent_slots,
-        tensor_storage_bytes: cartridge.receipt().tensor_storage_bytes,
+        tensor_storage_bytes,
     })
 }
 
@@ -590,6 +798,11 @@ fn version_in_range(version: &semver::Version, minimum: &str, maximum: &str) -> 
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use latentdeck_extension_manager::ExternalAssetDescriptor;
+    #[cfg(windows)]
+    use sha2::{Digest as _, Sha256};
+
     use super::*;
 
     fn source() -> DeckSourceFactsV2 {
@@ -716,6 +929,51 @@ mod tests {
         .expect("closed H3 preflight fixture")
     }
 
+    fn h3_manifest() -> ManifestV0_1 {
+        serde_json::from_value(serde_json::json!({
+            "spec_version": "0.1.0",
+            "cartridge_id": "550e8400-e29b-41d4-a716-446655440001",
+            "codec": {
+                "family": "minimax_h3",
+                "profile": "h3_av_latent",
+                "profile_version": "0.1.0"
+            },
+            "payloads": [{
+                "path": "payloads/h3.safetensors",
+                "media_type": "application/vnd.safetensors",
+                "byte_length": 1,
+                "sha256": "aa".repeat(32)
+            }],
+            "tensors": [{
+                "stream": "visual",
+                "name": "video",
+                "payload": "payloads/h3.safetensors",
+                "storage_dtype": "F16",
+                "runtime_dtype": "F16",
+                "shape": [1, 24, 32, 50, 28]
+            }],
+            "timing": {
+                "contract": "minimax_h3_causal",
+                "contract_version": "0.1.0",
+                "decoded_video": {
+                    "width": 448,
+                    "height": 800,
+                    "frame_count": 107,
+                    "frame_rate": {"numerator": 24, "denominator": 1},
+                    "duration": {"numerator": 107, "denominator": 24}
+                }
+            },
+            "audio": {"policy": "source_absent"},
+            "provenance": {
+                "created_by": {"name": "core-tests", "version": "0.1.0"},
+                "sources": []
+            },
+            "parent_cartridges": [],
+            "operation_history": []
+        }))
+        .expect("indexed H3 manifest fixture")
+    }
+
     #[test]
     fn selection_keeps_two_exact_versions_and_has_no_newest_form() {
         let selection = DeckPackageSelectionV2::new(
@@ -769,6 +1027,99 @@ mod tests {
         for (error, expected) in cases {
             assert_eq!(error.code(), expected);
         }
+        assert_eq!(
+            DeckSelectionV2Error::ExtensionLifecycle(ExtensionErrorCode::LifecycleBusy).code(),
+            "extension.lifecycle_busy"
+        );
+    }
+
+    #[test]
+    fn package_resolution_preserves_invalid_untrusted_and_transient_classes() {
+        for code in [
+            ExtensionErrorCode::InvalidArguments,
+            ExtensionErrorCode::ArchiveInvalid,
+            ExtensionErrorCode::ManifestInvalid,
+            ExtensionErrorCode::IntegrityFailed,
+        ] {
+            assert_eq!(
+                selection_error_from_extension(&ExtensionError::new(code, "private detail")),
+                DeckSelectionV2Error::PackageInvalid
+            );
+        }
+        for code in [
+            ExtensionErrorCode::PackageMissing,
+            ExtensionErrorCode::PackageDisabled,
+            ExtensionErrorCode::PackageUntrusted,
+        ] {
+            assert_eq!(
+                selection_error_from_extension(&ExtensionError::new(code, "private detail")),
+                DeckSelectionV2Error::Untrusted
+            );
+        }
+        for code in [
+            ExtensionErrorCode::PackageExists,
+            ExtensionErrorCode::PackageActive,
+            ExtensionErrorCode::LifecycleBusy,
+            ExtensionErrorCode::LifecycleConflict,
+            ExtensionErrorCode::Io,
+        ] {
+            assert_eq!(
+                selection_error_from_extension(&ExtensionError::new(code, "private detail")),
+                DeckSelectionV2Error::ExtensionLifecycle(code)
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn retained_external_asset_is_reused_only_for_the_exact_current_descriptor() {
+        let root = tempfile::tempdir().expect("temporary external asset root");
+        let path = root.path().join("decoder.safetensors");
+        let bytes = b"exact current decoder asset";
+        std::fs::write(&path, bytes).expect("write decoder asset");
+        let sha256 = hex::encode(Sha256::digest(bytes));
+        let descriptor = ExternalAssetDescriptor {
+            asset_id: "decoder".to_owned(),
+            display_name: "Decoder".to_owned(),
+            required: true,
+            byte_length: u64::try_from(bytes.len()).expect("asset length"),
+            sha256: sha256.clone(),
+            source_url: None,
+            license_label: "test-only".to_owned(),
+            license_url: None,
+        };
+        let binding = ExternalAssetBinding {
+            asset_id: descriptor.asset_id.clone(),
+            path: path.to_string_lossy().into_owned(),
+            sha256,
+            byte_length: descriptor.byte_length,
+        };
+        let retained = IntegrityValidatedExternalAsset::validate_and_retain(binding.clone())
+            .expect("validate exact external asset once");
+        let mut selection = DeckPackageSelectionV2::new(
+            "org.example.deck".to_owned(),
+            "1.0.0".to_owned(),
+            "org.latentdeck.codec.h3".to_owned(),
+            "0.2.0".to_owned(),
+            DeviceKind::Cuda,
+        );
+        selection.bind_integrity_validated_external_asset(retained);
+        let mut codec = h3_codec();
+        codec.external_assets.push(descriptor);
+
+        let bindings = external_asset_bindings(&codec, &selection)
+            .expect("current descriptor accepts retained evidence");
+        assert_eq!(bindings, vec![binding]);
+        let retained = retained_external_asset_bindings(&bindings, &selection)
+            .expect("prepare clones retained evidence without rehashing");
+        assert_eq!(retained.len(), 1);
+
+        codec.external_assets[0].sha256 = "ff".repeat(32);
+        assert_eq!(
+            external_asset_bindings(&codec, &selection),
+            Err(DeckSelectionV2Error::MissingAsset),
+            "same id/version with changed descriptor requires an explicit rebind"
+        );
     }
 
     #[test]
@@ -842,5 +1193,89 @@ mod tests {
                 Err(DeckSelectionV2Error::UnsupportedProfile)
             );
         }
+    }
+
+    #[test]
+    fn indexed_eligibility_uses_exact_launch_profile_signal_and_timing_reasons() {
+        let codec = h3_codec();
+        let deck = bundled_deck("q4");
+        let profile = ProfileKey {
+            codec_family: "minimax_h3".to_owned(),
+            profile: "h3_av_latent".to_owned(),
+            profile_version: "0.1.0".to_owned(),
+        };
+        let expected_id = "550e8400-e29b-41d4-a716-446655440001";
+        let archive_sha256 = &"bb".repeat(32);
+        let manifest = h3_manifest();
+
+        assert_eq!(
+            check_indexed_deck_source_compatibility(
+                &codec,
+                &deck,
+                &manifest,
+                expected_id,
+                archive_sha256,
+                &profile,
+                DeviceKind::Cuda,
+            ),
+            Ok(())
+        );
+
+        let mut wrong_profile = profile.clone();
+        wrong_profile.profile = "other".to_owned();
+        assert_eq!(
+            check_indexed_deck_source_compatibility(
+                &codec,
+                &deck,
+                &manifest,
+                expected_id,
+                archive_sha256,
+                &wrong_profile,
+                DeviceKind::Cuda,
+            ),
+            Err(DeckSelectionV2Error::UnsupportedProfile)
+        );
+        assert_eq!(
+            check_indexed_deck_source_compatibility(
+                &codec,
+                &deck,
+                &manifest,
+                "550e8400-e29b-41d4-a716-446655440099",
+                archive_sha256,
+                &profile,
+                DeviceKind::Cuda,
+            ),
+            Err(DeckSelectionV2Error::PackageInvalid)
+        );
+
+        let mut unsupported_signal = manifest.clone();
+        unsupported_signal.tensors[0].shape[4] = 29;
+        assert_eq!(
+            check_indexed_deck_source_compatibility(
+                &codec,
+                &deck,
+                &unsupported_signal,
+                expected_id,
+                archive_sha256,
+                &profile,
+                DeviceKind::Cuda,
+            ),
+            Err(DeckSelectionV2Error::UnsupportedSignal)
+        );
+
+        let mut unsupported_timing = manifest;
+        unsupported_timing.timing.decoded_video.frame_rate.numerator = 25;
+        assert_eq!(
+            check_indexed_deck_source_compatibility(
+                &codec,
+                &deck,
+                &unsupported_timing,
+                expected_id,
+                archive_sha256,
+                &profile,
+                DeviceKind::Cuda,
+            ),
+            Err(DeckSelectionV2Error::UnsupportedTiming)
+        );
     }
 }

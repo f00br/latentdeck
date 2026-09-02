@@ -86,8 +86,11 @@
   let conversionSnapshotPending = false;
   let rawImportOptions = $state<RawImportCodecOptions | null>(null);
   let rawImportProfileKeyValue = $state("");
-  let rawImportOptionsPending = false;
+  let rawImportOptionsGeneration = 0;
+  let rawImportOptionsPendingGeneration: number | null = null;
+  let rawImportCodecIdentity: string | null = null;
   let extensions = $state<ExtensionsSnapshot>(EMPTY_EXTENSIONS_SNAPSHOT);
+  let extensionsLoaded = false;
   let extensionsBusy = $state(false);
   let extensionsSnapshotPending = $state(false);
   let extensionsError = $state<PlayerError | null>(null);
@@ -218,6 +221,18 @@
   function invalidateConversionPlan(): void {
     conversion = null;
     conversionError = null;
+  }
+
+  function selectRawImportCodecAuthority(
+    summary: ExtensionPackageSummary,
+  ): void {
+    rawImportCodecIdentity = extensionPackageKey(summary.package);
+    rawImportOptionsGeneration += 1;
+    rawImportOptions = null;
+    rawImportProfileKeyValue = "";
+    if (conversion === null || conversion.phase === "planned") {
+      invalidateConversionPlan();
+    }
   }
 
   function addSelections(
@@ -363,16 +378,48 @@
     workspaceMode = mode;
     await tick();
     scheduleViewportSync();
-    if (mode === "prepare") void refreshRawImportOptions(true);
+    if (mode === "prepare" && rawImportOptions === null) {
+      void refreshRawImportOptions(true);
+    }
+    if (mode === "extensions" && !extensionsLoaded) {
+      void refreshExtensions(true);
+    }
   }
 
   async function refreshRawImportOptions(reportError = false): Promise<void> {
-    if (rawImportOptionsPending) return;
-    rawImportOptionsPending = true;
+    const generation = rawImportOptionsGeneration;
+    const codecIdentity = rawImportCodecIdentity;
+    if (rawImportOptionsPendingGeneration === generation) return;
+    rawImportOptionsPendingGeneration = generation;
     try {
       const options = await invoke<RawImportCodecOptions>(
         "player_raw_import_options",
       );
+      if (
+        generation !== rawImportOptionsGeneration ||
+        codecIdentity !== rawImportCodecIdentity
+      ) {
+        return;
+      }
+      const responseIdentity = extensionPackageKey({
+        kind: "codec_pack",
+        packageId: options.packageId,
+        packageVersion: options.packageVersion,
+      });
+      if (codecIdentity !== null && responseIdentity !== codecIdentity) {
+        rawImportOptions = null;
+        rawImportProfileKeyValue = "";
+        invalidateConversionPlan();
+        if (reportError) {
+          conversionError = {
+            code: "raw_import.authority_mismatch",
+            message:
+              "Raw import discovery returned a different exact Codec Pack identity.",
+            recoverable: true,
+          };
+        }
+        return;
+      }
       rawImportOptions = options;
       if (
         !options.profiles.some(
@@ -385,6 +432,12 @@
       }
       if (reportError) conversionError = null;
     } catch (error) {
+      if (
+        generation !== rawImportOptionsGeneration ||
+        codecIdentity !== rawImportCodecIdentity
+      ) {
+        return;
+      }
       rawImportOptions = null;
       rawImportProfileKeyValue = "";
       invalidateConversionPlan();
@@ -392,7 +445,9 @@
         conversionError = playerError(error, "raw_import.selection_missing");
       }
     } finally {
-      rawImportOptionsPending = false;
+      if (rawImportOptionsPendingGeneration === generation) {
+        rawImportOptionsPendingGeneration = null;
+      }
     }
   }
 
@@ -401,6 +456,7 @@
     extensionsSnapshotPending = true;
     try {
       extensions = await invoke<ExtensionsSnapshot>("extensions_snapshot");
+      extensionsLoaded = true;
       if (reportError) extensionsError = null;
     } catch (error) {
       if (reportError) {
@@ -513,7 +569,6 @@
         { package: summary.package },
       );
       extensions = replaceVerifiedSummary(extensions, verified);
-      await refreshExtensions();
       extensionsStatus = `Verified ${summary.package.packageId} ${summary.package.packageVersion}: ${verified.health}.`;
     } catch (error) {
       extensionsError = playerError(error, "extensions.verify_failed");
@@ -551,7 +606,9 @@
     summary: ExtensionPackageSummary,
   ): Promise<void> {
     const exactKey = extensionPackageKey(summary.package);
-    const allowCorrupt = summary.health === "corrupt";
+    const allowCorrupt =
+      summary.health === "corrupt" ||
+      summary.health === "verification_required";
     if (allowCorrupt && corruptRemovalAcknowledgement !== exactKey) return;
 
     extensionsBusy = true;
@@ -638,6 +695,7 @@
         packageVersion: summary.package.packageVersion,
         device,
       });
+      selectRawImportCodecAuthority(summary);
       const snapshot = await invoke<PlayerView>("player_snapshot");
       player = acceptTrustedSnapshot(player, snapshot);
       extensionsStatus = `Player selected ${summary.package.packageId} ${summary.package.packageVersion} on ${device}.`;
@@ -1028,8 +1086,6 @@
     void refreshFullscreen();
     void refreshSpout();
     void refreshConversion();
-    void refreshExtensions();
-    void refreshRawImportOptions();
     const snapshotTimer = globalThis.setInterval(() => {
       void refreshSnapshot();
     }, 100);
@@ -1708,8 +1764,13 @@
                     <span class:enabled={summary.enabled}
                       >{summary.enabled ? "enabled" : "disabled"}</span
                     >
-                    <strong class:healthy={summary.health === "healthy"}
-                      >{summary.health}</strong
+                    <strong
+                      class:healthy={summary.health === "healthy"}
+                      class:verification-required={summary.health ===
+                        "verification_required"}
+                      >{summary.health === "verification_required"
+                        ? "verification required"
+                        : summary.health}</strong
                     >
                   </div>
                 </header>
@@ -1723,6 +1784,13 @@
                       "No detail"}</code
                   >
                 {/if}
+                {#if summary.health === "verification_required"}
+                  <p>
+                    Payload is not read while this Codec Pack is disabled.
+                    Verify or Enable performs strict full payload validation
+                    before use.
+                  </p>
+                {/if}
                 <div class="extension-actions">
                   <button
                     disabled={extensionsControlsBusy}
@@ -1730,7 +1798,9 @@
                   >
                   <button
                     disabled={extensionsControlsBusy ||
-                      summary.health !== "healthy"}
+                      (!summary.enabled &&
+                        summary.health !== "healthy" &&
+                        summary.health !== "verification_required")}
                     onclick={() =>
                       setExtensionEnabled(summary, !summary.enabled)}
                     >{summary.enabled ? "Disable" : "Enable"}</button
@@ -1742,7 +1812,8 @@
                   <button
                     class="remove-extension"
                     disabled={extensionsControlsBusy ||
-                      (summary.health === "corrupt" &&
+                      ((summary.health === "corrupt" ||
+                        summary.health === "verification_required") &&
                         corruptRemovalAcknowledgement !==
                           extensionPackageKey(summary.package))}
                     onclick={() => removeExtension(summary)}
@@ -1783,7 +1854,7 @@
                     >
                   </div>
                 {/if}
-                {#if summary.health === "corrupt"}
+                {#if summary.health === "corrupt" || summary.health === "verification_required"}
                   <label class="corrupt-removal-confirmation">
                     <input
                       type="checkbox"
@@ -1797,7 +1868,9 @@
                           : null;
                       }}
                     />
-                    Allow removing this corrupt exact version
+                    {summary.health === "corrupt"
+                      ? "Allow removing this corrupt exact version"
+                      : "Allow removing this disabled exact version without payload verification"}
                   </label>
                 {/if}
               </article>

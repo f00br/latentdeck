@@ -502,11 +502,25 @@ pub(crate) fn validate_directory(
             "package root is not a regular non-reparse directory",
         ));
     }
+    let mut retained_directories = vec![open_directory_pin(root, true)?];
     let expected = expected_directory_layout(root, expected_kind)?;
     let mut file_paths = Vec::new();
     let mut directories = BTreeSet::new();
     scan_directory(&expected, root, root, 0, &mut file_paths, &mut directories)?;
     file_paths.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut directory_paths: Vec<_> = directories
+        .iter()
+        .map(|relative| root.join(path_from_archive(relative)))
+        .collect();
+    directory_paths.sort_by(|left, right| {
+        left.components()
+            .count()
+            .cmp(&right.components().count())
+            .then_with(|| left.cmp(right))
+    });
+    for directory in directory_paths {
+        retained_directories.push(open_directory_pin(&directory, false)?);
+    }
     let kind = expected.kind;
     if file_paths.is_empty() || file_paths.len() > max_files(kind) {
         return Err(ExtensionError::new(
@@ -514,14 +528,13 @@ pub(crate) fn validate_directory(
             format!("package tree exceeds the {} file bound", max_files(kind)),
         ));
     }
-    let mut files = BTreeMap::new();
-    let mut contents = BTreeMap::new();
+    let mut jobs = Vec::with_capacity(file_paths.len());
     let mut extracted = 0_u64;
-    for (relative, full_path) in file_paths {
+    for (index, (relative, full_path)) in file_paths.into_iter().enumerate() {
         if kind == PackageKind::DeckPack {
             validate_deck_file_extension(&relative)?;
         }
-        let mut file = open_regular_no_follow(&full_path, false)?;
+        let file = open_regular_under_pinned_tree(&full_path)?;
         let byte_length = file
             .metadata()
             .map_err(|error| ExtensionError::io(ErrorCode::Io, "inspect package file", &error))?
@@ -550,22 +563,184 @@ pub(crate) fn validate_directory(
                 "Codec control JSON exceeds the 1 MiB bound",
             ));
         }
-        let measured = read_and_hash(&mut file, byte_length, keep_bytes)?;
-        if let Some(bytes) = measured.bytes {
-            contents.insert(relative.clone(), bytes);
+        jobs.push(DirectoryHashJob {
+            index,
+            relative,
+            byte_length,
+            keep_bytes,
+            file,
+        });
+    }
+    let measured = hash_directory_jobs(jobs)?;
+    let mut files = BTreeMap::new();
+    let mut contents = BTreeMap::new();
+    let mut retained_files = Vec::with_capacity(measured.len());
+    for item in measured {
+        if let Some(bytes) = item.bytes {
+            contents.insert(item.measurement.path.clone(), bytes);
         }
-        files.insert(
-            relative.clone(),
-            FileMeasurement {
-                path: relative,
-                byte_length: measured.byte_length,
-                sha256: measured.sha256,
-            },
-        );
+        files.insert(item.measurement.path.clone(), item.measurement);
+        retained_files.push(item.file);
     }
     let mut validated = validate_contract(kind, &files, &directories, &contents)?;
     validated.extracted_byte_length = extracted;
+    validate_directory_snapshot(root, kind, &validated.files)?;
+    drop(retained_files);
+    drop(retained_directories);
     Ok(validated)
+}
+
+pub(crate) fn validate_directory_snapshot(
+    root: &Path,
+    kind: PackageKind,
+    expected_files: &BTreeMap<String, FileMeasurement>,
+) -> Result<()> {
+    ensure_existing_tree_safe(root)?;
+    let metadata = fs::symlink_metadata(root)
+        .map_err(|error| ExtensionError::io(ErrorCode::Io, "inspect package directory", &error))?;
+    if !metadata.is_dir() || is_reparse_or_symlink(&metadata) {
+        return Err(ExtensionError::new(
+            ErrorCode::LifecycleConflict,
+            "package root is not a regular non-reparse directory",
+        ));
+    }
+    let expected = ExpectedDirectoryLayout {
+        kind,
+        files: expected_files.keys().cloned().collect(),
+        directories: implied_directories(expected_files.keys().map(String::as_str)),
+    };
+    let mut observed_files = Vec::new();
+    let mut observed_directories = BTreeSet::new();
+    scan_directory(
+        &expected,
+        root,
+        root,
+        0,
+        &mut observed_files,
+        &mut observed_directories,
+    )?;
+    if observed_directories != expected.directories || observed_files.len() != expected_files.len()
+    {
+        return Err(ExtensionError::new(
+            ErrorCode::IntegrityFailed,
+            "package tree no longer matches its validated closed layout",
+        ));
+    }
+    for (relative, path) in observed_files {
+        let expected_file = expected_files.get(&relative).ok_or_else(|| {
+            ExtensionError::new(
+                ErrorCode::IntegrityFailed,
+                format!("uncatalogued package file: {relative}"),
+            )
+        })?;
+        let observed_length = fs::symlink_metadata(&path)
+            .map_err(|error| {
+                ExtensionError::io(ErrorCode::IntegrityFailed, "reinspect package file", &error)
+            })?
+            .len();
+        if observed_length != expected_file.byte_length {
+            return Err(ExtensionError::new(
+                ErrorCode::IntegrityFailed,
+                format!("catalogued file length changed: {relative}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+struct DirectoryHashJob {
+    index: usize,
+    relative: String,
+    byte_length: u64,
+    keep_bytes: bool,
+    file: File,
+}
+
+struct DirectoryHashResult {
+    index: usize,
+    measurement: FileMeasurement,
+    bytes: Option<Vec<u8>>,
+    file: File,
+}
+
+fn hash_directory_jobs(mut jobs: Vec<DirectoryHashJob>) -> Result<Vec<DirectoryHashResult>> {
+    const MAX_WORKERS: usize = 4;
+    if jobs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let worker_count = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(MAX_WORKERS)
+        .min(jobs.len());
+    jobs.sort_by(|left, right| {
+        right
+            .byte_length
+            .cmp(&left.byte_length)
+            .then_with(|| left.relative.cmp(&right.relative))
+    });
+    let mut buckets: Vec<Vec<DirectoryHashJob>> = (0..worker_count).map(|_| Vec::new()).collect();
+    let mut bucket_bytes = vec![0_u64; worker_count];
+    for job in jobs {
+        let bucket = bucket_bytes
+            .iter()
+            .enumerate()
+            .min_by_key(|(index, bytes)| (**bytes, *index))
+            .map_or(0, |(index, _)| index);
+        bucket_bytes[bucket] = bucket_bytes[bucket].saturating_add(job.byte_length);
+        buckets[bucket].push(job);
+    }
+    let workers: Vec<_> = buckets
+        .into_iter()
+        .map(|bucket| {
+            std::thread::spawn(move || -> Result<Vec<DirectoryHashResult>> {
+                let mut buffer = vec![0_u8; COPY_BUFFER_BYTES].into_boxed_slice();
+                bucket
+                    .into_iter()
+                    .map(|mut job| {
+                        let measured = read_and_hash_with_buffer(
+                            &mut job.file,
+                            job.byte_length,
+                            job.keep_bytes,
+                            &mut buffer,
+                        )?;
+                        Ok(DirectoryHashResult {
+                            index: job.index,
+                            measurement: FileMeasurement {
+                                path: job.relative,
+                                byte_length: measured.byte_length,
+                                sha256: measured.sha256,
+                            },
+                            bytes: measured.bytes,
+                            file: job.file,
+                        })
+                    })
+                    .collect()
+            })
+        })
+        .collect();
+    let mut results = Vec::new();
+    let mut first_error = None;
+    for worker in workers {
+        let outcome = worker.join().unwrap_or_else(|_| {
+            Err(ExtensionError::new(
+                ErrorCode::LifecycleConflict,
+                "directory hash worker terminated unexpectedly",
+            ))
+        });
+        match outcome {
+            Ok(mut measured) => results.append(&mut measured),
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    results.sort_by_key(|result| result.index);
+    Ok(results)
 }
 
 fn expected_directory_layout(
@@ -1066,7 +1241,7 @@ fn measure_archive(
     Ok((files, directories, contents))
 }
 
-fn validate_contract(
+pub(crate) fn validate_contract(
     kind: PackageKind,
     files: &BTreeMap<String, FileMeasurement>,
     explicit_directories: &BTreeSet<String>,
@@ -1377,6 +1552,16 @@ fn read_and_hash<R: Read>(
     expected: u64,
     keep_bytes: bool,
 ) -> Result<ReadMeasurement> {
+    let mut buffer = vec![0_u8; COPY_BUFFER_BYTES].into_boxed_slice();
+    read_and_hash_with_buffer(reader, expected, keep_bytes, &mut buffer)
+}
+
+fn read_and_hash_with_buffer<R: Read>(
+    reader: &mut R,
+    expected: u64,
+    keep_bytes: bool,
+    buffer: &mut [u8],
+) -> Result<ReadMeasurement> {
     let mut hasher = Sha256::new();
     let mut byte_length = 0_u64;
     let mut stored = if keep_bytes {
@@ -1386,9 +1571,8 @@ fn read_and_hash<R: Read>(
     } else {
         None
     };
-    let mut buffer = vec![0_u8; COPY_BUFFER_BYTES].into_boxed_slice();
     loop {
-        let read = reader.read(&mut buffer).map_err(|error| {
+        let read = reader.read(buffer).map_err(|error| {
             ExtensionError::io(ErrorCode::ArchiveInvalid, "read package file", &error)
         })?;
         if read == 0 {
@@ -1470,6 +1654,80 @@ fn hash_open_file(file: &mut File) -> Result<String> {
 
 fn hash_bytes(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+
+fn open_directory_pin(path: &Path, check_ancestors: bool) -> Result<File> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| ExtensionError::io(ErrorCode::Io, "inspect package directory", &error))?;
+    if !metadata.is_dir() || is_reparse_or_symlink(&metadata) {
+        return Err(ExtensionError::new(
+            ErrorCode::LifecycleConflict,
+            "package directory is not a regular non-reparse directory",
+        ));
+    }
+    if check_ancestors {
+        ensure_existing_tree_safe(path)?;
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        options
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| ExtensionError::io(ErrorCode::Io, "open package directory pin", &error))?;
+    let opened = file.metadata().map_err(|error| {
+        ExtensionError::io(ErrorCode::Io, "inspect package directory pin", &error)
+    })?;
+    if !opened.is_dir() || is_reparse_or_symlink(&opened) {
+        return Err(ExtensionError::new(
+            ErrorCode::LifecycleConflict,
+            "opened package directory pin is unsafe",
+        ));
+    }
+    Ok(file)
+}
+
+fn open_regular_under_pinned_tree(path: &Path) -> Result<File> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| ExtensionError::io(ErrorCode::Io, "inspect package file", &error))?;
+    if !metadata.is_file() || is_reparse_or_symlink(&metadata) {
+        return Err(ExtensionError::new(
+            ErrorCode::LifecycleConflict,
+            "package input is not a regular non-reparse file",
+        ));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| ExtensionError::io(ErrorCode::Io, "open package file", &error))?;
+    let opened = file.metadata().map_err(|error| {
+        ExtensionError::io(ErrorCode::Io, "inspect opened package file", &error)
+    })?;
+    if !opened.is_file() || is_reparse_or_symlink(&opened) || opened.len() != metadata.len() {
+        return Err(ExtensionError::new(
+            ErrorCode::LifecycleConflict,
+            "opened package file changed identity or length",
+        ));
+    }
+    Ok(file)
 }
 
 fn open_regular_no_follow(path: &Path, exclusive: bool) -> Result<File> {

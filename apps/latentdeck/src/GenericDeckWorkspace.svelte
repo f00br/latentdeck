@@ -121,6 +121,9 @@
   let viewportResizeObserver: ResizeObserver | null = null;
   let observedModels = models;
   let publishedCaptureKey = "";
+  let extensionsRefreshPending: Promise<void> | null = null;
+  let extensionsRefreshRevision = 0;
+  let extensionsAppliedRevision = 0;
 
   let codecOptions: GenericCodecOption[] = [];
   let selectedCodec: GenericCodecOption | undefined;
@@ -252,21 +255,35 @@
     void hideViewport();
   }
 
-  async function refreshExtensions(): Promise<void> {
+  function refreshExtensions(): Promise<void> {
+    extensionsRefreshRevision += 1;
+    if (extensionsRefreshPending !== null) return extensionsRefreshPending;
     matrixBusy = true;
-    try {
-      extensions = await invoke<ExtensionsSnapshot>("extensions_snapshot");
-      selectedCodecKey = retainExactSelection(
-        selectedCodecKey,
-        codecOptionsForExactDeck(model.exactKey, extensions.matrix).map(
-          (option) => option.exactKey,
-        ),
-      );
-    } catch (error) {
-      fail(error);
-    } finally {
+    const refresh = (async () => {
+      while (extensionsAppliedRevision < extensionsRefreshRevision) {
+        const revision = extensionsRefreshRevision;
+        try {
+          const next = await invoke<ExtensionsSnapshot>("extensions_snapshot");
+          extensionsAppliedRevision = revision;
+          if (revision !== extensionsRefreshRevision) continue;
+          extensions = next;
+          selectedCodecKey = retainExactSelection(
+            selectedCodecKey,
+            codecOptionsForExactDeck(model.exactKey, extensions.matrix).map(
+              (option) => option.exactKey,
+            ),
+          );
+        } catch (error) {
+          extensionsAppliedRevision = revision;
+          if (revision === extensionsRefreshRevision) fail(error);
+        }
+      }
+    })();
+    extensionsRefreshPending = refresh.finally(() => {
+      extensionsRefreshPending = null;
       matrixBusy = false;
-    }
+    });
+    return extensionsRefreshPending;
   }
 
   async function selectCodec(event: Event): Promise<void> {

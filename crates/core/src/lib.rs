@@ -5,8 +5,7 @@ pub mod deck_runtime_v2;
 pub mod deck_selection_v2;
 pub mod deck_session_v2;
 pub mod diagnostics;
-#[cfg(windows)]
-mod external_asset_v2;
+pub mod external_asset_v2;
 pub mod playback_schedule;
 pub mod player;
 pub mod player_session_v2;

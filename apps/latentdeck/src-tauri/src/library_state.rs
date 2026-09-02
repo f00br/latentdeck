@@ -3,6 +3,9 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
+#[cfg(target_os = "windows")]
+use std::collections::BTreeMap;
+
 use latentdeck_cartridge::{
     limits::ValidationLimits, manifest::parse_manifest_json,
     signal::validate_codec_neutral_signal_geometry,
@@ -16,8 +19,8 @@ use latentdeck_core::{
 };
 use latentdeck_library::{
     ALL_CARTRIDGES_ID, Availability, CartridgeKey, CartridgeRecord, CollectionId, CollectionRecord,
-    DeckSourceIdentity, FolderImportOptions, Library, LibraryError, PathState, QueryOptions,
-    ReindexDisposition, ResolvedDeckSource,
+    DeckSourceIdentity, FolderImportOptions, IndexedDeckSource, Library, LibraryError, PathState,
+    QueryOptions, ReindexDisposition, ResolvedDeckSource,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -30,6 +33,12 @@ const MAX_PRESET_SOURCE_IDENTITIES: usize = 4;
 // retain up to four exact sources that are outside that Bank. The compatibility
 // preflight must accept the same closed set the faceplate can render.
 const MAX_COMPATIBILITY_CANDIDATES: usize = UI_QUERY_LIMIT + MAX_PRESET_SOURCE_IDENTITIES;
+// Four warm sessions can each own the maximum 16 exact physical sources. Only
+// launch-selected identities enter this Windows LRU; Library eligibility never
+// pins a cartridge file. Other platforms revalidate because an open read handle
+// does not prevent same-length in-place mutation there.
+#[cfg(target_os = "windows")]
+const MAX_RETAINED_DECK_SOURCES: usize = 64;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -539,21 +548,108 @@ impl LibraryController {
         })?;
         signal_geometry_from_manifest(&record.metadata.manifest_json)
     }
+
+    fn indexed_deck_source_manifests(
+        &self,
+        identities: &[DeckSourceIdentity],
+    ) -> Result<Vec<Result<latentdeck_cartridge::manifest::ManifestV0_1, CommandError>>, CommandError>
+    {
+        Ok(self
+            .library
+            .indexed_deck_sources(identities)?
+            .into_iter()
+            .map(|indexed| {
+                indexed
+                    .map_err(CommandError::from)
+                    .and_then(|indexed| parse_indexed_deck_source_manifest(&indexed))
+            })
+            .collect())
+    }
+}
+
+fn parse_indexed_deck_source_manifest(
+    indexed: &IndexedDeckSource,
+) -> Result<latentdeck_cartridge::manifest::ManifestV0_1, CommandError> {
+    let manifest = parse_manifest_json(
+        indexed.manifest_json().as_bytes(),
+        &ValidationLimits::default(),
+    )
+    .map_err(|error| {
+        CommandError::new(
+            error.code(),
+            "Indexed cartridge metadata failed validation; reimport the cartridge.",
+        )
+    })?;
+    if manifest.cartridge_id.0 != indexed.identity().cartridge_id() {
+        return Err(CommandError::new(
+            "package_invalid",
+            "The exact indexed Deck source identity is inconsistent.",
+        ));
+    }
+    Ok(manifest)
 }
 
 pub(crate) struct AppState {
     controller: Arc<Mutex<LibraryController>>,
+    deck_sources: Arc<Mutex<DeckSourceCache>>,
 }
 
 #[derive(Clone)]
 pub(crate) struct LibraryImporter {
     controller: Arc<Mutex<LibraryController>>,
+    deck_sources: Arc<Mutex<DeckSourceCache>>,
+}
+
+#[derive(Default)]
+struct DeckSourceCache {
+    #[cfg(target_os = "windows")]
+    entries: BTreeMap<(String, String, PathBuf), DeckSourceCacheEntry>,
+    #[cfg(target_os = "windows")]
+    use_sequence: u64,
+    indexed_compatibility_checks: u64,
+    full_validations: u64,
+    cached_checkouts: u64,
+}
+
+#[cfg(target_os = "windows")]
+struct DeckSourceCacheEntry {
+    source: ResolvedDeckSource,
+    last_used: u64,
+}
+
+impl DeckSourceCache {
+    fn clear_retained(&mut self) {
+        #[cfg(target_os = "windows")]
+        self.entries.clear();
+    }
+
+    #[cfg(test)]
+    fn retained_len(&self) -> usize {
+        #[cfg(target_os = "windows")]
+        {
+            self.entries.len()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            0
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct DeckSourceCacheStats {
+    pub(crate) indexed_compatibility_checks: u64,
+    pub(crate) full_validations: u64,
+    pub(crate) cached_checkouts: u64,
+    pub(crate) retained_entries: usize,
 }
 
 impl AppState {
     pub(crate) fn new(library: Library) -> Self {
         Self {
             controller: Arc::new(Mutex::new(LibraryController::new(library))),
+            deck_sources: Arc::new(Mutex::new(DeckSourceCache::default())),
         }
     }
 
@@ -565,8 +661,94 @@ impl AppState {
         identity: DeckSourceIdentity,
     ) -> Result<ResolvedDeckSource, CommandError> {
         let controller = Arc::clone(&self.controller);
+        let deck_sources = Arc::clone(&self.deck_sources);
         tauri::async_runtime::spawn_blocking(move || {
-            lock_controller(&controller)?.resolve_deck_source(&identity)
+            // Keep this lock through the miss path. This is a deliberately
+            // small selected-source singleflight: concurrent callers for one
+            // exact LC cannot launch duplicate full-byte validation.
+            let mut cache = lock_deck_sources(&deck_sources)?;
+            #[cfg(target_os = "windows")]
+            let cached_key = cache
+                .entries
+                .keys()
+                .find(|key| {
+                    key.0 == identity.cartridge_id() && key.1 == identity.archive_sha256().as_str()
+                })
+                .cloned();
+            #[cfg(target_os = "windows")]
+            if let Some(key) = cached_key {
+                let cloned = cache
+                    .entries
+                    .get(&key)
+                    .map(|entry| entry.source.try_clone_retained());
+                match cloned {
+                    Some(Ok(resolved)) => {
+                        cache.use_sequence = cache.use_sequence.saturating_add(1);
+                        let used = cache.use_sequence;
+                        if let Some(entry) = cache.entries.get_mut(&key) {
+                            entry.last_used = used;
+                        }
+                        cache.cached_checkouts = cache.cached_checkouts.saturating_add(1);
+                        return Ok(resolved);
+                    }
+                    Some(Err(_)) => {
+                        // A failed handle clone cannot remain reusable evidence.
+                        cache.entries.remove(&key);
+                    }
+                    None => {}
+                }
+            }
+
+            cache.full_validations = cache.full_validations.saturating_add(1);
+            let resolved = lock_controller(&controller)?.resolve_deck_source(&identity)?;
+            #[cfg(target_os = "windows")]
+            if let Ok(retained) = resolved.try_clone_retained() {
+                if cache.entries.len() >= MAX_RETAINED_DECK_SOURCES
+                    && let Some(lru_key) = cache
+                        .entries
+                        .iter()
+                        .min_by_key(|(_, entry)| entry.last_used)
+                        .map(|(key, _)| key.clone())
+                {
+                    cache.entries.remove(&lru_key);
+                }
+                cache.use_sequence = cache.use_sequence.saturating_add(1);
+                let used = cache.use_sequence;
+                cache.entries.insert(
+                    deck_source_cache_key(&resolved),
+                    DeckSourceCacheEntry {
+                        source: retained,
+                        last_used: used,
+                    },
+                );
+            }
+            Ok(resolved)
+        })
+        .await
+        .map_err(|_| CommandError::task_stopped())?
+    }
+
+    /// Return immutable metadata imported into the Library for lightweight UI
+    /// compatibility display. This never opens an LC file or retains a file
+    /// handle; exact selected sources are fully validated by
+    /// [`Self::resolve_deck_source`] before launch.
+    pub(crate) async fn indexed_deck_source_manifests(
+        &self,
+        identities: Vec<DeckSourceIdentity>,
+    ) -> Result<Vec<Result<latentdeck_cartridge::manifest::ManifestV0_1, CommandError>>, CommandError>
+    {
+        let controller = Arc::clone(&self.controller);
+        let deck_sources = Arc::clone(&self.deck_sources);
+        tauri::async_runtime::spawn_blocking(move || {
+            let results = {
+                let controller = lock_controller(&controller)?;
+                controller.indexed_deck_source_manifests(&identities)?
+            };
+            let mut cache = lock_deck_sources(&deck_sources)?;
+            cache.indexed_compatibility_checks = cache
+                .indexed_compatibility_checks
+                .saturating_add(u64::try_from(identities.len()).unwrap_or(u64::MAX));
+            Ok(results)
         })
         .await
         .map_err(|_| CommandError::task_stopped())?
@@ -575,7 +757,31 @@ impl AppState {
     pub(crate) fn importer(&self) -> LibraryImporter {
         LibraryImporter {
             controller: Arc::clone(&self.controller),
+            deck_sources: Arc::clone(&self.deck_sources),
         }
+    }
+
+    fn invalidate_deck_sources(&self) -> Result<(), CommandError> {
+        lock_deck_sources(&self.deck_sources)?.clear_retained();
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn deck_source_cache_stats(&self) -> DeckSourceCacheStats {
+        self.deck_sources.lock().map_or_else(
+            |_| DeckSourceCacheStats {
+                indexed_compatibility_checks: 0,
+                full_validations: 0,
+                cached_checkouts: 0,
+                retained_entries: 0,
+            },
+            |cache| DeckSourceCacheStats {
+                indexed_compatibility_checks: cache.indexed_compatibility_checks,
+                full_validations: cache.full_validations,
+                cached_checkouts: cache.cached_checkouts,
+                retained_entries: cache.retained_len(),
+            },
+        )
     }
 }
 
@@ -588,17 +794,43 @@ impl LibraryImporter {
         path: PathBuf,
     ) -> Result<CartridgeKey, CommandError> {
         let controller = Arc::clone(&self.controller);
+        let deck_sources = Arc::clone(&self.deck_sources);
         tauri::async_runtime::spawn_blocking(move || {
             let mut controller = lock_controller(&controller)?;
-            controller
+            let result = controller
                 .library
                 .import_file(path)
                 .map(|result| result.key)
-                .map_err(Into::into)
+                .map_err(Into::into);
+            drop(controller);
+            if result.is_ok() {
+                lock_deck_sources(&deck_sources)?.clear_retained();
+            }
+            result
         })
         .await
         .map_err(|_| CommandError::task_stopped())?
     }
+}
+
+#[cfg(target_os = "windows")]
+fn deck_source_cache_key(source: &ResolvedDeckSource) -> (String, String, PathBuf) {
+    (
+        source.identity().cartridge_id().to_owned(),
+        source.identity().archive_sha256().as_str().to_owned(),
+        source.path().to_path_buf(),
+    )
+}
+
+fn lock_deck_sources(
+    cache: &Arc<Mutex<DeckSourceCache>>,
+) -> Result<MutexGuard<'_, DeckSourceCache>, CommandError> {
+    cache.lock().map_err(|_| {
+        CommandError::new(
+            "library.source_cache_poisoned",
+            "Deck source validation cache is unavailable; restart LatentDeck.",
+        )
+    })
 }
 
 fn lock_controller(
@@ -680,9 +912,16 @@ pub(crate) async fn library_import_files(
     paths: Vec<String>,
 ) -> Result<ImportSummary, CommandError> {
     let controller = Arc::clone(&state.controller);
-    tauri::async_runtime::spawn_blocking(move || lock_controller(&controller)?.import_files(paths))
-        .await
-        .map_err(|_| CommandError::task_stopped())?
+    let deck_sources = Arc::clone(&state.deck_sources);
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = lock_controller(&controller)?.import_files(paths);
+        if result.is_ok() {
+            lock_deck_sources(&deck_sources)?.clear_retained();
+        }
+        result
+    })
+    .await
+    .map_err(|_| CommandError::task_stopped())?
 }
 
 #[tauri::command]
@@ -693,8 +932,13 @@ pub(crate) async fn library_import_folder(
     recursive: bool,
 ) -> Result<ImportSummary, CommandError> {
     let controller = Arc::clone(&state.controller);
+    let deck_sources = Arc::clone(&state.deck_sources);
     tauri::async_runtime::spawn_blocking(move || {
-        lock_controller(&controller)?.import_folder(path, recursive)
+        let result = lock_controller(&controller)?.import_folder(path, recursive);
+        if result.is_ok() {
+            lock_deck_sources(&deck_sources)?.clear_retained();
+        }
+        result
     })
     .await
     .map_err(|_| CommandError::task_stopped())?
@@ -705,6 +949,7 @@ pub(crate) async fn library_import_folder(
 pub(crate) async fn library_reindex(
     state: State<'_, AppState>,
 ) -> Result<ReindexSummary, CommandError> {
+    state.invalidate_deck_sources()?;
     let controller = Arc::clone(&state.controller);
     tauri::async_runtime::spawn_blocking(move || lock_controller(&controller)?.reindex())
         .await
@@ -861,6 +1106,200 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn exact_deck_source_resolution_reuses_one_full_validation() {
+        let root = tempdir().expect("temporary library root");
+        let path = write_synthetic_lc(
+            root.path(),
+            "cached-source.lc",
+            "550e8400-e29b-41d4-a716-446655440077",
+            7,
+            2,
+            2,
+        );
+        let mut library = Library::in_memory().expect("in-memory Library");
+        let imported = library.import_file(&path).expect("import source");
+        let identity =
+            DeckSourceIdentity::new("550e8400-e29b-41d4-a716-446655440077", imported.key)
+                .expect("exact identity");
+        let state = AppState::new(library);
+
+        let indexed = state
+            .indexed_deck_source_manifests(vec![identity.clone()])
+            .await
+            .expect("indexed compatibility batch");
+        assert_eq!(indexed.len(), 1);
+        assert!(indexed[0].is_ok());
+        assert_eq!(
+            state.deck_source_cache_stats(),
+            DeckSourceCacheStats {
+                indexed_compatibility_checks: 1,
+                full_validations: 0,
+                cached_checkouts: 0,
+                retained_entries: 0,
+            }
+        );
+
+        let (first, second) = tokio::join!(
+            state.resolve_deck_source(identity.clone()),
+            state.resolve_deck_source(identity.clone()),
+        );
+        let first = first.expect("first concurrent exact resolve");
+        let second = second.expect("second concurrent exact resolve");
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            state.deck_source_cache_stats(),
+            DeckSourceCacheStats {
+                indexed_compatibility_checks: 1,
+                full_validations: 1,
+                cached_checkouts: 1,
+                retained_entries: 1,
+            }
+        );
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(
+            state.deck_source_cache_stats(),
+            DeckSourceCacheStats {
+                indexed_compatibility_checks: 1,
+                full_validations: 2,
+                cached_checkouts: 0,
+                retained_entries: 0,
+            }
+        );
+        assert_eq!(first.path(), second.path());
+        assert_eq!(
+            first.validated_cartridge().receipt(),
+            second.validated_cartridge().receipt()
+        );
+        drop(first);
+        drop(second);
+        state
+            .invalidate_deck_sources()
+            .expect("library mutation invalidates retained source cache");
+        let _revalidated = state
+            .resolve_deck_source(identity)
+            .await
+            .expect("resolve again after invalidation");
+        #[cfg(target_os = "windows")]
+        assert_eq!(state.deck_source_cache_stats().full_validations, 2);
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(state.deck_source_cache_stats().full_validations, 3);
+    }
+
+    #[tokio::test]
+    async fn q4_selected_sources_are_the_only_retained_library_entries() {
+        let root = tempdir().expect("temporary Q4 Library root");
+        let ids = [
+            "550e8400-e29b-41d4-a716-446655440081",
+            "550e8400-e29b-41d4-a716-446655440082",
+            "550e8400-e29b-41d4-a716-446655440083",
+            "550e8400-e29b-41d4-a716-446655440084",
+        ];
+        let mut library = Library::in_memory().expect("in-memory Library");
+        let identities = ids
+            .iter()
+            .enumerate()
+            .map(|(index, cartridge_id)| {
+                let path = write_synthetic_lc(
+                    root.path(),
+                    &format!("q4-source-{index}.lc"),
+                    cartridge_id,
+                    7,
+                    2,
+                    2,
+                );
+                let imported = library.import_file(path).expect("import Q4 source");
+                DeckSourceIdentity::new(*cartridge_id, imported.key).expect("exact Q4 identity")
+            })
+            .collect::<Vec<_>>();
+        let state = AppState::new(library);
+
+        let indexed = state
+            .indexed_deck_source_manifests(identities.clone())
+            .await
+            .expect("metadata-only Q4 eligibility batch");
+        assert_eq!(indexed.len(), 4);
+        assert!(indexed.iter().all(Result::is_ok));
+        assert_eq!(
+            state.deck_source_cache_stats(),
+            DeckSourceCacheStats {
+                indexed_compatibility_checks: 4,
+                full_validations: 0,
+                cached_checkouts: 0,
+                retained_entries: 0,
+            }
+        );
+
+        let mut selected = Vec::new();
+        for identity in &identities {
+            selected.push(
+                state
+                    .resolve_deck_source(identity.clone())
+                    .await
+                    .expect("full-validate one exact selected Q4 source"),
+            );
+        }
+        let mut reopened = Vec::new();
+        for identity in identities {
+            reopened.push(
+                state
+                    .resolve_deck_source(identity)
+                    .await
+                    .expect("repeat exact Q4 source checkout"),
+            );
+        }
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            state.deck_source_cache_stats(),
+            DeckSourceCacheStats {
+                indexed_compatibility_checks: 4,
+                full_validations: 4,
+                cached_checkouts: 4,
+                retained_entries: 4,
+            }
+        );
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(
+            state.deck_source_cache_stats(),
+            DeckSourceCacheStats {
+                indexed_compatibility_checks: 4,
+                full_validations: 8,
+                cached_checkouts: 0,
+                retained_entries: 0,
+            }
+        );
+        drop(selected);
+        drop(reopened);
+    }
+
+    #[tokio::test]
+    async fn indexed_eligibility_does_not_hide_strict_open_revalidation() {
+        let root = tempdir().expect("temporary stale-source root");
+        let cartridge_id = "550e8400-e29b-41d4-a716-446655440085";
+        let path = write_synthetic_lc(root.path(), "stale-after-index.lc", cartridge_id, 7, 2, 2);
+        let mut library = Library::in_memory().expect("in-memory Library");
+        let imported = library.import_file(&path).expect("import exact source");
+        let identity = DeckSourceIdentity::new(cartridge_id, imported.key).expect("exact identity");
+        let state = AppState::new(library);
+        fs::remove_file(path).expect("remove source after indexing");
+
+        let indexed = state
+            .indexed_deck_source_manifests(vec![identity.clone()])
+            .await
+            .expect("indexed eligibility remains metadata-only");
+        assert!(indexed[0].is_ok());
+        assert_eq!(state.deck_source_cache_stats().full_validations, 0);
+        assert_eq!(state.deck_source_cache_stats().retained_entries, 0);
+
+        state
+            .resolve_deck_source(identity)
+            .await
+            .expect_err("exact Open must reject the stale current bytes");
+        assert_eq!(state.deck_source_cache_stats().full_validations, 1);
+        assert_eq!(state.deck_source_cache_stats().retained_entries, 0);
+    }
 
     fn write_synthetic_lc(
         root: &Path,

@@ -86,6 +86,61 @@ fn player_boot_does_not_auto_select_a_newest_codec_pack() {
 }
 
 #[test]
+fn player_execution_boundaries_share_one_process_active_package_cache() {
+    let composition_root = include_str!("../src/main.rs");
+
+    assert!(composition_root.contains("active_packages: ActivePackageCache"));
+    assert_eq!(
+        composition_root
+            .matches("ActivePackageCache::new()")
+            .count(),
+        1,
+        "the application must construct one shared process cache"
+    );
+    for command in [
+        "player_raw_import_options",
+        "player_conversion_plan",
+        "player_conversion_start",
+        "player_select_decoder",
+        "player_select_codec_exact",
+        "player_play",
+        "player_restart",
+    ] {
+        let start = composition_root
+            .find(&format!("fn {command}("))
+            .expect("Player command exists");
+        let tail = &composition_root[start..];
+        let end = tail.find("\n#[tauri::command]").unwrap_or(tail.len());
+        assert!(
+            tail[..end].contains("state.active_packages"),
+            "{command} must use the shared process cache"
+        );
+    }
+
+    let snapshot = composition_root
+        .split("fn extension_snapshot_for(")
+        .nth(1)
+        .expect("extension snapshot helper exists")
+        .split("\n}")
+        .next()
+        .expect("extension snapshot helper closes");
+    assert!(snapshot.contains("active_packages"));
+    assert!(snapshot.contains(".runtime_inventory(roots)"));
+
+    let command = composition_root
+        .split("async fn extensions_snapshot(")
+        .nth(1)
+        .expect("Extensions snapshot command exists")
+        .split("\n#[tauri::command]")
+        .next()
+        .expect("Extensions snapshot command closes");
+    assert!(command.contains("state.active_packages.clone()"));
+    assert!(command.contains("extension_snapshot_for(&roots, &cache)"));
+    assert!(composition_root.contains(".enable_and_prime(&roots, &package)"));
+    assert!(composition_root.contains(".disable(&roots, &package)"));
+}
+
+#[test]
 fn player_loop_is_a_host_controlled_generation_reset() {
     let runtime = include_str!("../src/playback_runtime_v2.rs");
 

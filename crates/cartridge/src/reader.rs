@@ -104,6 +104,35 @@ pub struct IntegrityValidatedCartridge {
 }
 
 impl IntegrityValidatedCartridge {
+    /// Clone the retained read-only handle and reuse the immutable validation
+    /// evidence already bound to these exact bytes.
+    ///
+    /// This performs no archive, payload, finite-value, or hash scan. The
+    /// returned value owns its handle, so dropping the original does not end
+    /// the retained-file lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the operating system cannot duplicate the
+    /// retained handle.
+    pub fn try_clone_retained(&self) -> Result<Self> {
+        let file = self.file.try_clone().map_err(|error| {
+            CartridgeError::new(
+                ErrorCode::IoRead,
+                "cannot clone validated cartridge's retained handle",
+            )
+            .with_source(error)
+        })?;
+        Ok(Self {
+            file,
+            archive: self.archive.clone(),
+            manifest: self.manifest.clone(),
+            safetensors: self.safetensors.clone(),
+            receipt: self.receipt.clone(),
+            access_receipt: self.access_receipt.clone(),
+        })
+    }
+
     /// Returns the codec-neutral manifest from the retained cartridge bytes.
     #[must_use]
     pub const fn manifest(&self) -> &ManifestV0_1 {

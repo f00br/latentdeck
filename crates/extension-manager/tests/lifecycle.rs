@@ -1,20 +1,21 @@
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Barrier};
 
 use latentdeck_extension_manager::{
-    Architecture, BundledPackageEntry, BundledPackageIndex, CodecAdapterDescriptor,
-    CodecCapability, CodecCompatibility, CodecPackManifest, CodecWorkerDescriptor,
-    DeckCompatibility, DeckPackManifest, DeckRoleDescriptor, DeckRuntimeDescriptor,
-    DeckRuntimeKind, DeckSignalDescriptor, ErrorCode, ExtensionRoots, ExternalAssetDescriptor,
-    InstallRequest, IntegrityCatalog, IntegrityDescriptor, IntegrityFile, LicenseDescriptor,
-    OperatingSystem, PackRequest, PackageHealth, PackageKind, PackageReference, PlatformDescriptor,
-    ProfileKey, PublisherDescriptor, PublisherIdentityClaim, PythonConstraint,
-    PythonImplementation, RemoveOptions, RuntimeLockDescriptor, SignalGeometry, TensorDevice,
-    TensorDtype, TimingDescriptor, compatibility_matrix, disable, enable,
+    ActivePackageCache, Architecture, BundledPackageEntry, BundledPackageIndex,
+    CodecAdapterDescriptor, CodecCapability, CodecCompatibility, CodecPackManifest,
+    CodecWorkerDescriptor, CompatibilityReason, DeckCompatibility, DeckPackManifest,
+    DeckRoleDescriptor, DeckRuntimeDescriptor, DeckRuntimeKind, DeckSignalDescriptor, ErrorCode,
+    ExtensionRoots, ExternalAssetDescriptor, InstallRequest, IntegrityCatalog, IntegrityDescriptor,
+    IntegrityFile, LicenseDescriptor, OperatingSystem, PackRequest, PackageHealth, PackageKind,
+    PackageReference, PlatformDescriptor, ProfileKey, PublisherDescriptor, PublisherIdentityClaim,
+    PythonConstraint, PythonImplementation, RemoveOptions, RuntimeLockDescriptor, SignalGeometry,
+    TensorDevice, TensorDtype, TimingDescriptor, compatibility_matrix, disable, enable,
     enable_if_only_installed_version, inspect, install, install_from_bundled_index, inventory,
-    list, pack, remove, repair, repair_from_bundled_index, resolve_active, resolve_installed,
-    verify,
+    list, list_kind, pack, remove, repair, repair_from_bundled_index, resolve_active,
+    resolve_installed, verify,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -819,6 +820,941 @@ fn active_package_pins_catalogued_runtime_files_and_root_until_drop() {
 
 #[cfg(windows)]
 #[test]
+fn active_package_clone_holds_the_usage_lease_until_the_last_clone_drops() {
+    let temp = TempDir::new().expect("temp");
+    let source = temp.path().join("deck-source");
+    fs::create_dir(&source).expect("create source");
+    write_deck_source(&source, "0.2.0", 45);
+    let archive = temp.path().join("deck.ld");
+    let (hash, _) = pack_source(&source, &archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let installed = install(
+        &roots,
+        &InstallRequest {
+            archive_path: archive,
+            expected_sha256: hash,
+        },
+    )
+    .expect("install");
+    enable(&roots, &installed.inspection.package).expect("enable");
+
+    let active = resolve_active(&roots, &installed.inspection.package).expect("resolve active");
+    let last_clone = active.clone();
+    drop(active);
+
+    disable(&roots, &installed.inspection.package).expect("disable");
+    assert_eq!(
+        remove(
+            &roots,
+            &installed.inspection.package,
+            RemoveOptions::default(),
+        )
+        .expect_err("a remaining clone must retain the usage lease")
+        .code(),
+        ErrorCode::PackageActive
+    );
+
+    drop(last_clone);
+    remove(
+        &roots,
+        &installed.inspection.package,
+        RemoveOptions::default(),
+    )
+    .expect("last clone releases the usage lease");
+}
+
+#[test]
+fn process_cache_reuses_one_cold_validation_for_repeated_exact_checkouts() {
+    let temp = TempDir::new().expect("temp");
+    let source = temp.path().join("deck-source");
+    fs::create_dir(&source).expect("create source");
+    write_deck_source(&source, "0.2.0", 45);
+    let archive = temp.path().join("deck.ld");
+    let (hash, _) = pack_source(&source, &archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let installed = install(
+        &roots,
+        &InstallRequest {
+            archive_path: archive,
+            expected_sha256: hash,
+        },
+    )
+    .expect("install");
+    enable(&roots, &installed.inspection.package).expect("enable");
+    let cache = ActivePackageCache::new();
+
+    let first = cache
+        .resolve_active(&roots, &installed.inspection.package)
+        .expect("cold checkout");
+    drop(first);
+    let second = cache
+        .resolve_active(&roots, &installed.inspection.package)
+        .expect("cached checkout");
+
+    assert_eq!(second.root(), installed.destination);
+    assert_eq!(cache.stats().cold_full_hash_passes, 1);
+    assert_eq!(cache.stats().cached_checkouts, 1);
+}
+
+#[test]
+fn runtime_inventory_primes_matrix_and_runtime_boundaries_with_one_hash_per_package() {
+    let temp = TempDir::new().expect("temp");
+    let deck_source = temp.path().join("deck-source");
+    let codec_source = temp.path().join("codec-source");
+    fs::create_dir(&deck_source).expect("create Deck source");
+    fs::create_dir(&codec_source).expect("create Codec source");
+    write_deck_source(&deck_source, "0.2.0", 45);
+    write_codec_source(&codec_source, "0.2.0", profile());
+    let deck_archive = temp.path().join("deck.ld");
+    let codec_archive = temp.path().join("codec.ldcodec");
+    let (deck_hash, _) = pack_source(&deck_source, &deck_archive);
+    let (codec_hash, _) = pack_source(&codec_source, &codec_archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let deck = install(
+        &roots,
+        &InstallRequest {
+            archive_path: deck_archive,
+            expected_sha256: deck_hash,
+        },
+    )
+    .expect("install Deck");
+    let codec = install(
+        &roots,
+        &InstallRequest {
+            archive_path: codec_archive,
+            expected_sha256: codec_hash,
+        },
+    )
+    .expect("install Codec");
+    enable(&roots, &deck.inspection.package).expect("enable Deck");
+    enable(&roots, &codec.inspection.package).expect("enable Codec");
+    let cache = ActivePackageCache::new();
+
+    let matrix = cache
+        .runtime_inventory(&roots)
+        .expect("authoritative runtime inventory");
+    assert_eq!(matrix.packages.len(), 2);
+    assert_eq!(matrix.matrix.len(), 1);
+    assert_eq!(matrix.matrix[0].reason, CompatibilityReason::Compatible);
+    assert_eq!(cache.stats().cold_full_hash_passes, 2);
+
+    for package in [&deck.inspection.package, &codec.inspection.package] {
+        cache
+            .resolve_active(&roots, package)
+            .expect("runtime options checkout");
+    }
+    for package in [&deck.inspection.package, &codec.inspection.package] {
+        cache
+            .resolve_active(&roots, package)
+            .expect("open checkout");
+    }
+
+    assert_eq!(cache.stats().cold_full_hash_passes, 2);
+    assert_eq!(cache.stats().cached_checkouts, 4);
+}
+
+#[test]
+fn disabled_package_matrix_matches_runtime_untrusted_refusal() {
+    let temp = TempDir::new().expect("temp");
+    let deck_source = temp.path().join("deck-source");
+    let codec_source = temp.path().join("codec-source");
+    fs::create_dir(&deck_source).expect("create Deck source");
+    fs::create_dir(&codec_source).expect("create Codec source");
+    write_deck_source(&deck_source, "0.2.0", 45);
+    write_codec_source(&codec_source, "0.2.0", profile());
+    let deck_archive = temp.path().join("deck.ld");
+    let codec_archive = temp.path().join("codec.ldcodec");
+    let (deck_hash, _) = pack_source(&deck_source, &deck_archive);
+    let (codec_hash, _) = pack_source(&codec_source, &codec_archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let deck = install(
+        &roots,
+        &InstallRequest {
+            archive_path: deck_archive,
+            expected_sha256: deck_hash,
+        },
+    )
+    .expect("install disabled Deck");
+    let codec = install(
+        &roots,
+        &InstallRequest {
+            archive_path: codec_archive,
+            expected_sha256: codec_hash,
+        },
+    )
+    .expect("install disabled Codec");
+    let cache = ActivePackageCache::new();
+
+    let inventory = cache
+        .runtime_inventory(&roots)
+        .expect("disabled matrix inventory");
+
+    assert_eq!(inventory.matrix.len(), 1);
+    assert_eq!(inventory.matrix[0].reason, CompatibilityReason::Untrusted);
+    assert_eq!(
+        cache
+            .resolve_active(&roots, &deck.inspection.package)
+            .expect_err("disabled Deck runtime refusal")
+            .code(),
+        ErrorCode::PackageDisabled
+    );
+    assert_eq!(
+        cache
+            .resolve_active(&roots, &codec.inspection.package)
+            .expect_err("disabled Codec runtime refusal")
+            .code(),
+        ErrorCode::PackageDisabled
+    );
+}
+
+#[test]
+fn runtime_inventory_isolates_a_disabled_candidate_summary_failure() {
+    let temp = TempDir::new().expect("temp");
+    let deck_source = temp.path().join("deck-source");
+    let codec_source = temp.path().join("codec-source");
+    fs::create_dir(&deck_source).expect("create Deck source");
+    fs::create_dir(&codec_source).expect("create Codec source");
+    write_deck_source(&deck_source, "0.2.0", 45);
+    write_codec_source(&codec_source, "0.2.0", profile());
+    let deck_archive = temp.path().join("deck.ld");
+    let codec_archive = temp.path().join("codec.ldcodec");
+    let (deck_hash, _) = pack_source(&deck_source, &deck_archive);
+    let (codec_hash, _) = pack_source(&codec_source, &codec_archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let deck = install(
+        &roots,
+        &InstallRequest {
+            archive_path: deck_archive,
+            expected_sha256: deck_hash,
+        },
+    )
+    .expect("install healthy Deck");
+    let codec = install(
+        &roots,
+        &InstallRequest {
+            archive_path: codec_archive,
+            expected_sha256: codec_hash,
+        },
+    )
+    .expect("install Codec");
+    fs::write(&codec.trust_receipt_path, b"{broken receipt")
+        .expect("corrupt only one candidate receipt");
+    let cache = ActivePackageCache::new();
+
+    let inventory = cache
+        .runtime_inventory(&roots)
+        .expect("one candidate failure must not abort the snapshot");
+    assert_eq!(inventory.packages.len(), 2);
+    let deck_summary = inventory
+        .packages
+        .iter()
+        .find(|summary| summary.package == deck.inspection.package)
+        .expect("healthy Deck remains visible");
+    assert_eq!(deck_summary.health, PackageHealth::Healthy);
+    let codec_summary = inventory
+        .packages
+        .iter()
+        .find(|summary| summary.package == codec.inspection.package)
+        .expect("failed Codec is isolated as an exact summary");
+    assert_eq!(codec_summary.health, PackageHealth::Corrupt);
+    assert_eq!(inventory.matrix.len(), 1);
+    assert_eq!(
+        inventory.matrix[0].reason,
+        CompatibilityReason::PackageInvalid
+    );
+}
+
+#[test]
+fn disabled_codec_inventory_is_metadata_only_until_explicit_full_verification() {
+    let temp = TempDir::new().expect("temp");
+    let source = temp.path().join("codec-source");
+    fs::create_dir(&source).expect("create Codec source");
+    let worker = vec![0x5a; 8 * 1024 * 1024];
+    write_codec_source_with_worker(&source, "0.2.0", profile(), &worker);
+    let archive = temp.path().join("codec.ldcodec");
+    let (hash, _) = pack_source(&source, &archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let codec = install(
+        &roots,
+        &InstallRequest {
+            archive_path: archive,
+            expected_sha256: hash,
+        },
+    )
+    .expect("install disabled Codec");
+    let cache = ActivePackageCache::new();
+
+    for _ in 0..2 {
+        let inventory = cache
+            .runtime_inventory(&roots)
+            .expect("metadata-only disabled Codec inventory");
+        assert_eq!(inventory.packages.len(), 1);
+        assert!(!inventory.packages[0].enabled);
+        assert_eq!(
+            inventory.packages[0].health,
+            PackageHealth::VerificationRequired
+        );
+    }
+    assert_eq!(cache.stats().full_hash_attempts, 0);
+
+    let payload = codec.destination.join("runtime/python.exe");
+    let mut changed = fs::read(&payload).expect("read installed worker");
+    changed[0] ^= 1;
+    fs::write(&payload, changed).expect("same-length disabled payload change");
+    let metadata_snapshot = cache
+        .runtime_inventory(&roots)
+        .expect("metadata remains bounded and non-executable");
+    assert_eq!(
+        metadata_snapshot.packages[0].health,
+        PackageHealth::VerificationRequired
+    );
+    assert_eq!(cache.stats().full_hash_attempts, 0);
+    assert_eq!(
+        enable(&roots, &codec.inspection.package)
+            .expect_err("enable must hash and reject changed disabled bytes")
+            .code(),
+        ErrorCode::IntegrityFailed
+    );
+    assert_eq!(
+        verify(&roots, &codec.inspection.package)
+            .expect_err("explicit verify must hash and reject changed disabled bytes")
+            .code(),
+        ErrorCode::IntegrityFailed
+    );
+}
+
+#[test]
+fn cached_enable_primes_runtime_inventory_with_one_full_hash_pass() {
+    let temp = TempDir::new().expect("temp");
+    let source = temp.path().join("codec-source");
+    fs::create_dir(&source).expect("create Codec source");
+    write_codec_source_with_worker(&source, "0.2.0", profile(), &vec![0x5a; 8 * 1024 * 1024]);
+    let archive = temp.path().join("codec.ldcodec");
+    let (hash, _) = pack_source(&source, &archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let codec = install(
+        &roots,
+        &InstallRequest {
+            archive_path: archive,
+            expected_sha256: hash,
+        },
+    )
+    .expect("install disabled Codec");
+    let cache = ActivePackageCache::new();
+
+    let active = cache
+        .enable_and_prime(&roots, &codec.inspection.package)
+        .expect("validate, enable, and retain exact Codec in one pass");
+    assert!(active.trust_receipt().enabled);
+    assert_eq!(cache.stats().full_hash_attempts, 1);
+    assert_eq!(cache.stats().cold_full_hash_passes, 1);
+
+    let inventory = cache
+        .runtime_inventory(&roots)
+        .expect("enabled Codec snapshot reuses primed exact lease");
+    assert_eq!(inventory.packages[0].health, PackageHealth::Healthy);
+    assert!(inventory.packages[0].enabled);
+    let checkout = cache
+        .resolve_active(&roots, &codec.inspection.package)
+        .expect("runtime checkout reuses primed exact lease");
+    assert!(checkout.trust_receipt().enabled);
+    assert_eq!(cache.stats().full_hash_attempts, 1);
+    assert_eq!(cache.stats().cold_full_hash_passes, 1);
+}
+
+#[test]
+fn enable_conflict_is_rejected_before_any_payload_hash_pass() {
+    let temp = TempDir::new().expect("temp");
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let mut installed = Vec::new();
+    for version in ["0.2.0", "0.2.1"] {
+        let source = temp.path().join(format!("codec-{version}"));
+        fs::create_dir(&source).expect("create Codec source");
+        write_codec_source_with_worker(&source, version, profile(), &vec![0x5a; 2 * 1024 * 1024]);
+        let archive = temp.path().join(format!("codec-{version}.ldcodec"));
+        let (hash, _) = pack_source(&source, &archive);
+        installed.push(
+            install(
+                &roots,
+                &InstallRequest {
+                    archive_path: archive,
+                    expected_sha256: hash,
+                },
+            )
+            .expect("install side-by-side Codec"),
+        );
+    }
+    enable(&roots, &installed[0].inspection.package).expect("enable first exact version");
+    let blocked_payload = installed[1].destination.join("runtime/python.exe");
+    let mut changed = fs::read(&blocked_payload).expect("read blocked payload");
+    changed[0] ^= 1;
+    fs::write(&blocked_payload, changed).expect("change blocked payload");
+
+    let cache = ActivePackageCache::new();
+    assert_eq!(
+        cache
+            .enable_and_prime(&roots, &installed[1].inspection.package)
+            .expect_err("active alternate version must reject before payload hashing")
+            .code(),
+        ErrorCode::LifecycleConflict
+    );
+    assert_eq!(cache.stats().full_hash_attempts, 0);
+    assert_eq!(
+        enable(&roots, &installed[1].inspection.package)
+            .expect_err("public enable also rejects the known conflict first")
+            .code(),
+        ErrorCode::LifecycleConflict
+    );
+}
+
+#[test]
+fn disable_revokes_future_use_without_hashing_payload_again() {
+    let temp = TempDir::new().expect("temp");
+    let source = temp.path().join("codec-source");
+    fs::create_dir(&source).expect("create Codec source");
+    write_codec_source_with_worker(&source, "0.2.0", profile(), &vec![0x5a; 8 * 1024 * 1024]);
+    let archive = temp.path().join("codec.ldcodec");
+    let (hash, _) = pack_source(&source, &archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let codec = install(
+        &roots,
+        &InstallRequest {
+            archive_path: archive,
+            expected_sha256: hash,
+        },
+    )
+    .expect("install disabled Codec");
+    let cache = ActivePackageCache::new();
+    let live = cache
+        .enable_and_prime(&roots, &codec.inspection.package)
+        .expect("enable and prime");
+    assert_eq!(cache.stats().full_hash_attempts, 1);
+
+    let receipt = cache
+        .disable(&roots, &codec.inspection.package)
+        .expect("disable only narrows authority");
+    assert!(!receipt.enabled);
+    assert_eq!(cache.stats().full_hash_attempts, 1);
+    assert_eq!(
+        cache
+            .resolve_active(&roots, &codec.inspection.package)
+            .expect_err("future checkout observes revocation")
+            .code(),
+        ErrorCode::PackageDisabled
+    );
+    assert!(
+        live.trust_receipt().enabled,
+        "existing lease is point-in-time"
+    );
+}
+
+#[test]
+fn fast_disable_rejects_a_corrupt_exact_receipt_without_payload_hashing() {
+    let temp = TempDir::new().expect("temp");
+    let source = temp.path().join("codec-source");
+    fs::create_dir(&source).expect("create Codec source");
+    write_codec_source_with_worker(&source, "0.2.0", profile(), &[0x5a; 1024]);
+    let archive = temp.path().join("codec.ldcodec");
+    let (hash, _) = pack_source(&source, &archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let codec = install(
+        &roots,
+        &InstallRequest {
+            archive_path: archive,
+            expected_sha256: hash,
+        },
+    )
+    .expect("install disabled Codec");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&codec.trust_receipt_path).expect("read exact receipt"))
+            .expect("parse exact receipt");
+    receipt["package"]["package_version"] = serde_json::Value::String("9.9.9".to_owned());
+    fs::write(&codec.trust_receipt_path, canonical(&receipt)).expect("poison exact receipt");
+    let cache = ActivePackageCache::new();
+
+    assert_eq!(
+        cache
+            .disable(&roots, &codec.inspection.package)
+            .expect_err("corrupt receipt must fail closed")
+            .code(),
+        ErrorCode::PackageUntrusted
+    );
+    assert_eq!(cache.stats().full_hash_attempts, 0);
+}
+
+#[test]
+fn runtime_inventory_bounds_process_leases_by_entry_and_handle_budget() {
+    const PACKAGE_COUNT: usize = 17;
+    let temp = TempDir::new().expect("temp");
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    for index in 0..PACKAGE_COUNT {
+        let source = temp.path().join(format!("deck-source-{index:02}"));
+        fs::create_dir(&source).expect("create Deck source");
+        write_deck_source_with_id(&source, &format!("com.example.deck{index:02}"), "0.2.0", 45);
+        let archive = temp.path().join(format!("deck-{index:02}.ld"));
+        let (hash, _) = pack_source(&source, &archive);
+        let installed = install(
+            &roots,
+            &InstallRequest {
+                archive_path: archive,
+                expected_sha256: hash,
+            },
+        )
+        .expect("install Deck");
+        enable(&roots, &installed.inspection.package).expect("enable Deck");
+    }
+    let cache = ActivePackageCache::new();
+
+    let packages = cache
+        .runtime_list_kind(&roots, PackageKind::DeckPack)
+        .expect("bounded runtime inventory");
+    let stats = cache.stats();
+
+    assert_eq!(packages.len(), PACKAGE_COUNT);
+    assert_eq!(stats.cold_full_hash_passes, PACKAGE_COUNT as u64);
+    assert_eq!(stats.retained_entries, 16);
+    assert!(stats.retained_handles <= 16_384);
+    assert_eq!(stats.capacity_evictions, 1);
+}
+
+#[test]
+fn runtime_inventory_does_not_rehash_an_enabled_corrupt_package_for_its_summary() {
+    let temp = TempDir::new().expect("temp");
+    let deck_source = temp.path().join("deck-source");
+    let codec_source = temp.path().join("codec-source");
+    fs::create_dir(&deck_source).expect("create Deck source");
+    fs::create_dir(&codec_source).expect("create Codec source");
+    write_deck_source(&deck_source, "0.2.0", 45);
+    write_codec_source(&codec_source, "0.2.0", profile());
+    let deck_archive = temp.path().join("deck.ld");
+    let codec_archive = temp.path().join("codec.ldcodec");
+    let (deck_hash, _) = pack_source(&deck_source, &deck_archive);
+    let (codec_hash, _) = pack_source(&codec_source, &codec_archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let deck = install(
+        &roots,
+        &InstallRequest {
+            archive_path: deck_archive,
+            expected_sha256: deck_hash,
+        },
+    )
+    .expect("install Deck");
+    let codec = install(
+        &roots,
+        &InstallRequest {
+            archive_path: codec_archive,
+            expected_sha256: codec_hash,
+        },
+    )
+    .expect("install Codec");
+    enable(&roots, &deck.inspection.package).expect("enable Deck");
+    enable(&roots, &codec.inspection.package).expect("enable Codec");
+    let payload = deck.destination.join("python/deck_operator.py");
+    let mut bytes = fs::read(&payload).expect("read installed payload");
+    bytes[0] ^= 1;
+    fs::write(&payload, bytes).expect("tamper installed payload");
+    let cache = ActivePackageCache::new();
+
+    let inventory = cache
+        .runtime_inventory(&roots)
+        .expect("corrupt package is isolated");
+    let stats = cache.stats();
+
+    assert_eq!(inventory.packages.len(), 2);
+    let corrupt = inventory
+        .packages
+        .iter()
+        .find(|summary| summary.package == deck.inspection.package)
+        .expect("corrupt Deck summary");
+    assert_eq!(corrupt.health, PackageHealth::Corrupt);
+    assert_eq!(
+        corrupt.error_code.as_deref(),
+        Some(ErrorCode::IntegrityFailed.as_str())
+    );
+    assert_eq!(inventory.matrix.len(), 1);
+    assert_eq!(
+        inventory.matrix[0].reason,
+        CompatibilityReason::PackageInvalid
+    );
+    assert_eq!(stats.full_hash_attempts, 2);
+    assert_eq!(stats.cold_full_hash_passes, 1);
+}
+
+#[test]
+fn process_cache_rejects_a_disabled_receipt_before_cached_checkout() {
+    let temp = TempDir::new().expect("temp");
+    let source = temp.path().join("deck-source");
+    fs::create_dir(&source).expect("create source");
+    write_deck_source(&source, "0.2.0", 45);
+    let archive = temp.path().join("deck.ld");
+    let (hash, _) = pack_source(&source, &archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let installed = install(
+        &roots,
+        &InstallRequest {
+            archive_path: archive,
+            expected_sha256: hash,
+        },
+    )
+    .expect("install");
+    enable(&roots, &installed.inspection.package).expect("enable");
+    let cache = ActivePackageCache::new();
+    cache
+        .resolve_active(&roots, &installed.inspection.package)
+        .expect("prime cache");
+
+    disable(&roots, &installed.inspection.package).expect("disable receipt");
+
+    assert_eq!(
+        cache
+            .resolve_active(&roots, &installed.inspection.package)
+            .expect_err("disabled receipt must revoke future cached checkouts")
+            .code(),
+        ErrorCode::PackageDisabled
+    );
+}
+
+#[test]
+fn process_cache_rejects_an_added_child_before_cached_checkout() {
+    let temp = TempDir::new().expect("temp");
+    let source = temp.path().join("deck-source");
+    fs::create_dir(&source).expect("create source");
+    write_deck_source(&source, "0.2.0", 45);
+    let archive = temp.path().join("deck.ld");
+    let (hash, _) = pack_source(&source, &archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let installed = install(
+        &roots,
+        &InstallRequest {
+            archive_path: archive,
+            expected_sha256: hash,
+        },
+    )
+    .expect("install");
+    enable(&roots, &installed.inspection.package).expect("enable");
+    let cache = ActivePackageCache::new();
+    cache
+        .resolve_active(&roots, &installed.inspection.package)
+        .expect("prime cache");
+
+    fs::write(
+        installed.destination.join("unexpected.txt"),
+        b"uncatalogued",
+    )
+    .expect("add uncatalogued child");
+
+    assert_eq!(
+        cache
+            .resolve_active(&roots, &installed.inspection.package)
+            .expect_err("closed-tree scan must reject an added child")
+            .code(),
+        ErrorCode::IntegrityFailed
+    );
+}
+
+#[test]
+fn process_cache_rejects_a_changed_exact_receipt_before_cached_checkout() {
+    let temp = TempDir::new().expect("temp");
+    let source = temp.path().join("deck-source");
+    fs::create_dir(&source).expect("create source");
+    write_deck_source(&source, "0.2.0", 45);
+    let archive = temp.path().join("deck.ld");
+    let (hash, _) = pack_source(&source, &archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let installed = install(
+        &roots,
+        &InstallRequest {
+            archive_path: archive,
+            expected_sha256: hash,
+        },
+    )
+    .expect("install");
+    enable(&roots, &installed.inspection.package).expect("enable");
+    let cache = ActivePackageCache::new();
+    cache
+        .resolve_active(&roots, &installed.inspection.package)
+        .expect("prime cache");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&installed.trust_receipt_path).expect("read receipt"))
+            .expect("parse receipt");
+    receipt["manifest_sha256"] = serde_json::Value::String("a".repeat(64));
+    fs::write(&installed.trust_receipt_path, canonical(&receipt)).expect("change receipt");
+
+    assert_eq!(
+        cache
+            .resolve_active(&roots, &installed.inspection.package)
+            .expect_err("changed exact receipt must revoke cached checkout")
+            .code(),
+        ErrorCode::PackageUntrusted
+    );
+}
+
+#[test]
+fn process_cache_singleflights_concurrent_cold_checkouts_per_exact_package() {
+    const CALLERS: usize = 8;
+    let temp = TempDir::new().expect("temp");
+    let source = temp.path().join("codec-source");
+    fs::create_dir(&source).expect("create source");
+    let worker = vec![0x5a; 8 * 1024 * 1024];
+    write_codec_source_with_worker(&source, "0.2.0", profile(), &worker);
+    let archive = temp.path().join("codec.ldcodec");
+    let (hash, _) = pack_source(&source, &archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let installed = install(
+        &roots,
+        &InstallRequest {
+            archive_path: archive,
+            expected_sha256: hash,
+        },
+    )
+    .expect("install");
+    enable(&roots, &installed.inspection.package).expect("enable");
+    let cache = Arc::new(ActivePackageCache::new());
+    let barrier = Arc::new(Barrier::new(CALLERS));
+    let mut callers = Vec::new();
+    for _ in 0..CALLERS {
+        let cache = Arc::clone(&cache);
+        let barrier = Arc::clone(&barrier);
+        let roots = roots.clone();
+        let package = installed.inspection.package.clone();
+        callers.push(std::thread::spawn(move || {
+            barrier.wait();
+            cache.resolve_active(&roots, &package)
+        }));
+    }
+
+    for caller in callers {
+        caller
+            .join()
+            .expect("checkout thread")
+            .expect("singleflight caller succeeds");
+    }
+    assert_eq!(cache.stats().cold_full_hash_passes, 1);
+    assert_eq!(cache.stats().cached_checkouts, (CALLERS - 1) as u64);
+}
+
+#[test]
+fn kind_filtered_list_does_not_inspect_a_poisoned_other_kind_root() {
+    let temp = TempDir::new().expect("temp");
+    let source = temp.path().join("deck-source");
+    fs::create_dir(&source).expect("create source");
+    write_deck_source(&source, "0.2.0", 45);
+    let archive = temp.path().join("deck.ld");
+    let (hash, _) = pack_source(&source, &archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let installed = install(
+        &roots,
+        &InstallRequest {
+            archive_path: archive,
+            expected_sha256: hash,
+        },
+    )
+    .expect("install");
+    fs::remove_dir(&roots.codec_packs_root).expect("remove empty other-kind root");
+    fs::write(&roots.codec_packs_root, b"poisoned other kind").expect("poison other-kind root");
+
+    let decks = list_kind(&roots, PackageKind::DeckPack).expect("list only Deck packages");
+
+    assert_eq!(decks.len(), 1);
+    assert_eq!(decks[0].package, installed.inspection.package);
+}
+
+#[test]
+fn cache_owned_lease_blocks_remove_and_repair_until_exact_invalidation() {
+    let temp = TempDir::new().expect("temp");
+    let source = temp.path().join("deck-source");
+    fs::create_dir(&source).expect("create source");
+    write_deck_source(&source, "0.2.0", 45);
+    let archive = temp.path().join("deck.ld");
+    let (hash, _) = pack_source(&source, &archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let installed = install(
+        &roots,
+        &InstallRequest {
+            archive_path: archive.clone(),
+            expected_sha256: hash.clone(),
+        },
+    )
+    .expect("install");
+    enable(&roots, &installed.inspection.package).expect("enable");
+    let cache = ActivePackageCache::new();
+    cache
+        .resolve_active(&roots, &installed.inspection.package)
+        .expect("prime cache");
+    disable(&roots, &installed.inspection.package).expect("disable");
+
+    assert_eq!(
+        remove(
+            &roots,
+            &installed.inspection.package,
+            RemoveOptions::default(),
+        )
+        .expect_err("cache-owned lease blocks removal")
+        .code(),
+        ErrorCode::PackageActive
+    );
+    assert_eq!(
+        repair(
+            &roots,
+            &InstallRequest {
+                archive_path: archive.clone(),
+                expected_sha256: hash.clone(),
+            },
+        )
+        .expect_err("cache-owned lease blocks repair")
+        .code(),
+        ErrorCode::PackageActive
+    );
+
+    assert!(cache.invalidate_exact(&roots, &installed.inspection.package));
+    repair(
+        &roots,
+        &InstallRequest {
+            archive_path: archive,
+            expected_sha256: hash,
+        },
+    )
+    .expect("repair after exact cache invalidation");
+    remove(
+        &roots,
+        &installed.inspection.package,
+        RemoveOptions::default(),
+    )
+    .expect("remove after exact cache invalidation");
+}
+
+#[test]
+fn explicit_verify_remains_independent_of_the_process_cache() {
+    let temp = TempDir::new().expect("temp");
+    let source = temp.path().join("deck-source");
+    fs::create_dir(&source).expect("create source");
+    write_deck_source(&source, "0.2.0", 45);
+    let archive = temp.path().join("deck.ld");
+    let (hash, _) = pack_source(&source, &archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let installed = install(
+        &roots,
+        &InstallRequest {
+            archive_path: archive,
+            expected_sha256: hash,
+        },
+    )
+    .expect("install");
+    enable(&roots, &installed.inspection.package).expect("enable");
+    let cache = ActivePackageCache::new();
+    cache
+        .resolve_active(&roots, &installed.inspection.package)
+        .expect("prime cache");
+    fs::write(
+        installed.destination.join("unexpected.txt"),
+        b"uncatalogued",
+    )
+    .expect("add uncatalogued child");
+
+    assert_eq!(
+        verify(&roots, &installed.inspection.package)
+            .expect_err("explicit verify must independently inspect the complete tree")
+            .code(),
+        ErrorCode::IntegrityFailed
+    );
+    assert_eq!(cache.stats().cold_full_hash_passes, 1);
+    assert_eq!(cache.stats().cached_checkouts, 0);
+}
+
+#[test]
+#[ignore = "requires an explicitly supplied installed package for local performance evidence"]
+fn installed_package_cache_timing_from_environment() {
+    let local_app_data =
+        std::env::var_os("LATENTDECK_PERF_LOCAL_APP_DATA").expect("LATENTDECK_PERF_LOCAL_APP_DATA");
+    let package = PackageReference {
+        kind: PackageKind::CodecPack,
+        package_id: std::env::var("LATENTDECK_PERF_CODEC_ID").expect("LATENTDECK_PERF_CODEC_ID"),
+        package_version: std::env::var("LATENTDECK_PERF_CODEC_VERSION")
+            .expect("LATENTDECK_PERF_CODEC_VERSION"),
+    };
+    let roots = ExtensionRoots::from_local_app_data(local_app_data);
+    let cache = ActivePackageCache::new();
+
+    let cold_started = std::time::Instant::now();
+    let cold = cache
+        .resolve_active(&roots, &package)
+        .expect("cold active checkout");
+    let cold_elapsed = cold_started.elapsed();
+    let cached_started = std::time::Instant::now();
+    let cached = cache
+        .resolve_active(&roots, &package)
+        .expect("cached active checkout");
+    let cached_elapsed = cached_started.elapsed();
+
+    assert_eq!(cold.root(), cached.root());
+    assert_eq!(cache.stats().cold_full_hash_passes, 1);
+    assert_eq!(cache.stats().cached_checkouts, 1);
+    eprintln!(
+        "cold_seconds={:.6} cached_seconds={:.6}",
+        cold_elapsed.as_secs_f64(),
+        cached_elapsed.as_secs_f64()
+    );
+}
+
+#[test]
+#[ignore = "requires an explicitly supplied installed package for local performance evidence"]
+fn installed_runtime_inventory_primes_selected_package_from_environment() {
+    let local_app_data =
+        std::env::var_os("LATENTDECK_PERF_LOCAL_APP_DATA").expect("LATENTDECK_PERF_LOCAL_APP_DATA");
+    let package = PackageReference {
+        kind: PackageKind::CodecPack,
+        package_id: std::env::var("LATENTDECK_PERF_CODEC_ID").expect("LATENTDECK_PERF_CODEC_ID"),
+        package_version: std::env::var("LATENTDECK_PERF_CODEC_VERSION")
+            .expect("LATENTDECK_PERF_CODEC_VERSION"),
+    };
+    let roots = ExtensionRoots::from_local_app_data(local_app_data);
+    let cache = ActivePackageCache::new();
+
+    let inventory_started = std::time::Instant::now();
+    let inventory = cache
+        .runtime_inventory(&roots)
+        .expect("authoritative runtime inventory");
+    let inventory_elapsed = inventory_started.elapsed();
+    assert!(
+        inventory
+            .packages
+            .iter()
+            .any(|summary| summary.package == package && summary.enabled)
+    );
+    let after_inventory = cache.stats();
+    let checkout_started = std::time::Instant::now();
+    cache
+        .resolve_active(&roots, &package)
+        .expect("selected package cached checkout");
+    let checkout_elapsed = checkout_started.elapsed();
+    let after_checkout = cache.stats();
+
+    #[cfg(windows)]
+    {
+        assert_eq!(
+            after_checkout.cold_full_hash_passes,
+            after_inventory.cold_full_hash_passes
+        );
+        assert_eq!(
+            after_checkout.full_hash_attempts,
+            after_inventory.full_hash_attempts
+        );
+        assert_eq!(
+            after_checkout.cached_checkouts,
+            after_inventory.cached_checkouts + 1
+        );
+    }
+    eprintln!(
+        "inventory_seconds={:.6} selected_checkout_seconds={:.6} full_hash_attempts={} successful_full_hash_passes={}",
+        inventory_elapsed.as_secs_f64(),
+        checkout_elapsed.as_secs_f64(),
+        after_checkout.full_hash_attempts,
+        after_checkout.cold_full_hash_passes
+    );
+}
+
+#[cfg(windows)]
+#[test]
 fn active_codec_worker_path_remains_executable_while_pinned() {
     let temp = TempDir::new().expect("temp");
     let source = temp.path().join("codec-source");
@@ -1402,6 +2338,11 @@ fn compatibility_matrix_resolves_profile_identity_without_assuming_one_fixed_ext
             profile_version: "0.1.0".to_owned(),
         },
     );
+    rewrite_codec_identities(
+        &incompatible_codec_source,
+        "com.example.codec.other",
+        "com.example.adapter.other",
+    );
     let deck_archive = temp.path().join("deck.ld");
     let codec_archive = temp.path().join("codec.ldcodec");
     let incompatible_codec_archive = temp.path().join("codec-incompatible.ldcodec");
@@ -1410,7 +2351,7 @@ fn compatibility_matrix_resolves_profile_identity_without_assuming_one_fixed_ext
     let (incompatible_codec_hash, _) =
         pack_source(&incompatible_codec_source, &incompatible_codec_archive);
     let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
-    install(
+    let deck = install(
         &roots,
         &InstallRequest {
             archive_path: deck_archive,
@@ -1418,7 +2359,7 @@ fn compatibility_matrix_resolves_profile_identity_without_assuming_one_fixed_ext
         },
     )
     .unwrap();
-    install(
+    let codec = install(
         &roots,
         &InstallRequest {
             archive_path: codec_archive,
@@ -1426,7 +2367,7 @@ fn compatibility_matrix_resolves_profile_identity_without_assuming_one_fixed_ext
         },
     )
     .unwrap();
-    install(
+    let incompatible_codec = install(
         &roots,
         &InstallRequest {
             archive_path: incompatible_codec_archive,
@@ -1434,6 +2375,9 @@ fn compatibility_matrix_resolves_profile_identity_without_assuming_one_fixed_ext
         },
     )
     .unwrap();
+    enable(&roots, &deck.inspection.package).unwrap();
+    enable(&roots, &codec.inspection.package).unwrap();
+    enable(&roots, &incompatible_codec.inspection.package).unwrap();
     let inventory = inventory(&roots).unwrap();
     assert_eq!(inventory.packages.len(), 3);
     assert_eq!(inventory.packages, list(&roots).unwrap());
@@ -1477,10 +2421,12 @@ fn inventory_preserves_untrusted_and_corrupt_matrix_precedence() {
         .unwrap()
     };
 
-    let _healthy_deck = install_fixture("deck", "0.2.0");
+    let healthy_deck = install_fixture("deck", "0.2.0");
     let corrupt_deck = install_fixture("deck", "0.2.1");
-    let _healthy_codec = install_fixture("codec", "0.2.0");
+    let healthy_codec = install_fixture("codec", "0.2.0");
     let untrusted_codec = install_fixture("codec", "0.2.1");
+    enable(&roots, &healthy_deck.inspection.package).unwrap();
+    enable(&roots, &healthy_codec.inspection.package).unwrap();
     fs::write(
         corrupt_deck.destination.join("python/deck_operator.py"),
         b"tampered after install",

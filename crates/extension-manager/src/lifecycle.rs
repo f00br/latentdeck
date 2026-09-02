@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::archive::{
     PreparedPackage, ensure_existing_tree_safe, extract_prepared, is_reparse_or_symlink,
-    prepare_archive, validate_directory,
+    prepare_archive, validate_contract, validate_directory, validate_directory_snapshot,
 };
 use crate::error::{ErrorCode, ExtensionError, Result};
 use crate::model::{
@@ -24,7 +24,8 @@ use crate::model::{
 };
 use crate::schema::{
     MAX_JSON_BYTES, TRUST_RECEIPT_VERSION, canonical_json, is_reserved_package_id,
-    parse_strict_json, validate_bundled_index, validate_package_reference, validate_sha256,
+    parse_integrity_catalog, parse_manifest, parse_strict_json, validate_bundled_index,
+    validate_package_reference, validate_sha256,
 };
 
 const MAX_PACKAGES_PER_KIND: usize = 256;
@@ -362,13 +363,82 @@ pub fn resolve_active(
     roots: &ExtensionRoots,
     package: &PackageReference,
 ) -> Result<ActiveInstalledPackage> {
+    resolve_active_impl(roots, package, None)
+}
+
+pub(crate) fn resolve_active_counted(
+    roots: &ExtensionRoots,
+    package: &PackageReference,
+    full_hash_attempts: &std::sync::atomic::AtomicU64,
+) -> Result<ActiveInstalledPackage> {
+    resolve_active_impl(roots, package, Some(full_hash_attempts))
+}
+
+pub(crate) fn enable_active_counted(
+    roots: &ExtensionRoots,
+    package: &PackageReference,
+    full_hash_attempts: &std::sync::atomic::AtomicU64,
+) -> Result<ActiveInstalledPackage> {
     validate_package_reference(package)?;
     validate_roots(roots)?;
     prepare_base(roots)?;
     let _lock = acquire_lock(roots)?;
     prepare_locked_roots(roots)?;
     let destination = package_destination(roots, package);
-    let (receipt, validated) = verify_installed_tree_locked(roots, package, &destination)?;
+    if !path_exists(&destination, "installed package")? {
+        return Err(ExtensionError::new(
+            ErrorCode::PackageMissing,
+            "exact package version is not installed",
+        ));
+    }
+    let receipt_path = trust_receipt_path(roots, package);
+    let mut receipt = read_trust_receipt(&receipt_path)?;
+    validate_exact_receipt(&receipt, package)?;
+    ensure_no_other_enabled_version(roots, package, &receipt_path)?;
+
+    let usage_lock = open_usage_lock(roots, package)?;
+    FileExt::try_lock_shared(&usage_lock).map_err(|error| {
+        ExtensionError::io(
+            ErrorCode::LifecycleConflict,
+            "acquire package usage lease",
+            &error,
+        )
+    })?;
+    full_hash_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (validated, retained_tree_handles) =
+        pin_and_validate_package_tree(roots, &destination, package.kind)?;
+    validate_hash_bound_receipt(&validated, &receipt, package)?;
+
+    receipt.enabled = true;
+    write_receipt_replace(&receipt_path, &receipt)?;
+    Ok(ActiveInstalledPackage::new(
+        ValidatedInstalledPackage::new(destination, validated.manifest, receipt),
+        validated.files,
+        1,
+        usage_lock,
+        retained_tree_handles,
+    ))
+}
+
+fn resolve_active_impl(
+    roots: &ExtensionRoots,
+    package: &PackageReference,
+    full_hash_attempts: Option<&std::sync::atomic::AtomicU64>,
+) -> Result<ActiveInstalledPackage> {
+    validate_package_reference(package)?;
+    validate_roots(roots)?;
+    prepare_base(roots)?;
+    let _lock = acquire_lock(roots)?;
+    prepare_locked_roots(roots)?;
+    let destination = package_destination(roots, package);
+    if !path_exists(&destination, "installed package")? {
+        return Err(ExtensionError::new(
+            ErrorCode::PackageMissing,
+            "exact package version is not installed",
+        ));
+    }
+    let receipt = read_trust_receipt(&trust_receipt_path(roots, package))?;
+    validate_exact_receipt(&receipt, package)?;
     if !receipt.enabled {
         return Err(ExtensionError::new(
             ErrorCode::PackageDisabled,
@@ -383,80 +453,438 @@ pub fn resolve_active(
             &error,
         )
     })?;
-    let retained_tree_handles = pin_validated_package_tree(roots, &destination, &validated.files)?;
+    if let Some(full_hash_attempts) = full_hash_attempts {
+        full_hash_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    let (validated, retained_tree_handles) =
+        pin_and_validate_package_tree(roots, &destination, package.kind)?;
+    validate_hash_bound_receipt(&validated, &receipt, package)?;
     Ok(ActiveInstalledPackage::new(
         ValidatedInstalledPackage::new(destination, validated.manifest, receipt),
+        validated.files,
+        1,
         usage_lock,
         retained_tree_handles,
     ))
 }
 
-fn pin_validated_package_tree(
+fn pin_and_validate_package_tree(
     roots: &ExtensionRoots,
     destination: &Path,
-    files: &BTreeMap<String, crate::archive::FileMeasurement>,
-) -> Result<Vec<File>> {
-    let mut directory_paths = BTreeSet::new();
-    directory_paths.insert(roots.base_root.clone());
-    directory_paths.insert(
-        destination
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| {
-                ExtensionError::new(
-                    ErrorCode::LifecycleConflict,
-                    "installed package has no kind root",
-                )
-            })?
-            .to_path_buf(),
-    );
-    directory_paths.insert(
-        destination
-            .parent()
-            .ok_or_else(|| {
-                ExtensionError::new(
-                    ErrorCode::LifecycleConflict,
-                    "installed package has no identity root",
-                )
-            })?
-            .to_path_buf(),
-    );
-    directory_paths.insert(destination.to_path_buf());
-    for relative in files.keys() {
-        let mut parent = PathBuf::new();
-        let component_count = relative.split('/').count();
-        for component in relative.split('/').take(component_count.saturating_sub(1)) {
-            parent.push(component);
-            directory_paths.insert(destination.join(&parent));
-        }
+    kind: PackageKind,
+) -> Result<(crate::archive::ValidatedDirectory, Vec<File>)> {
+    let mut retained = pin_package_root_directories(roots, destination)?;
+    let (manifest_measurement, manifest_bytes, manifest_file) =
+        open_and_measure_control_file(destination, kind.manifest_name())?;
+    let manifest = parse_manifest(kind, &manifest_bytes)?;
+    let (catalog_measurement, catalog_bytes, catalog_file) =
+        open_and_measure_control_file(destination, "integrity.json")?;
+    if catalog_measurement.sha256 != manifest.integrity().catalog_sha256 {
+        return Err(ExtensionError::new(
+            ErrorCode::IntegrityFailed,
+            "integrity.json hash does not match the control manifest",
+        ));
     }
-    let mut directory_paths: Vec<_> = directory_paths.into_iter().collect();
-    directory_paths.sort_by(|left, right| {
+    let catalog = parse_integrity_catalog(&catalog_bytes, kind)?;
+
+    let mut expected_files = BTreeMap::from([
+        (
+            kind.manifest_name().to_owned(),
+            manifest_measurement.clone(),
+        ),
+        ("integrity.json".to_owned(), catalog_measurement.clone()),
+    ]);
+    for described in &catalog.files {
+        expected_files.insert(
+            described.path.clone(),
+            crate::archive::FileMeasurement {
+                path: described.path.clone(),
+                byte_length: described.byte_length,
+                sha256: described.sha256.clone(),
+            },
+        );
+    }
+    validate_directory_snapshot(destination, kind, &expected_files)?;
+    retained.extend(pin_package_subdirectories(
+        destination,
+        expected_files.keys(),
+    )?);
+
+    let mut jobs = Vec::with_capacity(catalog.files.len());
+    for (index, described) in catalog.files.into_iter().enumerate() {
+        let path = path_from_portable(destination, &described.path);
+        let file = open_pinned_file_under_pinned_tree(&path)?;
+        jobs.push(PinnedHashJob {
+            index,
+            expected: crate::archive::FileMeasurement {
+                path: described.path,
+                byte_length: described.byte_length,
+                sha256: described.sha256,
+            },
+            keep_bytes: kind == PackageKind::DeckPack,
+            file,
+        });
+    }
+    let measured_payloads = hash_pinned_jobs(jobs)?;
+    let mut files = BTreeMap::from([
+        (kind.manifest_name().to_owned(), manifest_measurement),
+        ("integrity.json".to_owned(), catalog_measurement),
+    ]);
+    let mut contents = BTreeMap::from([
+        (kind.manifest_name().to_owned(), manifest_bytes),
+        ("integrity.json".to_owned(), catalog_bytes),
+    ]);
+    for payload in measured_payloads {
+        if let Some(bytes) = payload.bytes {
+            contents.insert(payload.measurement.path.clone(), bytes);
+        }
+        files.insert(payload.measurement.path.clone(), payload.measurement);
+        retained.push(payload.file);
+    }
+    retained.push(manifest_file);
+    retained.push(catalog_file);
+
+    let explicit_directories = implied_directories(files.keys());
+    let validated = validate_contract(kind, &files, &explicit_directories, &contents)?;
+    if validated.manifest != manifest {
+        return Err(ExtensionError::new(
+            ErrorCode::IntegrityFailed,
+            "measured package manifest changed during active validation",
+        ));
+    }
+    validate_directory_snapshot(destination, kind, &validated.files)?;
+    Ok((validated, retained))
+}
+
+fn pin_package_root_directories(roots: &ExtensionRoots, destination: &Path) -> Result<Vec<File>> {
+    let kind_root = destination.parent().and_then(Path::parent).ok_or_else(|| {
+        ExtensionError::new(
+            ErrorCode::LifecycleConflict,
+            "installed package has no kind root",
+        )
+    })?;
+    let identity_root = destination.parent().ok_or_else(|| {
+        ExtensionError::new(
+            ErrorCode::LifecycleConflict,
+            "installed package has no identity root",
+        )
+    })?;
+    [
+        roots.base_root.as_path(),
+        kind_root,
+        identity_root,
+        destination,
+    ]
+    .into_iter()
+    .map(open_pinned_directory)
+    .collect()
+}
+
+fn pin_package_subdirectories<'a>(
+    destination: &Path,
+    paths: impl Iterator<Item = &'a String>,
+) -> Result<Vec<File>> {
+    let directories = implied_directories(paths);
+    let mut directories: Vec<_> = directories
+        .into_iter()
+        .map(|relative| path_from_portable(destination, &relative))
+        .collect();
+    directories.sort_by(|left, right| {
         left.components()
             .count()
             .cmp(&right.components().count())
             .then_with(|| left.cmp(right))
     });
+    directories
+        .into_iter()
+        .map(|path| open_pinned_directory_under_pinned_tree(&path))
+        .collect()
+}
 
-    let mut retained = Vec::with_capacity(directory_paths.len().saturating_add(files.len()));
-    for directory in directory_paths {
-        retained.push(open_pinned_directory(&directory)?);
+fn implied_directories<'a>(paths: impl Iterator<Item = &'a String>) -> BTreeSet<String> {
+    let mut directories = BTreeSet::new();
+    for path in paths {
+        let mut current = path.as_str();
+        while let Some((parent, _)) = current.rsplit_once('/') {
+            directories.insert(parent.to_owned());
+            current = parent;
+        }
     }
-    for measurement in files.values() {
-        let path = measurement
-            .path
-            .split('/')
-            .fold(destination.to_path_buf(), |path, component| {
-                path.join(component)
-            });
-        let mut file = open_pinned_file(&path)?;
-        verify_pinned_file(&mut file, measurement)?;
-        retained.push(file);
+    directories
+}
+
+fn path_from_portable(root: &Path, relative: &str) -> PathBuf {
+    relative
+        .split('/')
+        .fold(root.to_path_buf(), |path, component| path.join(component))
+}
+
+fn open_and_measure_control_file(
+    destination: &Path,
+    relative: &str,
+) -> Result<(crate::archive::FileMeasurement, Vec<u8>, File)> {
+    let path = path_from_portable(destination, relative);
+    let mut file = open_pinned_file(&path)?;
+    let length = file
+        .metadata()
+        .map_err(|error| {
+            ExtensionError::io(
+                ErrorCode::IntegrityFailed,
+                "inspect package control file",
+                &error,
+            )
+        })?
+        .len();
+    if length > MAX_JSON_BYTES as u64 {
+        return Err(ExtensionError::new(
+            ErrorCode::ManifestInvalid,
+            "package control JSON exceeds the 1 MiB bound",
+        ));
     }
-    Ok(retained)
+    let mut buffer = vec![0_u8; 1024 * 1024].into_boxed_slice();
+    let (measurement, bytes) = measure_pinned_file(&mut file, relative, length, true, &mut buffer)?;
+    let bytes = bytes.ok_or_else(|| {
+        ExtensionError::new(
+            ErrorCode::IntegrityFailed,
+            "bounded package control bytes are unavailable",
+        )
+    })?;
+    Ok((measurement, bytes, file))
+}
+
+struct PinnedHashJob {
+    index: usize,
+    expected: crate::archive::FileMeasurement,
+    keep_bytes: bool,
+    file: File,
+}
+
+#[derive(Debug)]
+struct PinnedHashResult {
+    index: usize,
+    measurement: crate::archive::FileMeasurement,
+    bytes: Option<Vec<u8>>,
+    file: File,
+}
+
+fn hash_pinned_jobs(mut jobs: Vec<PinnedHashJob>) -> Result<Vec<PinnedHashResult>> {
+    const MAX_WORKERS: usize = 4;
+    if jobs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let worker_count = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(MAX_WORKERS)
+        .min(jobs.len());
+    jobs.sort_by(|left, right| {
+        right
+            .expected
+            .byte_length
+            .cmp(&left.expected.byte_length)
+            .then_with(|| left.expected.path.cmp(&right.expected.path))
+    });
+    let mut buckets: Vec<Vec<PinnedHashJob>> = (0..worker_count).map(|_| Vec::new()).collect();
+    let mut bucket_bytes = vec![0_u64; worker_count];
+    for job in jobs {
+        let bucket = bucket_bytes
+            .iter()
+            .enumerate()
+            .min_by_key(|(index, bytes)| (**bytes, *index))
+            .map_or(0, |(index, _)| index);
+        bucket_bytes[bucket] = bucket_bytes[bucket].saturating_add(job.expected.byte_length);
+        buckets[bucket].push(job);
+    }
+
+    let workers: Vec<_> = buckets
+        .into_iter()
+        .map(|bucket| {
+            std::thread::spawn(move || -> Result<Vec<PinnedHashResult>> {
+                let mut buffer = vec![0_u8; 1024 * 1024].into_boxed_slice();
+                bucket
+                    .into_iter()
+                    .map(|mut job| {
+                        let (measurement, bytes) = measure_pinned_file(
+                            &mut job.file,
+                            &job.expected.path,
+                            job.expected.byte_length,
+                            job.keep_bytes,
+                            &mut buffer,
+                        )?;
+                        if measurement.sha256 != job.expected.sha256 {
+                            return Err(ExtensionError::new(
+                                ErrorCode::IntegrityFailed,
+                                format!(
+                                    "catalogued file bytes changed before pin: {}",
+                                    job.expected.path
+                                ),
+                            ));
+                        }
+                        Ok(PinnedHashResult {
+                            index: job.index,
+                            measurement,
+                            bytes,
+                            file: job.file,
+                        })
+                    })
+                    .collect()
+            })
+        })
+        .collect();
+    let mut results = Vec::new();
+    let mut first_error = None;
+    for worker in workers {
+        let outcome = worker.join().unwrap_or_else(|_| {
+            Err(ExtensionError::new(
+                ErrorCode::LifecycleConflict,
+                "package hash worker terminated unexpectedly",
+            ))
+        });
+        match outcome {
+            Ok(mut measured) => results.append(&mut measured),
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    results.sort_by_key(|result| result.index);
+    Ok(results)
+}
+
+fn measure_pinned_file(
+    file: &mut File,
+    relative: &str,
+    expected_length: u64,
+    keep_bytes: bool,
+    buffer: &mut [u8],
+) -> Result<(crate::archive::FileMeasurement, Option<Vec<u8>>)> {
+    let initial_length = file
+        .metadata()
+        .map_err(|error| {
+            ExtensionError::io(
+                ErrorCode::IntegrityFailed,
+                "inspect pinned package file",
+                &error,
+            )
+        })?
+        .len();
+    if initial_length != expected_length {
+        return Err(ExtensionError::new(
+            ErrorCode::IntegrityFailed,
+            format!("catalogued file length changed before pin: {relative}"),
+        ));
+    }
+    let mut stored = if keep_bytes {
+        Some(Vec::with_capacity(
+            usize::try_from(expected_length).map_err(|_| {
+                ExtensionError::new(
+                    ErrorCode::IntegrityFailed,
+                    "pinned file cannot fit in bounded memory",
+                )
+            })?,
+        ))
+    } else {
+        None
+    };
+    let mut hasher = Sha256::new();
+    let mut observed_length = 0_u64;
+    loop {
+        let read = file.read(buffer).map_err(|error| {
+            ExtensionError::io(
+                ErrorCode::IntegrityFailed,
+                "hash pinned package file",
+                &error,
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        observed_length = observed_length.checked_add(read as u64).ok_or_else(|| {
+            ExtensionError::new(ErrorCode::IntegrityFailed, "pinned file length overflowed")
+        })?;
+        if observed_length > expected_length {
+            return Err(ExtensionError::new(
+                ErrorCode::IntegrityFailed,
+                format!("catalogued file grew before pin: {relative}"),
+            ));
+        }
+        hasher.update(&buffer[..read]);
+        if let Some(bytes) = stored.as_mut() {
+            bytes.extend_from_slice(&buffer[..read]);
+        }
+    }
+    let final_length = file
+        .metadata()
+        .map_err(|error| {
+            ExtensionError::io(
+                ErrorCode::IntegrityFailed,
+                "reinspect pinned package file",
+                &error,
+            )
+        })?
+        .len();
+    if observed_length != expected_length || final_length != expected_length {
+        return Err(ExtensionError::new(
+            ErrorCode::IntegrityFailed,
+            format!("catalogued file length changed while pinned: {relative}"),
+        ));
+    }
+    Ok((
+        crate::archive::FileMeasurement {
+            path: relative.to_owned(),
+            byte_length: observed_length,
+            sha256: hex::encode(hasher.finalize()),
+        },
+        stored,
+    ))
+}
+
+pub(crate) fn revalidate_cached_active(
+    roots: &ExtensionRoots,
+    package: &PackageReference,
+    active: &ActiveInstalledPackage,
+) -> Result<()> {
+    validate_package_reference(package)?;
+    validate_roots(roots)?;
+    prepare_base(roots)?;
+    let _lock = acquire_lock(roots)?;
+    let destination = package_destination(roots, package);
+    if active.root() != destination || active.package().trust_receipt().package != *package {
+        return Err(ExtensionError::new(
+            ErrorCode::PackageUntrusted,
+            "cached active package identity does not match the exact checkout",
+        ));
+    }
+    let receipt = read_trust_receipt(&trust_receipt_path(roots, package))?;
+    if !receipt.enabled {
+        return Err(ExtensionError::new(
+            ErrorCode::PackageDisabled,
+            "enable the exact package version before runtime use",
+        ));
+    }
+    if receipt != *active.trust_receipt() {
+        return Err(ExtensionError::new(
+            ErrorCode::PackageUntrusted,
+            "cached active package receipt no longer matches its exact trusted receipt",
+        ));
+    }
+    validate_directory_snapshot(active.root(), package.kind, active.expected_files())?;
+    Ok(())
 }
 
 fn open_pinned_directory(path: &Path) -> Result<File> {
+    open_pinned_directory_impl(path, true)
+}
+
+fn open_pinned_directory_under_pinned_tree(path: &Path) -> Result<File> {
+    open_pinned_directory_impl(path, false)
+}
+
+fn open_pinned_directory_impl(path: &Path, check_ancestors: bool) -> Result<File> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         ExtensionError::io(
             ErrorCode::IntegrityFailed,
@@ -470,7 +898,9 @@ fn open_pinned_directory(path: &Path) -> Result<File> {
             "package directory changed before it could be pinned",
         ));
     }
-    ensure_existing_tree_safe(path)?;
+    if check_ancestors {
+        ensure_existing_tree_safe(path)?;
+    }
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(windows)]
@@ -507,6 +937,14 @@ fn open_pinned_directory(path: &Path) -> Result<File> {
 }
 
 fn open_pinned_file(path: &Path) -> Result<File> {
+    open_pinned_file_impl(path, true)
+}
+
+fn open_pinned_file_under_pinned_tree(path: &Path) -> Result<File> {
+    open_pinned_file_impl(path, false)
+}
+
+fn open_pinned_file_impl(path: &Path, check_ancestors: bool) -> Result<File> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         ExtensionError::io(
             ErrorCode::IntegrityFailed,
@@ -520,7 +958,9 @@ fn open_pinned_file(path: &Path) -> Result<File> {
             "catalogued package file changed before it could be pinned",
         ));
     }
-    ensure_existing_tree_safe(path)?;
+    if check_ancestors {
+        ensure_existing_tree_safe(path)?;
+    }
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(windows)]
@@ -553,64 +993,6 @@ fn open_pinned_file(path: &Path) -> Result<File> {
         ));
     }
     Ok(file)
-}
-
-fn verify_pinned_file(file: &mut File, expected: &crate::archive::FileMeasurement) -> Result<()> {
-    let observed_length = file
-        .metadata()
-        .map_err(|error| {
-            ExtensionError::io(
-                ErrorCode::IntegrityFailed,
-                "inspect pinned package file",
-                &error,
-            )
-        })?
-        .len();
-    if observed_length != expected.byte_length {
-        return Err(ExtensionError::new(
-            ErrorCode::IntegrityFailed,
-            format!(
-                "catalogued file length changed before pin: {}",
-                expected.path
-            ),
-        ));
-    }
-    let mut hasher = Sha256::new();
-    let mut observed_length = 0_u64;
-    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
-    loop {
-        let read = file.read(&mut buffer).map_err(|error| {
-            ExtensionError::io(
-                ErrorCode::IntegrityFailed,
-                "hash pinned package file",
-                &error,
-            )
-        })?;
-        if read == 0 {
-            break;
-        }
-        observed_length = observed_length.checked_add(read as u64).ok_or_else(|| {
-            ExtensionError::new(ErrorCode::IntegrityFailed, "pinned file length overflowed")
-        })?;
-        if observed_length > expected.byte_length {
-            return Err(ExtensionError::new(
-                ErrorCode::IntegrityFailed,
-                format!("catalogued file grew before pin: {}", expected.path),
-            ));
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let observed_sha256 = hex::encode(hasher.finalize());
-    if observed_length != expected.byte_length || observed_sha256 != expected.sha256 {
-        return Err(ExtensionError::new(
-            ErrorCode::IntegrityFailed,
-            format!(
-                "catalogued file bytes changed before pin: {}",
-                expected.path
-            ),
-        ));
-    }
-    Ok(())
 }
 
 /// Explicitly enable one exact package version.
@@ -685,8 +1067,9 @@ pub fn enable_if_only_installed_version(
 ///
 /// # Errors
 ///
-/// Returns a stable error when the package or its trust receipt cannot be
-/// verified or the atomic receipt update fails.
+/// Returns a stable error when the exact package root or trust receipt is
+/// invalid, or the atomic receipt update fails. Disabling only narrows runtime
+/// authority and therefore does not reread the package payload.
 pub fn disable(roots: &ExtensionRoots, package: &PackageReference) -> Result<TrustReceipt> {
     set_enabled(roots, package, false)
 }
@@ -772,6 +1155,30 @@ pub fn list(roots: &ExtensionRoots) -> Result<Vec<InstalledPackageSummary>> {
     list_with_manifests(roots).map(|(packages, _)| packages)
 }
 
+/// List only one installed package kind without inspecting the other kind's
+/// root or payloads.
+///
+/// # Errors
+///
+/// Returns a stable error only when the shared lifecycle root or the requested
+/// kind root is unsafe or cannot be inspected.
+pub fn list_kind(
+    roots: &ExtensionRoots,
+    kind: PackageKind,
+) -> Result<Vec<InstalledPackageSummary>> {
+    validate_roots(roots)?;
+    prepare_base(roots)?;
+    let _lock = acquire_lock(roots)?;
+    let mut packages = Vec::new();
+    let mut manifests = BTreeMap::new();
+    list_kind_locked(roots, kind, &mut packages, &mut manifests)?;
+    packages.sort_by(|left, right| {
+        (&left.package.package_id, &left.package.package_version)
+            .cmp(&(&right.package.package_id, &right.package.package_version))
+    });
+    Ok(packages)
+}
+
 /// Read installed package summaries and their compatibility matrix from one
 /// inventory pass. Every healthy package tree is validated once.
 ///
@@ -825,7 +1232,7 @@ pub fn compatibility_matrix(roots: &ExtensionRoots) -> Result<Vec<CompatibilityP
     Ok(compatibility_matrix_from_inventory(&summaries, &manifests))
 }
 
-fn compatibility_matrix_from_inventory(
+pub(crate) fn compatibility_matrix_from_inventory(
     summaries: &[InstalledPackageSummary],
     manifests: &BTreeMap<PackageReference, PackageManifest>,
 ) -> Vec<CompatibilityPair> {
@@ -844,8 +1251,12 @@ fn compatibility_matrix_from_inventory(
                 || codec.health == PackageHealth::Corrupt
             {
                 (CompatibilityReason::PackageInvalid, None)
-            } else if deck.health == PackageHealth::Untrusted
+            } else if !deck.enabled
+                || !codec.enabled
+                || deck.health == PackageHealth::Untrusted
                 || codec.health == PackageHealth::Untrusted
+                || deck.health == PackageHealth::VerificationRequired
+                || codec.health == PackageHealth::VerificationRequired
             {
                 (CompatibilityReason::Untrusted, None)
             } else {
@@ -1028,13 +1439,27 @@ fn verify_installed_tree_locked(
         ));
     }
     let receipt = read_trust_receipt(&trust_receipt_path(roots, package))?;
+    validate_exact_receipt(&receipt, package)?;
+    let validated = validate_directory(destination, Some(package.kind))?;
+    validate_hash_bound_receipt(&validated, &receipt, package)?;
+    Ok((receipt, validated))
+}
+
+fn validate_exact_receipt(receipt: &TrustReceipt, package: &PackageReference) -> Result<()> {
     if receipt.receipt_version != TRUST_RECEIPT_VERSION || receipt.package != *package {
         return Err(ExtensionError::new(
             ErrorCode::PackageUntrusted,
             "trust receipt identity or version is invalid",
         ));
     }
-    let validated = validate_directory(destination, Some(package.kind))?;
+    Ok(())
+}
+
+fn validate_hash_bound_receipt(
+    validated: &crate::archive::ValidatedDirectory,
+    receipt: &TrustReceipt,
+    package: &PackageReference,
+) -> Result<()> {
     if validated.manifest.reference() != *package
         || validated.manifest_sha256 != receipt.manifest_sha256
         || validated.integrity_catalog_sha256 != receipt.integrity_catalog_sha256
@@ -1046,7 +1471,7 @@ fn verify_installed_tree_locked(
             "installed package differs from its hash-bound trust receipt",
         ));
     }
-    Ok((receipt, validated))
+    Ok(())
 }
 
 fn set_enabled(
@@ -1058,35 +1483,250 @@ fn set_enabled(
     validate_roots(roots)?;
     prepare_base(roots)?;
     let _lock = acquire_lock(roots)?;
-    verify_locked(roots, package)?;
+    prepare_locked_roots(roots)?;
+    if !enabled {
+        let destination = package_destination(roots, package);
+        ensure_existing_tree_safe(&destination)?;
+        let metadata = fs::symlink_metadata(&destination).map_err(|error| {
+            let code = if error.kind() == io::ErrorKind::NotFound {
+                ErrorCode::PackageMissing
+            } else {
+                ErrorCode::Io
+            };
+            ExtensionError::io(code, "inspect package before disabling", &error)
+        })?;
+        if !metadata.is_dir() || is_reparse_or_symlink(&metadata) {
+            return Err(ExtensionError::new(
+                ErrorCode::LifecycleConflict,
+                "installed package root is unsafe",
+            ));
+        }
+    }
     let path = trust_receipt_path(roots, package);
     let mut receipt = read_trust_receipt(&path)?;
+    validate_exact_receipt(&receipt, package)?;
     if enabled {
-        let id_root = roots.receipt_root(package.kind).join(&package.package_id);
-        if id_root.is_dir() {
-            for entry in fs::read_dir(&id_root).map_err(|error| {
-                ExtensionError::io(ErrorCode::Io, "inspect active package versions", &error)
-            })? {
-                let entry = entry.map_err(|error| {
-                    ExtensionError::io(ErrorCode::Io, "inspect active trust receipt", &error)
-                })?;
-                if entry.path() == path {
-                    continue;
-                }
-                if let Ok(other) = read_trust_receipt(&entry.path())
-                    && other.enabled
-                {
-                    return Err(ExtensionError::new(
-                        ErrorCode::LifecycleConflict,
-                        "another version of this package is enabled; disable it explicitly first",
-                    ));
-                }
-            }
-        }
+        ensure_no_other_enabled_version(roots, package, &path)?;
+        verify_locked(roots, package)?;
     }
     receipt.enabled = enabled;
     write_receipt_replace(&path, &receipt)?;
     Ok(receipt)
+}
+
+fn ensure_no_other_enabled_version(
+    roots: &ExtensionRoots,
+    package: &PackageReference,
+    exact_receipt_path: &Path,
+) -> Result<()> {
+    let id_root = roots.receipt_root(package.kind).join(&package.package_id);
+    if !id_root.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(&id_root).map_err(|error| {
+        ExtensionError::io(ErrorCode::Io, "inspect active package versions", &error)
+    })? {
+        let entry = entry.map_err(|error| {
+            ExtensionError::io(ErrorCode::Io, "inspect active trust receipt", &error)
+        })?;
+        if entry.path() == exact_receipt_path {
+            continue;
+        }
+        if let Ok(other) = read_trust_receipt(&entry.path())
+            && other.enabled
+        {
+            return Err(ExtensionError::new(
+                ErrorCode::LifecycleConflict,
+                "another version of this package is enabled; disable it explicitly first",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub(crate) enum InventoryCandidate {
+    Exact {
+        package: PackageReference,
+        destination: PathBuf,
+    },
+    Isolated(InstalledPackageSummary),
+}
+
+impl InventoryCandidate {
+    pub(crate) fn package(&self) -> &PackageReference {
+        match self {
+            Self::Exact { package, .. } => package,
+            Self::Isolated(summary) => &summary.package,
+        }
+    }
+}
+
+pub(crate) fn discover_inventory_candidates(
+    roots: &ExtensionRoots,
+    kinds: &[PackageKind],
+) -> Result<Vec<InventoryCandidate>> {
+    validate_roots(roots)?;
+    prepare_base(roots)?;
+    let _lock = acquire_lock(roots)?;
+    let mut candidates = Vec::new();
+    for kind in kinds {
+        discover_kind_locked(roots, *kind, &mut candidates)?;
+    }
+    Ok(candidates)
+}
+
+pub(crate) fn summarize_inventory_candidate(
+    roots: &ExtensionRoots,
+    package: PackageReference,
+    destination: &Path,
+) -> Result<(InstalledPackageSummary, Option<PackageManifest>)> {
+    validate_roots(roots)?;
+    prepare_base(roots)?;
+    let _lock = acquire_lock(roots)?;
+    Ok(summarize_version_locked(roots, package, destination))
+}
+
+pub(crate) fn summarize_disabled_codec_candidate(
+    roots: &ExtensionRoots,
+    package: PackageReference,
+    destination: &Path,
+) -> Result<(InstalledPackageSummary, Option<PackageManifest>)> {
+    validate_package_reference(&package)?;
+    validate_roots(roots)?;
+    prepare_base(roots)?;
+    let _lock = acquire_lock(roots)?;
+    match validate_disabled_codec_metadata_locked(roots, &package, destination) {
+        Ok((receipt, validated)) => Ok((
+            InstalledPackageSummary {
+                package: package.clone(),
+                display_name: Some(validated.manifest.display_name().to_owned()),
+                publisher_name: Some(validated.manifest.publisher().name.clone()),
+                enabled: receipt.enabled,
+                health: PackageHealth::VerificationRequired,
+                error_code: None,
+                error_detail: None,
+            },
+            Some(validated.manifest),
+        )),
+        Err(error) => Ok((isolated_summary_from_error(package, &error), None)),
+    }
+}
+
+fn validate_disabled_codec_metadata_locked(
+    roots: &ExtensionRoots,
+    package: &PackageReference,
+    destination: &Path,
+) -> Result<(TrustReceipt, crate::archive::ValidatedDirectory)> {
+    if package.kind != PackageKind::CodecPack
+        || destination != package_destination(roots, package)
+        || !path_exists(destination, "installed Codec package")?
+    {
+        return Err(ExtensionError::new(
+            ErrorCode::PackageMissing,
+            "exact installed Codec package candidate is unavailable",
+        ));
+    }
+    let receipt = read_trust_receipt(&trust_receipt_path(roots, package))?;
+    if receipt.receipt_version != TRUST_RECEIPT_VERSION || receipt.package != *package {
+        return Err(ExtensionError::new(
+            ErrorCode::PackageUntrusted,
+            "trust receipt identity or version is invalid",
+        ));
+    }
+
+    let mut retained = pin_package_root_directories(roots, destination)?;
+    let (manifest_measurement, manifest_bytes, manifest_file) =
+        open_and_measure_control_file(destination, PackageKind::CodecPack.manifest_name())?;
+    let manifest = parse_manifest(PackageKind::CodecPack, &manifest_bytes)?;
+    let (catalog_measurement, catalog_bytes, catalog_file) =
+        open_and_measure_control_file(destination, "integrity.json")?;
+    if catalog_measurement.sha256 != manifest.integrity().catalog_sha256 {
+        return Err(ExtensionError::new(
+            ErrorCode::IntegrityFailed,
+            "integrity.json hash does not match the control manifest",
+        ));
+    }
+    let catalog = parse_integrity_catalog(&catalog_bytes, PackageKind::CodecPack)?;
+    let mut expected_files = BTreeMap::from([
+        (
+            PackageKind::CodecPack.manifest_name().to_owned(),
+            manifest_measurement,
+        ),
+        ("integrity.json".to_owned(), catalog_measurement),
+    ]);
+    for described in catalog.files {
+        expected_files.insert(
+            described.path.clone(),
+            crate::archive::FileMeasurement {
+                path: described.path,
+                byte_length: described.byte_length,
+                sha256: described.sha256,
+            },
+        );
+    }
+    retained.extend(pin_package_subdirectories(
+        destination,
+        expected_files.keys(),
+    )?);
+    retained.push(manifest_file);
+    retained.push(catalog_file);
+    let explicit_directories = implied_directories(expected_files.keys());
+    let contents = BTreeMap::from([
+        (
+            PackageKind::CodecPack.manifest_name().to_owned(),
+            manifest_bytes,
+        ),
+        ("integrity.json".to_owned(), catalog_bytes),
+    ]);
+    let validated = validate_contract(
+        PackageKind::CodecPack,
+        &expected_files,
+        &explicit_directories,
+        &contents,
+    )?;
+    if validated.manifest != manifest
+        || validated.manifest.reference() != *package
+        || validated.manifest_sha256 != receipt.manifest_sha256
+        || validated.integrity_catalog_sha256 != receipt.integrity_catalog_sha256
+        || validated.manifest.publisher().name != receipt.publisher_name
+        || validated.manifest.publisher().identity_claim != receipt.publisher_identity_claim
+    {
+        return Err(ExtensionError::new(
+            ErrorCode::IntegrityFailed,
+            "installed Codec metadata differs from its hash-bound trust receipt",
+        ));
+    }
+    validate_directory_snapshot(destination, PackageKind::CodecPack, &validated.files)?;
+    drop(retained);
+    Ok((receipt, validated))
+}
+
+pub(crate) fn inventory_candidate_enabled(
+    roots: &ExtensionRoots,
+    package: &PackageReference,
+    destination: &Path,
+) -> Result<bool> {
+    validate_package_reference(package)?;
+    validate_roots(roots)?;
+    prepare_base(roots)?;
+    let _lock = acquire_lock(roots)?;
+    if destination != package_destination(roots, package)
+        || !path_exists(destination, "installed package")?
+    {
+        return Err(ExtensionError::new(
+            ErrorCode::PackageMissing,
+            "exact installed package candidate is unavailable",
+        ));
+    }
+    let receipt = read_trust_receipt(&trust_receipt_path(roots, package))?;
+    if receipt.receipt_version != TRUST_RECEIPT_VERSION || receipt.package != *package {
+        return Err(ExtensionError::new(
+            ErrorCode::PackageUntrusted,
+            "trust receipt identity or version is invalid",
+        ));
+    }
+    Ok(receipt.enabled)
 }
 
 fn list_kind_locked(
@@ -1094,6 +1734,32 @@ fn list_kind_locked(
     kind: PackageKind,
     output: &mut Vec<InstalledPackageSummary>,
     manifests: &mut BTreeMap<PackageReference, PackageManifest>,
+) -> Result<()> {
+    let mut candidates = Vec::new();
+    discover_kind_locked(roots, kind, &mut candidates)?;
+    for candidate in candidates {
+        match candidate {
+            InventoryCandidate::Exact {
+                package,
+                destination,
+            } => {
+                let (summary, manifest) =
+                    summarize_version_locked(roots, package.clone(), &destination);
+                if let Some(manifest) = manifest {
+                    manifests.insert(package, manifest);
+                }
+                output.push(summary);
+            }
+            InventoryCandidate::Isolated(summary) => output.push(summary),
+        }
+    }
+    Ok(())
+}
+
+fn discover_kind_locked(
+    roots: &ExtensionRoots,
+    kind: PackageKind,
+    output: &mut Vec<InventoryCandidate>,
 ) -> Result<()> {
     let root = roots.package_root(kind);
     match fs::symlink_metadata(root) {
@@ -1118,7 +1784,7 @@ fn list_kind_locked(
     let mut package_count = 0;
     for id_entry in entries {
         let Ok(id_entry) = id_entry else {
-            output.push(corrupt_summary(
+            output.push(InventoryCandidate::Isolated(corrupt_summary(
                 PackageReference {
                     kind,
                     package_id: "org.invalid.unreadable".to_owned(),
@@ -1126,12 +1792,12 @@ fn list_kind_locked(
                 },
                 ErrorCode::Io.as_str(),
                 "an installed package entry could not be read",
-            ));
+            )));
             continue;
         };
         package_count += 1;
         if package_count > MAX_PACKAGES_PER_KIND {
-            output.push(corrupt_summary(
+            output.push(InventoryCandidate::Isolated(corrupt_summary(
                 PackageReference {
                     kind,
                     package_id: id_entry.file_name().to_string_lossy().into_owned(),
@@ -1139,24 +1805,22 @@ fn list_kind_locked(
                 },
                 ErrorCode::LifecycleConflict.as_str(),
                 "additional installed package entries exceed the bounded inventory",
-            ));
+            )));
             break;
         }
-        list_identity_locked(roots, kind, &id_entry, output, manifests);
+        discover_identity_locked(kind, &id_entry, output);
     }
     Ok(())
 }
 
-fn list_identity_locked(
-    roots: &ExtensionRoots,
+fn discover_identity_locked(
     kind: PackageKind,
     id_entry: &fs::DirEntry,
-    output: &mut Vec<InstalledPackageSummary>,
-    manifests: &mut BTreeMap<PackageReference, PackageManifest>,
+    output: &mut Vec<InventoryCandidate>,
 ) {
     let package_id = id_entry.file_name().to_string_lossy().into_owned();
     let Ok(id_metadata) = fs::symlink_metadata(id_entry.path()) else {
-        output.push(corrupt_summary(
+        output.push(InventoryCandidate::Isolated(corrupt_summary(
             PackageReference {
                 kind,
                 package_id,
@@ -1164,11 +1828,11 @@ fn list_identity_locked(
             },
             ErrorCode::Io.as_str(),
             "package identity root metadata is unavailable",
-        ));
+        )));
         return;
     };
     if !id_metadata.is_dir() || is_reparse_or_symlink(&id_metadata) {
-        output.push(corrupt_summary(
+        output.push(InventoryCandidate::Isolated(corrupt_summary(
             PackageReference {
                 kind,
                 package_id,
@@ -1176,11 +1840,11 @@ fn list_identity_locked(
             },
             ErrorCode::LifecycleConflict.as_str(),
             "package identity root is unsafe",
-        ));
+        )));
         return;
     }
     let Ok(versions) = fs::read_dir(id_entry.path()) else {
-        output.push(corrupt_summary(
+        output.push(InventoryCandidate::Isolated(corrupt_summary(
             PackageReference {
                 kind,
                 package_id,
@@ -1188,13 +1852,13 @@ fn list_identity_locked(
             },
             ErrorCode::Io.as_str(),
             "installed version inventory is unavailable",
-        ));
+        )));
         return;
     };
     let mut version_count = 0;
     for version_entry in versions {
         let Ok(version_entry) = version_entry else {
-            output.push(corrupt_summary(
+            output.push(InventoryCandidate::Isolated(corrupt_summary(
                 PackageReference {
                     kind,
                     package_id: package_id.clone(),
@@ -1202,12 +1866,12 @@ fn list_identity_locked(
                 },
                 ErrorCode::Io.as_str(),
                 "an installed version entry could not be read",
-            ));
+            )));
             continue;
         };
         version_count += 1;
         if version_count > MAX_VERSIONS_PER_PACKAGE {
-            output.push(corrupt_summary(
+            output.push(InventoryCandidate::Isolated(corrupt_summary(
                 PackageReference {
                     kind,
                     package_id: package_id.clone(),
@@ -1215,29 +1879,52 @@ fn list_identity_locked(
                 },
                 ErrorCode::LifecycleConflict.as_str(),
                 "additional installed versions exceed the bounded inventory",
-            ));
+            )));
             break;
         }
-        list_version_locked(roots, kind, &package_id, &version_entry, output, manifests);
+        output.push(InventoryCandidate::Exact {
+            package: PackageReference {
+                kind,
+                package_id: package_id.clone(),
+                package_version: version_entry.file_name().to_string_lossy().into_owned(),
+            },
+            destination: version_entry.path(),
+        });
     }
 }
 
-fn list_version_locked(
+fn summarize_version_locked(
     roots: &ExtensionRoots,
-    kind: PackageKind,
-    package_id: &str,
-    version_entry: &fs::DirEntry,
-    output: &mut Vec<InstalledPackageSummary>,
-    manifests: &mut BTreeMap<PackageReference, PackageManifest>,
-) {
-    let package = PackageReference {
-        kind,
-        package_id: package_id.to_owned(),
-        package_version: version_entry.file_name().to_string_lossy().into_owned(),
+    package: PackageReference,
+    destination: &Path,
+) -> (InstalledPackageSummary, Option<PackageManifest>) {
+    let receipt = match path_exists(destination, "installed package") {
+        Ok(true) => read_trust_receipt(&trust_receipt_path(roots, &package)).and_then(|receipt| {
+            if receipt.receipt_version == TRUST_RECEIPT_VERSION && receipt.package == package {
+                Ok(receipt)
+            } else {
+                Err(ExtensionError::new(
+                    ErrorCode::PackageUntrusted,
+                    "trust receipt identity or version is invalid",
+                ))
+            }
+        }),
+        Ok(false) => Err(ExtensionError::new(
+            ErrorCode::PackageMissing,
+            "exact package version is not installed",
+        )),
+        Err(error) => Err(error),
     };
-    let destination = package_destination(roots, &package);
-    match verify_installed_tree_locked(roots, &package, &destination) {
-        Ok((receipt, validated)) => {
+    let tree = validate_directory(destination, Some(package.kind));
+    match (receipt, tree) {
+        (Ok(receipt), Ok(validated))
+            if validated.manifest.reference() == package
+                && validated.manifest_sha256 == receipt.manifest_sha256
+                && validated.integrity_catalog_sha256 == receipt.integrity_catalog_sha256
+                && validated.manifest.publisher().name == receipt.publisher_name
+                && validated.manifest.publisher().identity_claim
+                    == receipt.publisher_identity_claim =>
+        {
             let summary = InstalledPackageSummary {
                 package: package.clone(),
                 display_name: Some(validated.manifest.display_name().to_owned()),
@@ -1247,12 +1934,29 @@ fn list_version_locked(
                 error_code: None,
                 error_detail: None,
             };
-            manifests.insert(package, validated.manifest);
-            output.push(summary);
+            (summary, Some(validated.manifest))
         }
-        Err(error) => {
-            let tree = validate_directory(&version_entry.path(), Some(kind));
-            let (display_name, publisher_name) = tree.ok().map_or((None, None), |validated| {
+        (Ok(_), Ok(validated)) => (
+            InstalledPackageSummary {
+                package,
+                display_name: Some(validated.manifest.display_name().to_owned()),
+                publisher_name: Some(validated.manifest.publisher().name.clone()),
+                enabled: false,
+                health: PackageHealth::Corrupt,
+                error_code: Some(ErrorCode::IntegrityFailed.as_str().to_owned()),
+                error_detail: Some(
+                    "installed package differs from its hash-bound trust receipt".to_owned(),
+                ),
+            },
+            None,
+        ),
+        (receipt, tree) => {
+            let (error, validated) = match (receipt, tree) {
+                (Err(error), tree) => (error, tree.ok()),
+                (Ok(_), Err(error)) => (error, None),
+                (Ok(_), Ok(_)) => unreachable!("healthy and receipt-mismatch arms are exhaustive"),
+            };
+            let (display_name, publisher_name) = validated.map_or((None, None), |validated| {
                 (
                     Some(validated.manifest.display_name().to_owned()),
                     Some(validated.manifest.publisher().name.clone()),
@@ -1263,15 +1967,18 @@ fn list_version_locked(
             } else {
                 PackageHealth::Corrupt
             };
-            output.push(InstalledPackageSummary {
-                package,
-                display_name,
-                publisher_name,
-                enabled: false,
-                health,
-                error_code: Some(error.code().as_str().to_owned()),
-                error_detail: Some(error.detail().to_owned()),
-            });
+            (
+                InstalledPackageSummary {
+                    package,
+                    display_name,
+                    publisher_name,
+                    enabled: false,
+                    health,
+                    error_code: Some(error.code().as_str().to_owned()),
+                    error_detail: Some(error.detail().to_owned()),
+                },
+                None,
+            )
         }
     }
 }
@@ -1346,6 +2053,25 @@ fn corrupt_summary(package: PackageReference, code: &str, detail: &str) -> Insta
         health: PackageHealth::Corrupt,
         error_code: Some(code.to_owned()),
         error_detail: Some(detail.to_owned()),
+    }
+}
+
+fn isolated_summary_from_error(
+    package: PackageReference,
+    error: &ExtensionError,
+) -> InstalledPackageSummary {
+    InstalledPackageSummary {
+        package,
+        display_name: None,
+        publisher_name: None,
+        enabled: false,
+        health: if error.code() == ErrorCode::PackageUntrusted {
+            PackageHealth::Untrusted
+        } else {
+            PackageHealth::Corrupt
+        },
+        error_code: Some(error.code().as_str().to_owned()),
+        error_detail: Some(error.detail().to_owned()),
     }
 }
 
@@ -2004,10 +2730,9 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn pin_rehash_rejects_bytes_changed_after_validation_snapshot() {
+    fn pinned_hash_rejects_bytes_changed_from_the_expected_catalog() {
         let temp = TempDir::new().expect("temp");
-        let roots = ExtensionRoots::for_base_root(temp.path().join("LatentDeck"));
-        let destination = roots.decks_root.join("com.example.deck").join("0.2.0");
+        let destination = temp.path().join("com.example.deck").join("0.2.0");
         let runtime_file = destination.join("python/deck_operator.py");
         fs::create_dir_all(runtime_file.parent().expect("runtime parent"))
             .expect("create package tree");
@@ -2020,12 +2745,14 @@ mod tests {
         };
         fs::write(&runtime_file, b"changed").expect("change after validation snapshot");
 
-        let error = pin_validated_package_tree(
-            &roots,
-            &destination,
-            &BTreeMap::from([(expected.path.clone(), expected)]),
-        )
-        .expect_err("stale validation snapshot must not produce an active package");
+        let file = open_pinned_file(&runtime_file).expect("open pinned fixture");
+        let error = hash_pinned_jobs(vec![PinnedHashJob {
+            index: 0,
+            expected,
+            keep_bytes: false,
+            file,
+        }])
+        .expect_err("unexpected bytes must not produce an active package");
         assert_eq!(error.code(), ErrorCode::IntegrityFailed);
     }
 }

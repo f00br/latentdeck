@@ -50,6 +50,10 @@
   let membershipTargets: Record<string, string> = {};
   let activeSurface: DeckSurface = "library";
   let deckCatalog: DeckUiCatalog = EMPTY_DECK_CATALOG;
+  let deckCatalogLoaded = false;
+  let deckCatalogPending: Promise<void> | null = null;
+  let deckCatalogRequestedRevision = 0;
+  let deckCatalogSettledRevision = -1;
   let activeDeckKey = "";
   let deckCatalogError = "";
   let diagnosticBusy = false;
@@ -73,13 +77,47 @@
 
   onMount(() => {
     void initialLoad();
-    void refreshDeckCatalog();
+    void ensureDeckCatalog();
   });
 
-  async function refreshDeckCatalog(): Promise<void> {
+  function ensureDeckCatalog(): Promise<void> {
+    if (
+      deckCatalogLoaded &&
+      deckCatalogSettledRevision === deckCatalogRequestedRevision
+    ) {
+      return Promise.resolve();
+    }
+    if (deckCatalogPending !== null) return deckCatalogPending;
+    if (deckCatalogSettledRevision === deckCatalogRequestedRevision) {
+      deckCatalogRequestedRevision += 1;
+    }
+    const pending = refreshDeckCatalogLoop().finally(() => {
+      if (deckCatalogPending === pending) deckCatalogPending = null;
+    });
+    deckCatalogPending = pending;
+    return pending;
+  }
+
+  function reloadDeckCatalog(): Promise<void> {
+    deckCatalogLoaded = false;
+    deckCatalogRequestedRevision += 1;
+    return ensureDeckCatalog();
+  }
+
+  async function refreshDeckCatalogLoop(): Promise<void> {
+    while (deckCatalogSettledRevision < deckCatalogRequestedRevision) {
+      const revision = deckCatalogRequestedRevision;
+      await refreshDeckCatalog(revision);
+      deckCatalogSettledRevision = revision;
+    }
+  }
+
+  async function refreshDeckCatalog(revision: number): Promise<void> {
     try {
       const incoming = await loadDeckUiCatalog();
+      if (revision !== deckCatalogRequestedRevision) return;
       deckCatalog = incoming;
+      deckCatalogLoaded = true;
       deckCatalogError =
         incoming.issues.length === 0
           ? ""
@@ -92,6 +130,7 @@
         if (activeSurface === "deck") activeSurface = "extensions";
       }
     } catch (error) {
+      if (revision !== deckCatalogRequestedRevision) return;
       deckCatalogError = describeCommandError(error);
     }
   }
@@ -130,6 +169,8 @@
     if (surface === "library") {
       errorMessage = "";
       await initialLoad();
+    } else if (surface === "extensions") {
+      void ensureDeckCatalog();
     }
   }
 
@@ -961,6 +1002,8 @@
     class:active={activeSurface === "extensions"}
     aria-hidden={activeSurface !== "extensions"}
   >
-    <ExtensionsManager onPackagesChanged={() => void refreshDeckCatalog()} />
+    {#if activeSurface === "extensions"}
+      <ExtensionsManager onPackagesChanged={() => void reloadDeckCatalog()} />
+    {/if}
   </section>
 </main>

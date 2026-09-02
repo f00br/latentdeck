@@ -32,7 +32,9 @@ use latentdeck_core::{
         DeckPackageSelectionV2, DeckSourceSelectionV2, PreparedDeckSelectionV2,
         prepare_exact_deck_selection,
     },
-    deck_session_v2::{DeckSessionV2, DeckSessionV2LoadRequest, start_deck_session_v2},
+    deck_session_v2::{
+        DeckSessionV2, DeckSessionV2LoadRequest, start_deck_session_v2_with_retained_assets,
+    },
     player_session_v2::{PlayerSessionV2, PlayerSessionV2HostContract, start_player_session_v2},
 };
 use latentdeck_extension_manager::{
@@ -659,6 +661,7 @@ fn prepare_deck(
             path: &source.path,
             cartridge_id: &source.cartridge_id,
             archive_sha256: &source.archive_sha256,
+            validated_cartridge: None,
         })
         .collect::<Vec<_>>();
     let prepared = prepare_exact_deck_selection(
@@ -749,7 +752,9 @@ async fn start_deck(
         cartridges,
         host,
         external_assets,
+        retained_external_assets,
         sources,
+        validation_work: _,
     } = prepared;
     let session_id = host.deck_session_id;
     let generation = host.stream_generation;
@@ -798,12 +803,13 @@ async fn start_deck(
         operator_version: operator.operator_version.clone(),
         seed: load.seed,
     };
-    let session = start_deck_session_v2(
+    let session = start_deck_session_v2_with_retained_assets(
         codec_package,
         deck_runtime,
         cartridges,
         host,
         external_assets,
+        retained_external_assets,
         load,
     )
     .await

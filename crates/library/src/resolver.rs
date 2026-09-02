@@ -1,10 +1,13 @@
 use std::{
+    fmt::Write as _,
     fs,
     path::{Path, PathBuf},
 };
 
-use latentdeck_cartridge::reader::{ValidationOptions, open_integrity_validated};
-use rusqlite::{OptionalExtension as _, params};
+use latentdeck_cartridge::reader::{
+    IntegrityValidatedCartridge, ValidationOptions, open_integrity_validated,
+};
+use rusqlite::{OptionalExtension as _, params, params_from_iter};
 
 use crate::{
     CartridgeKey, ErrorCode, Library, LibraryError, Result,
@@ -14,6 +17,11 @@ use crate::{
 /// Maximum number of registered `present` paths that one resolution attempt
 /// will revalidate, in ascending `SQLite` `path_id` order.
 pub const MAX_DECK_SOURCE_PATH_CANDIDATES: usize = 16;
+/// Maximum exact identities in one metadata-only Deck eligibility request.
+pub const MAX_INDEXED_DECK_SOURCES: usize = 1_004;
+/// Keep dynamic `VALUES` statements comfortably below `SQLite`'s conservative
+/// bind-parameter ceiling: each row binds archive hash plus cartridge ID.
+pub const MAX_INDEXED_DECK_SOURCE_QUERY_CHUNK: usize = 250;
 
 /// Immutable cartridge identity accepted by the backend Deck source resolver.
 /// It deliberately contains no caller-selected filesystem path.
@@ -53,10 +61,32 @@ impl DeckSourceIdentity {
 /// A backend-only source selected from the library index and revalidated from
 /// disk. This type is intentionally not serializable so the machine path
 /// cannot accidentally cross the public UI command boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct ResolvedDeckSource {
     identity: DeckSourceIdentity,
     path: PathBuf,
+    validated_cartridge: IntegrityValidatedCartridge,
+}
+
+/// Backend-only immutable metadata selected from the Library index. It has no
+/// filesystem path or retained handle and is therefore suitable only for UI
+/// compatibility display, never launch authority.
+#[derive(Debug)]
+pub struct IndexedDeckSource {
+    identity: DeckSourceIdentity,
+    manifest_json: String,
+}
+
+impl IndexedDeckSource {
+    #[must_use]
+    pub const fn identity(&self) -> &DeckSourceIdentity {
+        &self.identity
+    }
+
+    #[must_use]
+    pub fn manifest_json(&self) -> &str {
+        &self.manifest_json
+    }
 }
 
 impl ResolvedDeckSource {
@@ -69,9 +99,131 @@ impl ResolvedDeckSource {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    #[must_use]
+    pub const fn validated_cartridge(&self) -> &IntegrityValidatedCartridge {
+        &self.validated_cartridge
+    }
+
+    /// Duplicate the retained read-only LC handle without repeating full
+    /// cartridge validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a path-free library error if the operating system cannot clone
+    /// the retained handle.
+    pub fn try_clone_retained(&self) -> Result<Self> {
+        Ok(Self {
+            identity: self.identity.clone(),
+            path: self.path.clone(),
+            validated_cartridge: self
+                .validated_cartridge
+                .try_clone_retained()
+                .map_err(|error| LibraryError::cartridge(&error))?,
+        })
+    }
 }
 
 impl Library {
+    /// Resolve a bounded ordered batch from immutable Library metadata only.
+    ///
+    /// This never opens a cartridge or returns a machine path. Individual
+    /// missing, mismatched, or non-present identities remain aligned with the
+    /// input as per-item errors. Exact launch must subsequently call
+    /// [`Self::resolve_deck_source`] for selected slots.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database or input error for the batch itself. Per-identity
+    /// availability errors are returned in the ordered result vector.
+    pub fn indexed_deck_sources(
+        &self,
+        identities: &[DeckSourceIdentity],
+    ) -> Result<Vec<Result<IndexedDeckSource>>> {
+        if identities.len() > MAX_INDEXED_DECK_SOURCES {
+            return Err(invalid("Deck source metadata batch exceeds its bound"));
+        }
+        let mut output = Vec::with_capacity(identities.len());
+        for chunk in identities.chunks(MAX_INDEXED_DECK_SOURCE_QUERY_CHUNK) {
+            let mut sql =
+                String::from("WITH requested(ordinal, archive_sha256, requested_id) AS (VALUES ");
+            let mut bindings = Vec::with_capacity(chunk.len() * 2);
+            for (ordinal, identity) in chunk.iter().enumerate() {
+                if ordinal > 0 {
+                    sql.push(',');
+                }
+                let first_parameter = bindings.len() + 1;
+                let second_parameter = first_parameter + 1;
+                write!(sql, "({ordinal},?{first_parameter},?{second_parameter})")
+                    .expect("writing to a String cannot fail");
+                bindings.push(identity.archive_sha256().as_str());
+                bindings.push(identity.cartridge_id());
+            }
+            sql.push_str(
+                ") SELECT r.ordinal, r.requested_id, c.cartridge_id, c.manifest_json, \
+                 EXISTS(SELECT 1 FROM cartridge_paths p \
+                        WHERE p.archive_sha256 = r.archive_sha256 AND p.state = 'present') \
+                 FROM requested r LEFT JOIN cartridges c \
+                      ON c.archive_sha256 = r.archive_sha256 ORDER BY r.ordinal",
+            );
+            let mut statement = self
+                .connection
+                .prepare(&sql)
+                .map_err(LibraryError::database)?;
+            let rows = statement
+                .query_map(params_from_iter(bindings), |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, bool>(4)?,
+                    ))
+                })
+                .map_err(LibraryError::database)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(LibraryError::database)?;
+            if rows.len() != chunk.len() {
+                return Err(LibraryError::new(
+                    ErrorCode::Database,
+                    "Deck source metadata batch returned an incomplete result",
+                ));
+            }
+            for (ordinal, requested_id, indexed_id, manifest_json, present) in rows {
+                let ordinal = usize::try_from(ordinal).map_err(|_| {
+                    LibraryError::new(
+                        ErrorCode::Database,
+                        "Deck source metadata batch returned an invalid order",
+                    )
+                })?;
+                let identity = chunk.get(ordinal).ok_or_else(|| {
+                    LibraryError::new(
+                        ErrorCode::Database,
+                        "Deck source metadata batch returned an invalid order",
+                    )
+                })?;
+                let item = match (indexed_id, manifest_json, present) {
+                    (Some(indexed_id), Some(manifest_json), true)
+                        if indexed_id == requested_id
+                            && requested_id == identity.cartridge_id() =>
+                    {
+                        Ok(IndexedDeckSource {
+                            identity: identity.clone(),
+                            manifest_json,
+                        })
+                    }
+                    (Some(_), Some(_), _) => Err(LibraryError::new(
+                        ErrorCode::Conflict,
+                        "Deck source identity does not match available indexed metadata",
+                    )),
+                    _ => Err(source_unavailable()),
+                };
+                output.push(item);
+            }
+        }
+        Ok(output)
+    }
+
     /// Resolves one Deck slot source only through registered `present` paths,
     /// then performs full LC validation before returning the local path.
     ///
@@ -123,10 +275,11 @@ impl Library {
         let mut first_error = None;
         for path in candidates {
             match validate_registered_path(&path, identity) {
-                Ok(()) => {
+                Ok(validated_cartridge) => {
                     return Ok(ResolvedDeckSource {
                         identity: identity.clone(),
                         path,
+                        validated_cartridge,
                     });
                 }
                 Err(error) => {
@@ -138,7 +291,10 @@ impl Library {
     }
 }
 
-fn validate_registered_path(path: &Path, identity: &DeckSourceIdentity) -> Result<()> {
+fn validate_registered_path(
+    path: &Path,
+    identity: &DeckSourceIdentity,
+) -> Result<IntegrityValidatedCartridge> {
     let source_metadata = fs::symlink_metadata(path).map_err(|_error| source_unavailable())?;
     if source_metadata.file_type().is_symlink() || !source_metadata.is_file() {
         return Err(source_unavailable());
@@ -161,7 +317,7 @@ fn validate_registered_path(path: &Path, identity: &DeckSourceIdentity) -> Resul
             "registered Deck source changed during validation",
         ));
     }
-    Ok(())
+    Ok(validated)
 }
 
 fn validate_cartridge_id(value: &str) -> Result<()> {
