@@ -55,6 +55,7 @@
     spoutControlsFor,
     type SpoutStatus,
   } from "./output-model";
+  import { handleDeckFullscreenKeydown } from "./deck-fullscreen-policy";
   import {
     IDLE_DECODED_RECORDING,
     decodedRecordingControls,
@@ -934,6 +935,20 @@
     });
   }
 
+  function handleWindowKeydown(event: KeyboardEvent): void {
+    handleDeckFullscreenKeydown(
+      event,
+      {
+        active,
+        runtimeLoaded: selectedSessionReady,
+        viewportReady: viewportApplied?.visible === true,
+        busy,
+        current: outputFullscreen,
+      },
+      () => void toggleFullscreen(),
+    );
+  }
+
   async function run(operation: () => Promise<void>): Promise<void> {
     if (busy) return;
     busy = true;
@@ -1031,6 +1046,8 @@
   const SESSION_CAPACITY_CODE = "session.capacity_exceeded";
   const SESSION_PINNED_CODE = "session.output_lease_pinned";
 </script>
+
+<svelte:window onkeydown={handleWindowKeydown} />
 
 <section class="generic-workspace" aria-busy={busy || matrixBusy}>
   <section class="runtime-config" aria-label="Exact Deck and Codec selection">

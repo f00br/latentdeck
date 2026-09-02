@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import genericWorkspace from "./GenericDeckWorkspace.svelte?raw";
 import {
   canSetDeckFullscreen,
+  handleDeckFullscreenKeydown,
   shouldExitFullscreenForHiddenDeck,
 } from "./deck-fullscreen-policy";
 
@@ -86,6 +87,41 @@ describe("Deck host fullscreen recovery policy", () => {
     expect(poll).not.toContain("fullscreenSet(");
     expect(toggle).toContain("genericDeckClient.fullscreenSet(");
     expect(genericWorkspace).toContain("await hideViewport();");
+  });
+
+  it("routes Escape through the serialized exit path even after output loss", () => {
+    const exit = vi.fn();
+    const event = new KeyboardEvent("keydown", {
+      key: "Escape",
+      cancelable: true,
+    });
+
+    expect(
+      handleDeckFullscreenKeydown(
+        event,
+        {
+          active: false,
+          runtimeLoaded: false,
+          viewportReady: false,
+          busy: false,
+          current: true,
+        },
+        exit,
+      ),
+    ).toBe(true);
+    expect(event.defaultPrevented).toBe(true);
+    expect(exit).toHaveBeenCalledOnce();
+
+    const handler = functionSlice(
+      genericWorkspace,
+      "function handleWindowKeydown(event: KeyboardEvent)",
+      "async function run(",
+    );
+    expect(genericWorkspace).toContain(
+      "<svelte:window onkeydown={handleWindowKeydown} />",
+    );
+    expect(handler).toContain("handleDeckFullscreenKeydown(");
+    expect(handler).toContain("void toggleFullscreen()");
   });
 });
 

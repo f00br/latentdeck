@@ -32,3 +32,21 @@ export function shouldExitFullscreenForHiddenDeck(
 ): boolean {
   return !active && current === true && !busy;
 }
+
+/**
+ * Consume the browser Escape event only when it can start the host-owned
+ * fullscreen recovery path. Runtime and viewport readiness deliberately do
+ * not gate exit; the retained native restore state outlives both surfaces.
+ */
+export function handleDeckFullscreenKeydown(
+  event: KeyboardEvent,
+  context: Readonly<DeckFullscreenContext>,
+  exit: () => void,
+): boolean {
+  if (event.key !== "Escape" || !canSetDeckFullscreen(context, false)) {
+    return false;
+  }
+  event.preventDefault();
+  exit();
+  return true;
+}
