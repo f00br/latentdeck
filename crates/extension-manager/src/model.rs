@@ -477,6 +477,15 @@ pub struct InstalledPackageSummary {
     pub error_detail: Option<String>,
 }
 
+/// One bounded, internally consistent inventory pass over installed packages
+/// and every Deck-version by Codec-version compatibility pair. Each healthy
+/// tree is validated once and the matrix is derived from those same results.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionInventory {
+    pub packages: Vec<InstalledPackageSummary>,
+    pub matrix: Vec<CompatibilityPair>,
+}
+
 /// One exact installed tree revalidated against its atomic trust receipt.
 ///
 /// Construction is restricted to the lifecycle module so callers cannot turn

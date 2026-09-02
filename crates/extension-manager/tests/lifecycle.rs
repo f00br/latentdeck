@@ -12,8 +12,9 @@ use latentdeck_extension_manager::{
     ProfileKey, PublisherDescriptor, PublisherIdentityClaim, PythonConstraint,
     PythonImplementation, RemoveOptions, RuntimeLockDescriptor, SignalGeometry, TensorDevice,
     TensorDtype, TimingDescriptor, compatibility_matrix, disable, enable,
-    enable_if_only_installed_version, inspect, install, install_from_bundled_index, list, pack,
-    remove, repair, repair_from_bundled_index, resolve_active, resolve_installed, verify,
+    enable_if_only_installed_version, inspect, install, install_from_bundled_index, inventory,
+    list, pack, remove, repair, repair_from_bundled_index, resolve_active, resolve_installed,
+    verify,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -1433,7 +1434,11 @@ fn compatibility_matrix_resolves_profile_identity_without_assuming_one_fixed_ext
         },
     )
     .unwrap();
-    let matrix = compatibility_matrix(&roots).unwrap();
+    let inventory = inventory(&roots).unwrap();
+    assert_eq!(inventory.packages.len(), 3);
+    assert_eq!(inventory.packages, list(&roots).unwrap());
+    assert_eq!(inventory.matrix, compatibility_matrix(&roots).unwrap());
+    let matrix = inventory.matrix;
     assert_eq!(matrix.len(), 2);
     assert_eq!(
         matrix[0].reason,
@@ -1445,6 +1450,91 @@ fn compatibility_matrix_resolves_profile_identity_without_assuming_one_fixed_ext
         latentdeck_extension_manager::CompatibilityReason::UnsupportedProfile
     );
     assert_eq!(matrix[1].compatible_profile, None);
+}
+
+#[test]
+fn inventory_preserves_untrusted_and_corrupt_matrix_precedence() {
+    let temp = TempDir::new().expect("temp");
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let install_fixture = |kind: &str, version: &str| {
+        let source = temp.path().join(format!("{kind}-{version}"));
+        fs::create_dir(&source).unwrap();
+        if kind == "deck" {
+            write_deck_source(&source, version, 45);
+        } else {
+            write_codec_source(&source, version, profile());
+        }
+        let extension = if kind == "deck" { "ld" } else { "ldcodec" };
+        let archive = temp.path().join(format!("{kind}-{version}.{extension}"));
+        let (hash, _) = pack_source(&source, &archive);
+        install(
+            &roots,
+            &InstallRequest {
+                archive_path: archive,
+                expected_sha256: hash,
+            },
+        )
+        .unwrap()
+    };
+
+    let _healthy_deck = install_fixture("deck", "0.2.0");
+    let corrupt_deck = install_fixture("deck", "0.2.1");
+    let _healthy_codec = install_fixture("codec", "0.2.0");
+    let untrusted_codec = install_fixture("codec", "0.2.1");
+    fs::write(
+        corrupt_deck.destination.join("python/deck_operator.py"),
+        b"tampered after install",
+    )
+    .unwrap();
+    fs::remove_file(untrusted_codec.trust_receipt_path).unwrap();
+
+    let inventory = inventory(&roots).unwrap();
+    let summary = |kind, version| {
+        inventory
+            .packages
+            .iter()
+            .find(|summary| {
+                summary.package.kind == kind && summary.package.package_version == version
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        summary(PackageKind::DeckPack, "0.2.1").health,
+        PackageHealth::Corrupt
+    );
+    assert_eq!(
+        summary(PackageKind::CodecPack, "0.2.1").health,
+        PackageHealth::Untrusted
+    );
+    assert!(!summary(PackageKind::CodecPack, "0.2.1").enabled);
+
+    let reason = |deck_version, codec_version| {
+        inventory
+            .matrix
+            .iter()
+            .find(|pair| {
+                pair.deck.package_version == deck_version
+                    && pair.codec.package_version == codec_version
+            })
+            .unwrap()
+            .reason
+    };
+    assert_eq!(
+        reason("0.2.0", "0.2.0"),
+        latentdeck_extension_manager::CompatibilityReason::Compatible
+    );
+    assert_eq!(
+        reason("0.2.0", "0.2.1"),
+        latentdeck_extension_manager::CompatibilityReason::Untrusted
+    );
+    assert_eq!(
+        reason("0.2.1", "0.2.0"),
+        latentdeck_extension_manager::CompatibilityReason::PackageInvalid
+    );
+    assert_eq!(
+        reason("0.2.1", "0.2.1"),
+        latentdeck_extension_manager::CompatibilityReason::PackageInvalid
+    );
 }
 
 #[test]

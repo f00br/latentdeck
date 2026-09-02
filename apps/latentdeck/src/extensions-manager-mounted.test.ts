@@ -127,10 +127,57 @@ function enter(input: HTMLInputElement, value: string): void {
   flushSync();
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((accept) => {
+    resolve = accept;
+  });
+  return { promise, resolve };
+}
+
 describe("mounted LatentDeck Extensions Manager", () => {
   beforeEach(() => {
     invokeMock.mockReset();
     openMock.mockReset();
+  });
+
+  it("disables cached lifecycle actions while a package snapshot is pending", async () => {
+    const snapshot: ExtensionsSnapshot = {
+      packages: [healthySummary],
+      matrix: [],
+    };
+    const pendingSnapshot = deferred<ExtensionsSnapshot>();
+    let snapshotCount = 0;
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command !== "extensions_snapshot") {
+        throw new Error(`Unexpected native command ${command}`);
+      }
+      snapshotCount += 1;
+      return snapshotCount === 1 ? snapshot : pendingSnapshot.promise;
+    });
+
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(ExtensionsManager, { target });
+    await settleUi();
+
+    button(target, "Refresh snapshot").click();
+    await settleUi();
+    expect(snapshotCount).toBe(2);
+    expect(button(target, "Refreshing…").disabled).toBe(true);
+    expect(button(target, "Verify").disabled).toBe(true);
+    expect(button(target, "Repair…").disabled).toBe(true);
+
+    pendingSnapshot.resolve(snapshot);
+    await settleUi();
+    expect(button(target, "Refresh snapshot").disabled).toBe(false);
+    expect(button(target, "Verify").disabled).toBe(false);
+
+    await unmount(component);
+    target.remove();
   });
 
   it("runs the exact local lifecycle and renders every stable matrix reason", async () => {

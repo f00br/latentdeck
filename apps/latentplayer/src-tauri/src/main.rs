@@ -24,8 +24,9 @@ use latentdeck_core::{
 use latentdeck_extension_manager::{
     CompatibilityPair, CompatibilityReason, ErrorCode as ExtensionErrorCode, ExtensionError,
     ExtensionRoots, InstallRequest, InstalledPackageSummary, PackageHealth, PackageKind,
-    PackageReference, PublisherIdentityClaim, RemoveOptions, compatibility_matrix, disable, enable,
-    inspect as inspect_extension_archive, install, list as list_extensions, remove, repair, verify,
+    PackageReference, PublisherIdentityClaim, RemoveOptions, disable, enable,
+    inspect as inspect_extension_archive, install, inventory as extension_inventory, remove,
+    repair, verify,
 };
 use latentdeck_native_output::{HostFullscreenController, NativeSpoutStatus};
 use playback_runtime_v2::{PlaybackLaunchConfig, PlaybackRuntime, PlaybackRuntimeError};
@@ -468,16 +469,9 @@ struct InspectedExtensionView {
 fn extension_snapshot_for(
     roots: &ExtensionRoots,
 ) -> Result<ExtensionManagerSnapshot, CommandError> {
-    let packages = list_extensions(roots)
-        .map_err(extension_command_error)?
-        .into_iter()
-        .map(Into::into)
-        .collect();
-    let matrix = compatibility_matrix(roots)
-        .map_err(extension_command_error)?
-        .into_iter()
-        .map(Into::into)
-        .collect();
+    let inventory = extension_inventory(roots).map_err(extension_command_error)?;
+    let packages = inventory.packages.into_iter().map(Into::into).collect();
+    let matrix = inventory.matrix.into_iter().map(Into::into).collect();
     Ok(ExtensionManagerSnapshot { packages, matrix })
 }
 

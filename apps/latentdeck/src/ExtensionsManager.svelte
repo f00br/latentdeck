@@ -20,6 +20,7 @@
   let snapshot: ExtensionsSnapshot = EMPTY_EXTENSIONS_SNAPSHOT;
   let busy = false;
   let snapshotPending = false;
+  $: controlsBusy = busy || snapshotPending;
   let errorMessage = "";
   let statusMessage =
     "Local packages only. Choose every active version explicitly.";
@@ -275,7 +276,7 @@
   }
 </script>
 
-<div class="extensions-manager" aria-busy={busy || snapshotPending}>
+<div class="extensions-manager" aria-busy={controlsBusy}>
   <header class="manager-heading">
     <div>
       <p>Local packages · exact immutable versions</p>
@@ -286,7 +287,7 @@
       <code>.ldcodec</code> Codec Packs. Publisher identity is self-declared; SHA-256
       confirms exact archive bytes, not the publisher.
     </p>
-    <button disabled={busy} onclick={() => refreshSnapshot(true)}>
+    <button disabled={controlsBusy} onclick={() => refreshSnapshot(true)}>
       {snapshotPending ? "Refreshing…" : "Refresh snapshot"}
     </button>
   </header>
@@ -304,7 +305,7 @@
           <strong>Install exact bytes</strong>
         </div>
         <button
-          disabled={busy}
+          disabled={controlsBusy}
           onclick={() => inspectExtensionArchive("install")}
           >Inspect local package</button
         >
@@ -355,14 +356,14 @@
           </label>
           <div class="actions">
             <button
-              disabled={busy ||
+              disabled={controlsBusy ||
                 !shaConfirmationMatches(
                   installExpectedSha256,
                   installInspection.archiveSha256,
                 )}
               onclick={installExtension}>Install exact version</button
             >
-            <button disabled={busy} onclick={clearInstallInspection}
+            <button disabled={controlsBusy} onclick={clearInstallInspection}
               >Clear</button
             >
           </div>
@@ -411,20 +412,22 @@
                 >
               {/if}
               <div class="actions">
-                <button disabled={busy} onclick={() => verifyExtension(summary)}
-                  >Verify</button
+                <button
+                  disabled={controlsBusy}
+                  onclick={() => verifyExtension(summary)}>Verify</button
                 >
                 <button
-                  disabled={busy || summary.health !== "healthy"}
+                  disabled={controlsBusy || summary.health !== "healthy"}
                   onclick={() => setExtensionEnabled(summary, !summary.enabled)}
                   >{summary.enabled ? "Disable" : "Enable"}</button
                 >
-                <button disabled={busy} onclick={() => startRepair(summary)}
-                  >Repair…</button
+                <button
+                  disabled={controlsBusy}
+                  onclick={() => startRepair(summary)}>Repair…</button
                 >
                 <button
                   class="remove"
-                  disabled={busy ||
+                  disabled={controlsBusy ||
                     (summary.health === "corrupt" &&
                       corruptRemovalAcknowledgement !==
                         extensionPackageKey(summary.package))}
@@ -438,7 +441,7 @@
                     type="checkbox"
                     checked={corruptRemovalAcknowledgement ===
                       extensionPackageKey(summary.package)}
-                    disabled={busy}
+                    disabled={controlsBusy}
                     onchange={(event) => {
                       corruptRemovalAcknowledgement = event.currentTarget
                         .checked
@@ -468,11 +471,11 @@
         </div>
         <div class="actions">
           <button
-            disabled={busy}
+            disabled={controlsBusy}
             onclick={() => inspectExtensionArchive("repair")}
             >Inspect repair archive</button
           >
-          <button disabled={busy} onclick={clearRepair}>Cancel</button>
+          <button disabled={controlsBusy} onclick={clearRepair}>Cancel</button>
         </div>
       </header>
       {#if repairInspection === null}
@@ -514,7 +517,7 @@
             />
           </label>
           <button
-            disabled={busy ||
+            disabled={controlsBusy ||
               !inspectionMatchesPackage(
                 repairInspection,
                 repairTarget.package,

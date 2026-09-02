@@ -157,6 +157,9 @@
   );
   const conversionStatus = $derived(conversionProgressLabel(conversion));
   const conversionCancelled = $derived(conversionCancelledCount(conversion));
+  const extensionsControlsBusy = $derived(
+    extensionsBusy || extensionsSnapshotPending,
+  );
   const spoutState = $derived(
     spout === null
       ? "Output inactive"
@@ -360,7 +363,6 @@
     workspaceMode = mode;
     await tick();
     scheduleViewportSync();
-    if (mode === "extensions") void refreshExtensions(true);
     if (mode === "prepare") void refreshRawImportOptions(true);
   }
 
@@ -619,6 +621,7 @@
   ): Promise<void> {
     const device = codecDeviceSelections[extensionPackageKey(summary.package)];
     if (
+      extensionsSnapshotPending ||
       summary.package.kind !== "codec_pack" ||
       summary.health !== "healthy" ||
       !summary.enabled ||
@@ -1095,7 +1098,7 @@
   class:fullscreen-shell={workspaceMode === "play" &&
     fullscreen?.active &&
     player.outputAvailable}
-  aria-busy={busy || conversionBusy || extensionsBusy}
+  aria-busy={busy || conversionBusy || extensionsControlsBusy}
 >
   <header class="masthead">
     <div class="brand-lockup">
@@ -1568,7 +1571,9 @@
         <code>.ldcodec</code> Codec Packs. Publisher metadata is self-declared; an
         exact SHA-256 confirms archive bytes, not publisher identity.
       </p>
-      <button disabled={extensionsBusy} onclick={() => refreshExtensions(true)}
+      <button
+        disabled={extensionsControlsBusy}
+        onclick={() => refreshExtensions(true)}
         >{extensionsSnapshotPending
           ? "Refreshing…"
           : "Refresh snapshot"}</button
@@ -1594,7 +1599,7 @@
             <strong>Install exact bytes</strong>
           </div>
           <button
-            disabled={extensionsBusy}
+            disabled={extensionsControlsBusy}
             onclick={() => inspectExtensionArchive("install")}
             >Inspect local package</button
           >
@@ -1649,15 +1654,16 @@
             </label>
             <div class="extension-primary-actions">
               <button
-                disabled={extensionsBusy ||
+                disabled={extensionsControlsBusy ||
                   !shaConfirmationMatches(
                     installExpectedSha256,
                     installInspection.archiveSha256,
                   )}
                 onclick={installExtension}>Install exact version</button
               >
-              <button disabled={extensionsBusy} onclick={clearInstallInspection}
-                >Clear</button
+              <button
+                disabled={extensionsControlsBusy}
+                onclick={clearInstallInspection}>Clear</button
               >
             </div>
           </article>
@@ -1720,22 +1726,23 @@
                 {/if}
                 <div class="extension-actions">
                   <button
-                    disabled={extensionsBusy}
+                    disabled={extensionsControlsBusy}
                     onclick={() => verifyExtension(summary)}>Verify</button
                   >
                   <button
-                    disabled={extensionsBusy || summary.health !== "healthy"}
+                    disabled={extensionsControlsBusy ||
+                      summary.health !== "healthy"}
                     onclick={() =>
                       setExtensionEnabled(summary, !summary.enabled)}
                     >{summary.enabled ? "Disable" : "Enable"}</button
                   >
                   <button
-                    disabled={extensionsBusy}
+                    disabled={extensionsControlsBusy}
                     onclick={() => startRepair(summary)}>Repair…</button
                   >
                   <button
                     class="remove-extension"
-                    disabled={extensionsBusy ||
+                    disabled={extensionsControlsBusy ||
                       (summary.health === "corrupt" &&
                         corruptRemovalAcknowledgement !==
                           extensionPackageKey(summary.package))}
@@ -1751,7 +1758,7 @@
                         value={codecDeviceSelections[
                           extensionPackageKey(summary.package)
                         ] ?? ""}
-                        disabled={extensionsBusy}
+                        disabled={extensionsControlsBusy}
                         onchange={(event) => {
                           const value = event.currentTarget.value;
                           setCodecDevice(
@@ -1766,7 +1773,7 @@
                       </select>
                     </label>
                     <button
-                      disabled={extensionsBusy ||
+                      disabled={extensionsControlsBusy ||
                         !["cpu", "cuda"].includes(
                           codecDeviceSelections[
                             extensionPackageKey(summary.package)
@@ -1783,7 +1790,7 @@
                       type="checkbox"
                       checked={corruptRemovalAcknowledgement ===
                         extensionPackageKey(summary.package)}
-                      disabled={extensionsBusy}
+                      disabled={extensionsControlsBusy}
                       onchange={(event) => {
                         corruptRemovalAcknowledgement = event.currentTarget
                           .checked
@@ -1816,11 +1823,11 @@
           </div>
           <div class="extension-primary-actions">
             <button
-              disabled={extensionsBusy}
+              disabled={extensionsControlsBusy}
               onclick={() => inspectExtensionArchive("repair")}
               >Inspect repair archive</button
             >
-            <button disabled={extensionsBusy} onclick={clearRepair}
+            <button disabled={extensionsControlsBusy} onclick={clearRepair}
               >Cancel</button
             >
           </div>
@@ -1864,7 +1871,7 @@
               />
             </label>
             <button
-              disabled={extensionsBusy ||
+              disabled={extensionsControlsBusy ||
                 !inspectionMatchesPackage(
                   repairInspection,
                   repairTarget.package,

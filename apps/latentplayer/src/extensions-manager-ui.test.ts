@@ -136,6 +136,17 @@ function text(root: ParentNode): string {
   return root.textContent?.replace(/\s+/g, " ").trim() ?? "";
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((accept) => {
+    resolve = accept;
+  });
+  return { promise, resolve };
+}
+
 describe("mounted LatentPlayer Extensions Manager", () => {
   beforeEach(() => {
     native.invoke.mockReset();
@@ -151,6 +162,82 @@ describe("mounted LatentPlayer Extensions Manager", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("keeps cached package actions disabled while a snapshot owns the lifecycle lock", async () => {
+    const codec = summary(CODEC, { enabled: true });
+    const snapshot: ExtensionsSnapshot = { packages: [codec], matrix: [] };
+    const pendingSnapshot = deferred<ExtensionsSnapshot>();
+    let snapshotCount = 0;
+    native.invoke.mockImplementation(async (command: string) => {
+      switch (command) {
+        case "player_viewport_session_begin":
+          return { epoch: 1 };
+        case "player_viewport_set_bounds":
+          return undefined;
+        case "player_snapshot":
+          return EMPTY_PLAYER_VIEW;
+        case "player_fullscreen_status":
+        case "player_spout_status":
+        case "player_conversion_snapshot":
+          return null;
+        case "player_raw_import_options":
+          return {
+            packageId: CODEC.packageId,
+            packageVersion: CODEC.packageVersion,
+            adapterId: "org.example.adapter",
+            adapterVersion: "2.0.0",
+            displayName: "Example Codec",
+            profiles: [],
+          };
+        case "extensions_snapshot":
+          snapshotCount += 1;
+          return snapshotCount === 1 ? snapshot : pendingSnapshot.promise;
+        case "player_select_codec_exact":
+          return undefined;
+        default:
+          throw new Error(`Unexpected native command ${command}`);
+      }
+    });
+
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(App, { target });
+    await settle();
+
+    let codecCard = extensionCard(target, CODEC.packageId);
+    const device = codecCard.querySelector<HTMLSelectElement>("select")!;
+    device.value = "cuda";
+    device.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+
+    button(target, "Refresh snapshot").click();
+    await settle();
+    expect(snapshotCount).toBe(2);
+    codecCard = extensionCard(target, CODEC.packageId);
+    expect(button(target, "Refreshing…").disabled).toBe(true);
+    expect(button(codecCard, "Use in Player").disabled).toBe(true);
+    button(codecCard, "Use in Player").click();
+    await settle();
+    expect(
+      native.invoke.mock.calls.filter(
+        ([name]) => name === "player_select_codec_exact",
+      ),
+    ).toHaveLength(0);
+
+    pendingSnapshot.resolve(snapshot);
+    await settle();
+    codecCard = extensionCard(target, CODEC.packageId);
+    expect(button(codecCard, "Use in Player").disabled).toBe(false);
+    await click(codecCard, "Use in Player");
+    expect(native.invoke).toHaveBeenCalledWith("player_select_codec_exact", {
+      packageId: CODEC.packageId,
+      packageVersion: CODEC.packageVersion,
+      device: "cuda",
+    });
+
+    await unmount(component);
+    target.remove();
   });
 
   it("drives the local exact-version lifecycle through the rendered surface", async () => {

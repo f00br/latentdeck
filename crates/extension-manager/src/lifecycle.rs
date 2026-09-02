@@ -18,8 +18,9 @@ use crate::archive::{
 use crate::error::{ErrorCode, ExtensionError, Result};
 use crate::model::{
     ActiveInstalledPackage, BundledPackageIndex, CodecCapability, CompatibilityPair,
-    CompatibilityReason, InstallReceipt, InstalledPackageSummary, PackageHealth, PackageKind,
-    PackageManifest, PackageReference, TrustReceipt, ValidatedInstalledPackage,
+    CompatibilityReason, ExtensionInventory, InstallReceipt, InstalledPackageSummary,
+    PackageHealth, PackageKind, PackageManifest, PackageReference, TrustReceipt,
+    ValidatedInstalledPackage,
 };
 use crate::schema::{
     MAX_JSON_BYTES, TRUST_RECEIPT_VERSION, canonical_json, is_reserved_package_id,
@@ -768,12 +769,35 @@ pub fn remove(
 /// Returns a stable error only when a lifecycle root itself is unsafe or its
 /// bounded directory inventory cannot be inspected.
 pub fn list(roots: &ExtensionRoots) -> Result<Vec<InstalledPackageSummary>> {
+    list_with_manifests(roots).map(|(packages, _)| packages)
+}
+
+/// Read installed package summaries and their compatibility matrix from one
+/// inventory pass. Every healthy package tree is validated once.
+///
+/// # Errors
+///
+/// Returns the same bounded root-level errors as [`list`]. Individual package
+/// failures remain isolated in the package summaries and matrix reasons.
+pub fn inventory(roots: &ExtensionRoots) -> Result<ExtensionInventory> {
+    let (packages, manifests) = list_with_manifests(roots)?;
+    let matrix = compatibility_matrix_from_inventory(&packages, &manifests);
+    Ok(ExtensionInventory { packages, matrix })
+}
+
+fn list_with_manifests(
+    roots: &ExtensionRoots,
+) -> Result<(
+    Vec<InstalledPackageSummary>,
+    BTreeMap<PackageReference, PackageManifest>,
+)> {
     validate_roots(roots)?;
     prepare_base(roots)?;
     let _lock = acquire_lock(roots)?;
     let mut packages = Vec::new();
+    let mut manifests = BTreeMap::new();
     for kind in [PackageKind::DeckPack, PackageKind::CodecPack] {
-        list_kind_locked(roots, kind, &mut packages)?;
+        list_kind_locked(roots, kind, &mut packages, &mut manifests)?;
     }
     packages.sort_by(|left, right| {
         (
@@ -787,7 +811,7 @@ pub fn list(roots: &ExtensionRoots) -> Result<Vec<InstalledPackageSummary>> {
                 &right.package.package_version,
             ))
     });
-    Ok(packages)
+    Ok((packages, manifests))
 }
 
 /// Resolve every installed Deck-version by Codec-version pair.
@@ -797,7 +821,14 @@ pub fn list(roots: &ExtensionRoots) -> Result<Vec<InstalledPackageSummary>> {
 /// Returns a stable error when the installed roots cannot be safely listed or
 /// inspected. Individual invalid packages become `package_invalid` pairs.
 pub fn compatibility_matrix(roots: &ExtensionRoots) -> Result<Vec<CompatibilityPair>> {
-    let summaries = list(roots)?;
+    let (summaries, manifests) = list_with_manifests(roots)?;
+    Ok(compatibility_matrix_from_inventory(&summaries, &manifests))
+}
+
+fn compatibility_matrix_from_inventory(
+    summaries: &[InstalledPackageSummary],
+    manifests: &BTreeMap<PackageReference, PackageManifest>,
+) -> Vec<CompatibilityPair> {
     let decks: Vec<_> = summaries
         .iter()
         .filter(|item| item.package.kind == PackageKind::DeckPack)
@@ -806,17 +837,6 @@ pub fn compatibility_matrix(roots: &ExtensionRoots) -> Result<Vec<CompatibilityP
         .iter()
         .filter(|item| item.package.kind == PackageKind::CodecPack)
         .collect();
-    let mut manifests = BTreeMap::new();
-    for summary in &summaries {
-        if summary.health != PackageHealth::Corrupt
-            && let Ok(validated) = validate_directory(
-                &package_destination(roots, &summary.package),
-                Some(summary.package.kind),
-            )
-        {
-            manifests.insert(summary.package.clone(), validated.manifest);
-        }
-    }
     let mut pairs = Vec::with_capacity(decks.len().saturating_mul(codecs.len()));
     for deck in decks {
         for codec in &codecs {
@@ -845,7 +865,7 @@ pub fn compatibility_matrix(roots: &ExtensionRoots) -> Result<Vec<CompatibilityP
             });
         }
     }
-    Ok(pairs)
+    pairs
 }
 
 fn publish_new(
@@ -1073,6 +1093,7 @@ fn list_kind_locked(
     roots: &ExtensionRoots,
     kind: PackageKind,
     output: &mut Vec<InstalledPackageSummary>,
+    manifests: &mut BTreeMap<PackageReference, PackageManifest>,
 ) -> Result<()> {
     let root = roots.package_root(kind);
     match fs::symlink_metadata(root) {
@@ -1121,7 +1142,7 @@ fn list_kind_locked(
             ));
             break;
         }
-        list_identity_locked(roots, kind, &id_entry, output);
+        list_identity_locked(roots, kind, &id_entry, output, manifests);
     }
     Ok(())
 }
@@ -1131,6 +1152,7 @@ fn list_identity_locked(
     kind: PackageKind,
     id_entry: &fs::DirEntry,
     output: &mut Vec<InstalledPackageSummary>,
+    manifests: &mut BTreeMap<PackageReference, PackageManifest>,
 ) {
     let package_id = id_entry.file_name().to_string_lossy().into_owned();
     let Ok(id_metadata) = fs::symlink_metadata(id_entry.path()) else {
@@ -1196,7 +1218,7 @@ fn list_identity_locked(
             ));
             break;
         }
-        list_version_locked(roots, kind, &package_id, &version_entry, output);
+        list_version_locked(roots, kind, &package_id, &version_entry, output, manifests);
     }
 }
 
@@ -1206,14 +1228,28 @@ fn list_version_locked(
     package_id: &str,
     version_entry: &fs::DirEntry,
     output: &mut Vec<InstalledPackageSummary>,
+    manifests: &mut BTreeMap<PackageReference, PackageManifest>,
 ) {
     let package = PackageReference {
         kind,
         package_id: package_id.to_owned(),
         package_version: version_entry.file_name().to_string_lossy().into_owned(),
     };
-    match verify_locked(roots, &package) {
-        Ok(summary) => output.push(summary),
+    let destination = package_destination(roots, &package);
+    match verify_installed_tree_locked(roots, &package, &destination) {
+        Ok((receipt, validated)) => {
+            let summary = InstalledPackageSummary {
+                package: package.clone(),
+                display_name: Some(validated.manifest.display_name().to_owned()),
+                publisher_name: Some(validated.manifest.publisher().name.clone()),
+                enabled: receipt.enabled,
+                health: PackageHealth::Healthy,
+                error_code: None,
+                error_detail: None,
+            };
+            manifests.insert(package, validated.manifest);
+            output.push(summary);
+        }
         Err(error) => {
             let tree = validate_directory(&version_entry.path(), Some(kind));
             let (display_name, publisher_name) = tree.ok().map_or((None, None), |validated| {

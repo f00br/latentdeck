@@ -9,8 +9,9 @@ use latentdeck_extension_manager::{
     CodecCapability, CompatibilityPair, CompatibilityReason, DeckPackManifest,
     ErrorCode as ExtensionErrorCode, ExtensionError, ExtensionRoots, InstallRequest,
     InstalledPackageSummary, PackageHealth, PackageKind, PackageReference, PublisherIdentityClaim,
-    RemoveOptions, compatibility_matrix, disable, enable, inspect as inspect_extension_archive,
-    install, list as list_extensions, remove, repair, resolve_active, verify,
+    RemoveOptions, disable, enable, inspect as inspect_extension_archive, install,
+    inventory as extension_inventory, list as list_extensions, remove, repair, resolve_active,
+    verify,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -374,16 +375,9 @@ enum DeckFaceplateCaptureMode {
 fn extension_snapshot_for(
     roots: &ExtensionRoots,
 ) -> Result<ExtensionManagerSnapshot, CommandError> {
-    let packages = list_extensions(roots)
-        .map_err(extension_command_error)?
-        .into_iter()
-        .map(Into::into)
-        .collect();
-    let matrix = compatibility_matrix(roots)
-        .map_err(extension_command_error)?
-        .into_iter()
-        .map(Into::into)
-        .collect();
+    let inventory = extension_inventory(roots).map_err(extension_command_error)?;
+    let packages = inventory.packages.into_iter().map(Into::into).collect();
+    let matrix = inventory.matrix.into_iter().map(Into::into).collect();
     Ok(ExtensionManagerSnapshot { packages, matrix })
 }
 

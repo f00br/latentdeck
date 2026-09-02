@@ -18,8 +18,8 @@ use latentdeck_core::{
     player_session_v2::PlayerSessionV2HostContract,
 };
 use latentdeck_extension_manager::{
-    ActiveInstalledPackage, CodecCapability, ExtensionRoots, PackageKind, PackageManifest,
-    PackageReference, resolve_active,
+    ActiveInstalledPackage, CodecCapability, ErrorCode as ExtensionErrorCode, ExtensionError,
+    ExtensionRoots, PackageKind, PackageManifest, PackageReference, resolve_active,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -76,6 +76,10 @@ pub enum PlayerSelectionV2Error {
     MissingSelection,
     #[error("the exact selected Codec Pack is not active and trusted")]
     PackageUnavailable,
+    #[error(
+        "another extension lifecycle operation is still in progress; wait for it to finish and try again"
+    )]
+    PackageBusy,
     #[error("the selected package is not a Player-capable Codec Pack v2")]
     PackageIncompatible,
     #[error("the selected Codec Pack requires an external asset that is not bound")]
@@ -94,6 +98,7 @@ impl PlayerSelectionV2Error {
         match self {
             Self::MissingSelection => "codec.selection_missing",
             Self::PackageUnavailable => "codec.package_unavailable",
+            Self::PackageBusy => "extension.lifecycle_busy",
             Self::PackageIncompatible => "codec.package_incompatible",
             Self::MissingAsset => "codec.asset_missing",
             Self::AssetInvalid => "codec.asset_incompatible",
@@ -108,7 +113,7 @@ pub fn validate_exact_selection(
     selection: &PlayerCodecSelectionV2,
 ) -> Result<CodecSummary, PlayerSelectionV2Error> {
     let package = resolve_active(roots, selection.package())
-        .map_err(|_| PlayerSelectionV2Error::PackageUnavailable)?;
+        .map_err(|error| package_resolution_error(&error))?;
     codec_summary(&package, selection)
 }
 
@@ -121,7 +126,7 @@ pub fn prepare_exact_launch(
 ) -> Result<PreparedPlayerV2Launch, PlayerSelectionV2Error> {
     let selection = selection.ok_or(PlayerSelectionV2Error::MissingSelection)?;
     let package = resolve_active(roots, selection.package())
-        .map_err(|_| PlayerSelectionV2Error::PackageUnavailable)?;
+        .map_err(|error| package_resolution_error(&error))?;
     let manifest = codec_manifest(&package)?;
     let external_assets = external_asset_bindings(manifest, selection)?;
     let cartridge = open_integrity_validated(source.cartridge_path, &ValidationOptions::default())
@@ -151,6 +156,14 @@ pub fn prepare_exact_launch(
         cartridge_summary: source.cartridge.clone(),
         latent_slot_count,
     })
+}
+
+fn package_resolution_error(error: &ExtensionError) -> PlayerSelectionV2Error {
+    if error.code() == ExtensionErrorCode::LifecycleBusy {
+        PlayerSelectionV2Error::PackageBusy
+    } else {
+        PlayerSelectionV2Error::PackageUnavailable
+    }
 }
 
 fn codec_manifest(
@@ -372,5 +385,18 @@ mod tests {
         assert_eq!(selection.package().kind, PackageKind::CodecPack);
         assert_eq!(selection.package().package_id, "org.example.codec");
         assert_eq!(selection.package().package_version, "0.2.0");
+    }
+
+    #[test]
+    fn lifecycle_contention_is_not_reported_as_an_unavailable_package() {
+        let error = ExtensionError::new(
+            ExtensionErrorCode::LifecycleBusy,
+            "fixture lifecycle operation is still running",
+        );
+
+        let mapped = package_resolution_error(&error);
+
+        assert!(matches!(mapped, PlayerSelectionV2Error::PackageBusy));
+        assert_eq!(mapped.code(), "extension.lifecycle_busy");
     }
 }
