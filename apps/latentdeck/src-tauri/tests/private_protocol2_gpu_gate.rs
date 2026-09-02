@@ -11,13 +11,14 @@ use serde_json::{Value, json};
 
 const OPT_IN_ENV: &str = "LATENTDECK_PRIVATE_PROTOCOL2_GPU_GATE";
 const RECEIPT_ENV: &str = "LATENTDECK_PRIVATE_PROTOCOL2_GPU_GATE_RECEIPT";
+const EXPECTED_COMMIT_ENV: &str = "LATENTDECK_PRIVATE_PROTOCOL2_GPU_GATE_EXPECTED_COMMIT";
 const CODEC_ID: &str = "org.latentdeck.h3";
 const CODEC_VERSION: &str = "0.2.0";
 const ADAPTER_ID: &str = "org.latentdeck.h3";
 const ADAPTER_VERSION: &str = "0.2.0";
 const D2_ID: &str = "org.latentdeck.deck.d2";
 const Q4_ID: &str = "org.latentdeck.deck.q4";
-const EXTERNAL_DECK_ID: &str = "dev.latentdeck.private.h3_probe";
+const EXTERNAL_DECK_ID: &str = "dev.latentdeck.private.h3-probe";
 const DECK_VERSION: &str = "0.2.0";
 const PROFILE_FAMILY: &str = "minimax_h3";
 const PROFILE_NAME: &str = "h3_av_latent";
@@ -308,6 +309,38 @@ fn private_gpu_stability_resets_player_on_the_final_nonempty_batch() {
 }
 
 #[test]
+fn private_gpu_external_deck_identity_is_synchronized() {
+    let runner = include_str!("../src/private_protocol2_gpu_e2e_main.rs");
+    assert!(
+        runner.contains(&format!(
+            "const EXTERNAL_DECK_ID: &str = \"{EXTERNAL_DECK_ID}\";"
+        )),
+        "the executable evidence producer and closed receipt validator must use one exact external Deck package ID"
+    );
+
+    let script = include_str!("../../../../tools/Test-PrivateProtocol2GpuGate.ps1");
+    assert!(
+        script.contains(&format!(
+            "external_deck = '{EXTERNAL_DECK_ID}@{DECK_VERSION}'"
+        )),
+        "the PowerShell contract receipt must use the same exact external Deck package identity"
+    );
+}
+
+#[test]
+fn private_gpu_receipt_is_bound_to_the_expected_source_commit() {
+    let expected = "b".repeat(40);
+    assert!(validate_receipt_value_for_commit(valid_receipt(), &expected).is_ok());
+
+    let stale = "c".repeat(40);
+    let error = validate_receipt_value_for_commit(valid_receipt(), &stale)
+        .expect_err("a receipt from another commit must be rejected");
+    assert!(error.contains("source_commit"));
+
+    assert!(validate_receipt_value_for_commit(valid_receipt(), &"B".repeat(40)).is_err());
+}
+
+#[test]
 fn private_protocol2_receipt_contract_is_closed_and_path_free() {
     let value = valid_receipt();
     validate_receipt_value(value).expect("valid path-free Protocol 2 evidence");
@@ -373,7 +406,19 @@ fn validate_private_protocol2_gpu_gate_receipt() {
         "private receipt exceeds the 1 MiB bound"
     );
     let value: Value = serde_json::from_slice(&bytes).expect("private receipt JSON");
-    validate_receipt_value(value).expect("private Protocol 2 GPU evidence contract");
+    let expected_commit = env::var(EXPECTED_COMMIT_ENV)
+        .expect("expected source commit environment variable is required");
+    validate_receipt_value_for_commit(value, &expected_commit)
+        .expect("private Protocol 2 GPU evidence contract");
+}
+
+fn validate_receipt_value_for_commit(value: Value, expected_commit: &str) -> Result<(), String> {
+    require(canonical_hex(expected_commit, 40), "expected_source_commit")?;
+    require(
+        value.get("source_commit").and_then(Value::as_str) == Some(expected_commit),
+        "source_commit does not match the expected checkout commit",
+    )?;
+    validate_receipt_value(value)
 }
 
 fn validate_receipt_value(value: Value) -> Result<(), String> {

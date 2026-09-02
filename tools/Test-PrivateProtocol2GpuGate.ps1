@@ -41,7 +41,7 @@ try {
                 'org.latentdeck.deck.d2@0.2.0',
                 'org.latentdeck.deck.q4@0.2.0'
             )
-            external_deck = 'dev.latentdeck.private.h3_probe@0.2.0'
+            external_deck = 'dev.latentdeck.private.h3-probe@0.2.0'
             required_surfaces = @(
                 'player',
                 'd2',
@@ -60,9 +60,11 @@ try {
         return
     }
 
+    if (-not [System.IO.Path]::IsPathFullyQualified($ReceiptPath)) {
+        throw 'Private Protocol 2 GPU evidence must be one existing absolute receipt file.'
+    }
     $receiptFullPath = [System.IO.Path]::GetFullPath($ReceiptPath)
-    if (-not [System.IO.Path]::IsPathFullyQualified($receiptFullPath) -or
-        -not (Test-Path -LiteralPath $receiptFullPath -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $receiptFullPath -PathType Leaf)) {
         throw 'Private Protocol 2 GPU evidence must be one existing absolute receipt file.'
     }
     $receiptInfo = Get-Item -LiteralPath $receiptFullPath -Force
@@ -80,9 +82,18 @@ try {
         'LATENTDECK_PRIVATE_PROTOCOL2_GPU_GATE_RECEIPT',
         'Process'
     )
+    $previousExpectedCommit = [Environment]::GetEnvironmentVariable(
+        'LATENTDECK_PRIVATE_PROTOCOL2_GPU_GATE_EXPECTED_COMMIT',
+        'Process'
+    )
+    $expectedCommit = (& git rev-parse --verify HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or $expectedCommit -cnotmatch '^[0-9a-f]{40}$') {
+        throw 'Private Protocol 2 GPU evidence requires one exact lowercase source commit.'
+    }
     try {
         $env:LATENTDECK_PRIVATE_PROTOCOL2_GPU_GATE = '1'
         $env:LATENTDECK_PRIVATE_PROTOCOL2_GPU_GATE_RECEIPT = $receiptFullPath
+        $env:LATENTDECK_PRIVATE_PROTOCOL2_GPU_GATE_EXPECTED_COMMIT = $expectedCommit
         & cargo test --locked --manifest-path $manifest --test $testName `
             -- validate_private_protocol2_gpu_gate_receipt --ignored --exact --nocapture
         if ($LASTEXITCODE -ne 0) {
@@ -97,6 +108,11 @@ try {
         [Environment]::SetEnvironmentVariable(
             'LATENTDECK_PRIVATE_PROTOCOL2_GPU_GATE_RECEIPT',
             $previousReceipt,
+            'Process'
+        )
+        [Environment]::SetEnvironmentVariable(
+            'LATENTDECK_PRIVATE_PROTOCOL2_GPU_GATE_EXPECTED_COMMIT',
+            $previousExpectedCommit,
             'Process'
         )
     }
