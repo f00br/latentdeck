@@ -83,9 +83,7 @@ def test_protocol2_cli_builds_one_exact_codec_and_no_startup_decks(monkeypatch) 
         "cartridge_access_factory": access_factory,
         "ring_transport": ring,
     }
-    assert captured["service_keywords"]["worker_identity"] == (
-        "org.latentdeck.h3@0.2.0/org.latentdeck.h3@0.2.0"
-    )
+    assert captured["service_keywords"]["worker_identity"] == "org.latentdeck.h3.worker"
     assert ring.closed
 
 

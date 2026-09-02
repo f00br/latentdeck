@@ -87,10 +87,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             ring_transport = None
             raise
 
-    worker_identity = (
-        f"{trusted_codec.pack_id}@{trusted_codec.pack_version}/"
-        f"{trusted_codec.adapter_id}@{trusted_codec.adapter_version}"
-    )
+    # The hello contract carries one bounded identifier, not a package
+    # coordinate. Exact pack/adapter versions are negotiated by the following
+    # codec.descriptor exchange, so keep this process identity valid for every
+    # semver accepted by TrustedCodecEntrypoint.
+    worker_identity = f"{trusted_codec.pack_id}.worker"
     try:
         return run_protocol2_service(
             sys.stdin.buffer,
