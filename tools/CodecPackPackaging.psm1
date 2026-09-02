@@ -8,7 +8,7 @@ $script:ForbiddenPayloadExtensions = @(
     '.tiff', '.exr', '.hdr', '.psd', '.ps1', '.cmd', '.bat', '.sh'
 )
 $script:ArchiveExtensions = @(
-    '.zip', '.tar', '.tgz', '.gz', '.bz2', '.xz', '.7z', '.rar'
+    '.ld', '.ldcodec', '.zip', '.tar', '.tgz', '.gz', '.bz2', '.xz', '.7z', '.rar'
 )
 $script:ForbiddenDirectoryNames = @(
     '.git', '.hg', '.svn', '__pycache__', '.pytest_cache', '.ruff_cache'
@@ -23,9 +23,10 @@ $script:SensitivePortableTextExtensions = @(
     '.cfg', '.ini', '.json', '.md', '.txt', '.toml', '.yaml', '.yml', '._pth',
     '.pem', '.key', '.crt', '.xml', '.cmake', '.pc'
 )
-$script:MaximumCatalogFiles = 32768
-$script:MaximumArchiveEntries = 32770
-$script:MaximumPackBytes = [int64](20GB)
+$script:MaximumCatalogFiles = 32766
+$script:MaximumArchiveEntries = 32768
+$script:MaximumArchiveBytes = [int64](32GB)
+$script:MaximumPackBytes = [int64](64GB)
 $script:MaximumJsonBytes = [int64](1MB)
 
 Add-Type -AssemblyName System.IO.Compression
@@ -561,13 +562,14 @@ function Assert-CodecPackManifestJsonTypes {
     )
 
     $context = 'codec-pack.json'
-    foreach ($name in @('manifest_version', 'pack_id', 'pack_version', 'display_name')) {
+    foreach ($name in @('manifest_version', 'kind', 'pack_id', 'pack_version', 'display_name', 'summary')) {
         Assert-JsonStringProperty -Object $Root -Name $name -Context $context
     }
 
     $publisher = Get-JsonPropertyElement -Object $Root -Name 'publisher' -Context $context
     Assert-JsonStringProperty -Object $publisher -Name 'name' -Context 'publisher'
     Assert-JsonNullableStringProperty -Object $publisher -Name 'url' -Context 'publisher'
+    Assert-JsonStringProperty -Object $publisher -Name 'identity_claim' -Context 'publisher'
 
     $license = Get-JsonPropertyElement -Object $Root -Name 'license' -Context $context
     foreach ($name in @('spdx_or_label', 'notice_path')) {
@@ -583,18 +585,25 @@ function Assert-CodecPackManifestJsonTypes {
     foreach ($name in @('app_min_inclusive', 'app_max_exclusive')) {
         Assert-JsonStringProperty -Object $compatibility -Name $name -Context 'compatibility'
     }
-    Assert-JsonUnsignedIntegerProperty -Object $compatibility -Name 'worker_protocol_min' -Maximum ([uint16]::MaxValue) -Context 'compatibility'
-    Assert-JsonUnsignedIntegerProperty -Object $compatibility -Name 'worker_protocol_max' -Maximum ([uint16]::MaxValue) -Context 'compatibility'
+    foreach ($name in @('worker_protocol', 'codec_adapter_api')) {
+        Assert-JsonUnsignedIntegerProperty -Object $compatibility -Name $name -Maximum ([uint16]::MaxValue) -Context 'compatibility'
+    }
+    foreach ($name in @('tensor_abi', 'torch_exact_build')) {
+        Assert-JsonStringProperty -Object $compatibility -Name $name -Context 'compatibility'
+    }
+    $python = Get-JsonPropertyElement -Object $compatibility -Name 'python' -Context 'compatibility'
+    foreach ($name in @('implementation', 'version', 'platform_tag')) {
+        Assert-JsonStringProperty -Object $python -Name $name -Context 'compatibility.python'
+    }
     Assert-JsonStringArrayProperty -Object $compatibility -Name 'lc_spec_versions' -Context 'compatibility'
     $profileIndex = 0
     foreach ($profile in @(Get-JsonArrayElements -Object $compatibility -Name 'profiles' -Context 'compatibility')) {
         if ($profile.ValueKind -ne [System.Text.Json.JsonValueKind]::Object) {
             throw "compatibility.profiles[$profileIndex] must be a JSON object."
         }
-        foreach ($name in @('codec_family', 'profile')) {
+        foreach ($name in @('codec_family', 'profile', 'profile_version')) {
             Assert-JsonStringProperty -Object $profile -Name $name -Context "compatibility.profiles[$profileIndex]"
         }
-        Assert-JsonStringArrayProperty -Object $profile -Name 'profile_versions' -Context "compatibility.profiles[$profileIndex]"
         $profileIndex += 1
     }
 
@@ -602,14 +611,19 @@ function Assert-CodecPackManifestJsonTypes {
     foreach ($name in @('executable', 'working_directory')) {
         Assert-JsonStringProperty -Object $worker -Name $name -Context 'worker'
     }
-    foreach ($name in @('arguments', 'd2_arguments', 'q4_arguments')) {
-        Assert-JsonStringArrayProperty -Object $worker -Name $name -Context 'worker'
+    Assert-JsonStringArrayProperty -Object $worker -Name 'arguments' -Context 'worker'
+    foreach ($name in @('start_timeout_ms', 'heartbeat_timeout_ms')) {
+        Assert-JsonUnsignedIntegerProperty -Object $worker -Name $name -Maximum ([uint32]::MaxValue) -Context 'worker'
     }
-    Assert-JsonUnsignedIntegerProperty -Object $worker -Name 'probe_timeout_ms' -Maximum ([uint32]::MaxValue) -Context 'worker'
 
     $adapter = Get-JsonPropertyElement -Object $Root -Name 'adapter' -Context $context
-    foreach ($name in @('adapter_id', 'adapter_version')) {
+    foreach ($name in @('adapter_id', 'adapter_version', 'entrypoint')) {
         Assert-JsonStringProperty -Object $adapter -Name $name -Context 'adapter'
+    }
+    Assert-JsonStringArrayProperty -Object $Root -Name 'capabilities' -Context $context
+    $runtimeLock = Get-JsonPropertyElement -Object $Root -Name 'runtime_lock' -Context $context
+    foreach ($name in @('path', 'sha256')) {
+        Assert-JsonStringProperty -Object $runtimeLock -Name $name -Context 'runtime_lock'
     }
     $integrity = Get-JsonPropertyElement -Object $Root -Name 'integrity' -Context $context
     foreach ($name in @('catalog_path', 'catalog_sha256')) {
@@ -621,30 +635,17 @@ function Assert-CodecPackManifestJsonTypes {
         if ($asset.ValueKind -ne [System.Text.Json.JsonValueKind]::Object) {
             throw "external_assets[$assetIndex] must be a JSON object."
         }
-        foreach ($name in @('asset_id', 'display_name', 'kind', 'selection', 'format')) {
+        foreach ($name in @(
+            'asset_id', 'display_name', 'sha256', 'source_url', 'license_label', 'license_url'
+        )) {
             Assert-JsonStringProperty -Object $asset -Name $name -Context "external_assets[$assetIndex]"
         }
         Assert-JsonBooleanProperty -Object $asset -Name 'required' -Context "external_assets[$assetIndex]"
-        $variantIndex = 0
-        foreach ($variant in @(Get-JsonArrayElements -Object $asset -Name 'accepted_variants' -Context "external_assets[$assetIndex]")) {
-            if ($variant.ValueKind -ne [System.Text.Json.JsonValueKind]::Object) {
-                throw "external_assets[$assetIndex].accepted_variants[$variantIndex] must be a JSON object."
-            }
-            foreach ($name in @(
-                'variant_id', 'sha256', 'source_url', 'license_label', 'license_url'
-            )) {
-                Assert-JsonStringProperty `
-                    -Object $variant `
-                    -Name $name `
-                    -Context "external_assets[$assetIndex].accepted_variants[$variantIndex]"
-            }
-            Assert-JsonUnsignedIntegerProperty `
-                -Object $variant `
-                -Name 'byte_length' `
-                -Maximum ([uint64]::MaxValue) `
-                -Context "external_assets[$assetIndex].accepted_variants[$variantIndex]"
-            $variantIndex += 1
-        }
+        Assert-JsonUnsignedIntegerProperty `
+            -Object $asset `
+            -Name 'byte_length' `
+            -Maximum ([uint64]::MaxValue) `
+            -Context "external_assets[$assetIndex]"
         $assetIndex += 1
     }
 }
@@ -754,11 +755,47 @@ function Assert-PortableTextPolicy {
             $Text -match '(?im)\\\\[A-Za-z0-9][A-Za-z0-9._-]{0,63}\\[A-Za-z0-9$][A-Za-z0-9$._-]{0,63}(?:\\|[\s"''])') {
             throw "$Context contains a machine-local absolute path."
         }
-        if ($Text -match '(?im)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----' -or
-            $Text -match '(?i)\bAKIA[0-9A-Z]{16}\b' -or
-            $Text -match '(?i)\bgh[pousr]_[A-Za-z0-9]{20,}\b' -or
-            $Text -match '(?i)\bsk-[A-Za-z0-9_-]{20,}\b' -or
-            $Text -match '(?im)\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password)\b\s*[:=]\s*(?:"[^"\r\n]{8,}"|''[^''\r\n]{8,}'')') {
+    }
+    if ($Text -match '(?im)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----' -or
+        $Text -match '(?i)\bAKIA[0-9A-Z]{16}\b' -or
+        $Text -match '(?i)\bgh[pousr]_[A-Za-z0-9]{20,}\b' -or
+        $Text -match '(?i)\bsk-[A-Za-z0-9_-]{20,}\b') {
+        throw "$Context contains credential-like material."
+    }
+
+    $credentialPattern = '(?im)\b(?<key>api[_-]?key|access[_-]?token|auth[_-]?token|secret|password)\b(?:["'']\s*)?\s*[:=]\s*(?:"(?<double>[^"\r\n]{8,})"|''(?<single>[^''\r\n]{8,})'')'
+    $credentialMatches = @([regex]::Matches($Text, $credentialPattern))
+    if ($credentialMatches.Count -gt 0) {
+        $nonPlaceholder = @($credentialMatches | Where-Object {
+            $value = if ($_.Groups['double'].Success) {
+                $_.Groups['double'].Value
+            } else {
+                $_.Groups['single'].Value
+            }
+            $key = $_.Groups['key'].Value
+            $cursor = $_.Index + $_.Length
+            while ($cursor -lt $Text.Length -and
+                ($Text[$cursor] -eq [char]' ' -or $Text[$cursor] -eq [char]9)) {
+                $cursor += 1
+            }
+            $hasSafeExpressionTerminator = (
+                $cursor -eq $Text.Length -or
+                $Text[$cursor] -eq [char]10 -or
+                $Text[$cursor] -eq [char]13 -or
+                '#,)]};'.Contains($Text[$cursor])
+            )
+            -not (
+                $key -ceq 'password' -and
+                $value -ceq 'password' -and
+                $hasSafeExpressionTerminator
+            )
+        })
+        # Executable source commonly documents APIs with the literal
+        # `password='password'`. It is exempt only when the literal ends the
+        # expression (EOL/comment or a closing/separating delimiter), so string
+        # concatenation and conditional expressions remain credential-like.
+        # Sensitive metadata/configuration remains strict.
+        if ($Sensitive -or $nonPlaceholder.Count -gt 0) {
             throw "$Context contains credential-like material."
         }
     }
@@ -820,6 +857,127 @@ function Assert-PortableTextFile {
     Assert-PortableTextPolicy -Text $text -Context $Context -Sensitive:$sensitive
 }
 
+function Read-BoundedStreamBytes {
+    param(
+        [Parameter(Mandatory)]
+        [System.IO.Stream]$Stream,
+
+        [Parameter(Mandatory)]
+        [int64]$MaximumBytes,
+
+        [Parameter(Mandatory)]
+        [string]$Context
+    )
+
+    $memory = [System.IO.MemoryStream]::new()
+    $buffer = [byte[]]::new(81920)
+    try {
+        while ($true) {
+            $read = $Stream.Read($buffer, 0, $buffer.Length)
+            if ($read -eq 0) {
+                break
+            }
+            if ([int64]$read -gt $MaximumBytes - $memory.Length) {
+                throw "$Context exceeds the four MiB portable linker-script inspection limit."
+            }
+            $memory.Write($buffer, 0, $read)
+        }
+        return ,$memory.ToArray()
+    } finally {
+        $memory.Dispose()
+    }
+}
+
+function Test-ZipArchiveBytes {
+    param(
+        [Parameter(Mandatory)]
+        [byte[]]$Bytes
+    )
+
+    $stream = [System.IO.MemoryStream]::new($Bytes, $false)
+    $archive = $null
+    try {
+        $archive = [System.IO.Compression.ZipArchive]::new(
+            $stream,
+            [System.IO.Compression.ZipArchiveMode]::Read,
+            $true,
+            [System.Text.Encoding]::UTF8
+        )
+        return $true
+    } catch [System.IO.InvalidDataException] {
+        return $false
+    } finally {
+        if ($null -ne $archive) {
+            $archive.Dispose()
+        }
+        $stream.Dispose()
+    }
+}
+
+function Assert-PortableLinkerScriptBytes {
+    param(
+        [Parameter(Mandatory)]
+        [byte[]]$Bytes,
+
+        [Parameter(Mandatory)]
+        [string]$Context
+    )
+
+    if ($Bytes.Length -eq 0 -or $Bytes.Length -gt 4MB) {
+        throw "$Context must be a non-empty linker script within the four MiB inspection limit."
+    }
+    if (Test-ZipArchiveBytes -Bytes $Bytes) {
+        throw "$Context is a nested Deck archive, not a portable linker script."
+    }
+    try {
+        $text = [System.Text.UTF8Encoding]::new($false, $true).GetString($Bytes)
+    } catch [System.Text.DecoderFallbackException] {
+        throw "$Context uses the ambiguous .ld extension but is not valid UTF-8 linker-script text."
+    }
+    Assert-PortableTextPolicy -Text $text -Context $Context -Sensitive:$false
+}
+
+function Assert-PortableLinkerScriptFile {
+    param(
+        [Parameter(Mandatory)]
+        [System.IO.FileInfo]$File,
+
+        [Parameter(Mandatory)]
+        [string]$Context
+    )
+
+    if ($File.Length -eq 0 -or $File.Length -gt 4MB) {
+        throw "$Context must be a non-empty linker script within the four MiB inspection limit."
+    }
+    Assert-PortableLinkerScriptBytes `
+        -Bytes ([System.IO.File]::ReadAllBytes($File.FullName)) `
+        -Context $Context
+}
+
+function Assert-PortableLinkerScriptArchiveEntry {
+    param(
+        [Parameter(Mandatory)]
+        [System.IO.Compression.ZipArchiveEntry]$Entry,
+
+        [Parameter(Mandatory)]
+        [string]$Context
+    )
+
+    if ([int64]$Entry.Length -eq 0 -or [int64]$Entry.Length -gt 4MB) {
+        throw "$Context must be a non-empty linker script within the four MiB inspection limit."
+    }
+    $stream = $Entry.Open()
+    try {
+        [byte[]]$bytes = Read-BoundedStreamBytes `
+            -Stream $stream `
+            -MaximumBytes 4MB `
+            -Context $Context
+    } finally {
+        $stream.Dispose()
+    }
+    Assert-PortableLinkerScriptBytes -Bytes $bytes -Context $Context
+}
+
 function Assert-NoForbiddenArchiveEntries {
     param(
         [Parameter(Mandatory)]
@@ -861,7 +1019,11 @@ function Assert-NoForbiddenArchiveEntries {
             if ($script:ForbiddenPayloadExtensions -contains $extension) {
                 throw "Nested archive contains forbidden payload type '$extension'."
             }
-            if ($script:ArchiveExtensions -contains $extension) {
+            if ($extension -ceq '.ld') {
+                Assert-PortableLinkerScriptArchiveEntry `
+                    -Entry $entry `
+                    -Context "nested archive entry '$name'"
+            } elseif ($script:ArchiveExtensions -contains $extension) {
                 throw "Approved Python standard-library archive contains a nested archive '$name'."
             }
             if (Test-PortableTextCandidate -Name $name) {
@@ -963,7 +1125,11 @@ function Assert-PackagingSourceTree {
         if ($script:ForbiddenPayloadExtensions -contains $extension) {
             throw "Packaging source contains forbidden payload type '$extension': $($file.Name)"
         }
-        if ($script:ArchiveExtensions -contains $extension) {
+        if ($extension -ceq '.ld') {
+            Assert-PortableLinkerScriptFile `
+                -File $file `
+                -Context "packaging source '$relativePath'"
+        } elseif ($script:ArchiveExtensions -contains $extension) {
             if (-not $allowedArchives.Contains($relativePath)) {
                 throw "Packaging source contains an unapproved archive: $relativePath"
             }
@@ -1121,9 +1287,17 @@ function Assert-Python313RuntimeLayout {
         'runtime/python313._pth',
         'runtime/python313.zip',
         'runtime/Lib/site-packages/latentdeck_codec_h3/__init__.py',
-        'runtime/Lib/site-packages/latentdeck_codec_h3/worker.py',
-        'runtime/Lib/site-packages/latentdeck_codec_h3/d2_worker.py',
-        'runtime/Lib/site-packages/latentdeck_codec_h3/q4_worker.py',
+        'runtime/Lib/site-packages/latentdeck_codec_h3/adapter.py',
+        'runtime/Lib/site-packages/latentdeck_codec_host/__init__.py',
+        'runtime/Lib/site-packages/latentdeck_codec_host/__main__.py',
+        'runtime/Lib/site-packages/latentdeck_codec_host/runtime_v2.py',
+        'runtime/Lib/site-packages/latentdeck_codec_host/native_cartridge.py',
+        'runtime/Lib/site-packages/latentdeck_codec_sdk/__init__.py',
+        'runtime/Lib/site-packages/latentdeck_deck_sdk/__init__.py',
+        'runtime/Lib/site-packages/latentdeck_cartridge/__init__.py',
+        'runtime/Lib/site-packages/latentdeck_cartridge/_native.cp313-win_amd64.pyd',
+        'runtime/Lib/site-packages/latentdeck_rgb_ring/__init__.py',
+        'runtime/Lib/site-packages/latentdeck_rgb_ring/_native.cp313-win_amd64.pyd',
         'THIRD_PARTY_NOTICES.md',
         'DEPENDENCY_INVENTORY.json',
         'SBOM.cdx.json'
@@ -1131,6 +1305,31 @@ function Assert-Python313RuntimeLayout {
     foreach ($requiredPath in $requiredPaths) {
         if (-not $CatalogPaths.Contains($requiredPath)) {
             throw "Codec Pack catalog omits required file '$requiredPath'."
+        }
+    }
+
+    foreach ($nativeModule in @('latentdeck_cartridge', 'latentdeck_rgb_ring')) {
+        $nativeModuleRoot = "runtime/Lib/site-packages/$nativeModule"
+        $expectedNativePath = (
+            "$nativeModuleRoot/_native.cp313-win_amd64.pyd"
+        )
+        $allowedTypingStubPath = "$nativeModuleRoot/_native.pyi"
+        $nativeStemPath = "$nativeModuleRoot/_native"
+        $nativeRelatedPaths = @($CatalogPaths | Where-Object {
+            $_.Equals($nativeStemPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $_.StartsWith("$nativeStemPath.", [System.StringComparison]::OrdinalIgnoreCase) -or
+            $_.StartsWith("$nativeStemPath/", [System.StringComparison]::OrdinalIgnoreCase)
+        })
+        $ambiguousNativePaths = @($nativeRelatedPaths | Where-Object {
+            $_ -cne $expectedNativePath -and $_ -cne $allowedTypingStubPath
+        })
+        if (-not ($nativeRelatedPaths -ccontains $expectedNativePath) -or
+            $ambiguousNativePaths.Count -gt 0) {
+            throw (
+                "Codec Pack must contain exactly the CPython 3.13 Windows x64 native binding " +
+                "'$expectedNativePath', may contain only the non-executable typing stub " +
+                "'$allowedTypingStubPath', and must contain no importable _native aliases."
+            )
         }
     }
 
@@ -1304,13 +1503,13 @@ function Test-H3CodecPackDirectory {
     Assert-CodecPackManifestJsonTypes -Root $manifestJson
     $manifest = $manifestJson.GetRawText() | ConvertFrom-Json
     Assert-ExactProperties -Object $manifest -Required @(
-        'manifest_version', 'pack_id', 'pack_version', 'display_name', 'publisher',
-        'license', 'platform', 'compatibility', 'worker', 'adapter', 'integrity',
-        'external_assets'
+        'manifest_version', 'kind', 'pack_id', 'pack_version', 'display_name',
+        'summary', 'publisher', 'license', 'platform', 'compatibility', 'adapter',
+        'worker', 'capabilities', 'external_assets', 'runtime_lock', 'integrity'
     ) -Context 'codec-pack.json'
 
-    if ($manifest.manifest_version -cne '1.0.0') {
-        throw 'Unsupported codec-pack manifest version.'
+    if ($manifest.manifest_version -cne '2.0.0' -or $manifest.kind -cne 'codec_pack') {
+        throw 'H3 Setup accepts only codec-pack.json v2.'
     }
     Assert-Token -Value ([string]$manifest.pack_id) -Name 'pack_id'
     if ($manifest.pack_id -cne 'org.latentdeck.h3') {
@@ -1322,20 +1521,29 @@ function Test-H3CodecPackDirectory {
         throw 'Codec Pack version does not match the requested version.'
     }
 
-    Assert-ExactProperties -Object $manifest.publisher -Required @('name', 'url') -Context 'publisher'
+    Assert-ExactProperties -Object $manifest.publisher -Required @(
+        'name', 'url', 'identity_claim'
+    ) -Context 'publisher'
     Assert-ExactProperties -Object $manifest.license -Required @('spdx_or_label', 'notice_path') -Context 'license'
     Assert-ExactProperties -Object $manifest.platform -Required @('os', 'arch') -Context 'platform'
     Assert-ExactProperties -Object $manifest.compatibility -Required @(
-        'app_min_inclusive', 'app_max_exclusive', 'worker_protocol_min',
-        'worker_protocol_max', 'lc_spec_versions', 'profiles'
+        'app_min_inclusive', 'app_max_exclusive', 'worker_protocol',
+        'codec_adapter_api', 'tensor_abi', 'python', 'torch_exact_build',
+        'lc_spec_versions', 'profiles'
     ) -Context 'compatibility'
+    Assert-ExactProperties -Object $manifest.compatibility.python -Required @(
+        'implementation', 'version', 'platform_tag'
+    ) -Context 'compatibility.python'
     Assert-ExactProperties -Object $manifest.worker -Required @(
-        'executable', 'arguments', 'd2_arguments', 'q4_arguments',
-        'working_directory', 'probe_timeout_ms'
+        'executable', 'arguments', 'working_directory', 'start_timeout_ms',
+        'heartbeat_timeout_ms'
     ) -Context 'worker'
     Assert-ExactProperties -Object $manifest.adapter -Required @(
-        'adapter_id', 'adapter_version'
+        'adapter_id', 'adapter_version', 'entrypoint'
     ) -Context 'adapter'
+    Assert-ExactProperties -Object $manifest.runtime_lock -Required @(
+        'path', 'sha256'
+    ) -Context 'runtime_lock'
     Assert-ExactProperties -Object $manifest.integrity -Required @(
         'catalog_path', 'catalog_sha256'
     ) -Context 'integrity'
@@ -1343,8 +1551,13 @@ function Test-H3CodecPackDirectory {
     if ($manifest.platform.os -cne 'windows' -or $manifest.platform.arch -cne 'x86_64') {
         throw 'Codec Pack platform must be Windows x86-64.'
     }
+    if ($manifest.publisher.identity_claim -cne 'self_declared') {
+        throw 'Codec Pack publisher metadata must remain explicitly self-declared.'
+    }
     Assert-SemVer -Value ([string]$manifest.adapter.adapter_version) -Name 'adapter_version'
-    if ($manifest.adapter.adapter_id -cne 'org.latentdeck.h3') {
+    if ($manifest.adapter.adapter_id -cne 'org.latentdeck.h3' -or
+        $manifest.adapter.adapter_version -cne '0.2.0' -or
+        $manifest.adapter.entrypoint -cne 'latentdeck_codec_h3.adapter:make_adapter') {
         throw 'Codec Pack adapter identity is inconsistent.'
     }
     if ($manifest.worker.executable -cne 'runtime/python.exe' -or
@@ -1352,22 +1565,32 @@ function Test-H3CodecPackDirectory {
         throw 'Codec Pack worker launch path is not the approved isolated runtime path.'
     }
 
-    $expectedPlayerArguments = @('-I', '-s', '-B', '-m', 'latentdeck_codec_h3.worker')
-    $expectedD2Arguments = @('-I', '-s', '-B', '-m', 'latentdeck_codec_h3.d2_worker')
-    $expectedQ4Arguments = @('-I', '-s', '-B', '-m', 'latentdeck_codec_h3.q4_worker')
-    if ((@($manifest.worker.arguments) -join "`0") -cne ($expectedPlayerArguments -join "`0") -or
-        (@($manifest.worker.d2_arguments) -join "`0") -cne ($expectedD2Arguments -join "`0") -or
-        (@($manifest.worker.q4_arguments) -join "`0") -cne ($expectedQ4Arguments -join "`0")) {
-        throw 'Codec Pack worker arguments are not the approved H3 entrypoints.'
+    $expectedWorkerArguments = @(
+        '-I', '-s', '-B', '-m', 'latentdeck_codec_host',
+        '--worker-protocol', '2',
+        '--codec-pack-id', 'org.latentdeck.h3',
+        '--codec-pack-version', [string]$manifest.pack_version,
+        '--codec-adapter-id', 'org.latentdeck.h3',
+        '--codec-adapter-version', '0.2.0',
+        '--codec-entrypoint', 'latentdeck_codec_h3.adapter:make_adapter'
+    )
+    if ((@($manifest.worker.arguments) -join "`0") -cne ($expectedWorkerArguments -join "`0")) {
+        throw 'Codec Pack worker arguments do not select the generic Protocol 2 host.'
     }
-    if ([int64]$manifest.worker.probe_timeout_ms -ne 120000) {
-        throw 'Codec Pack probe timeout must match the bounded H3 startup contract.'
+    if ([int64]$manifest.worker.start_timeout_ms -ne 120000 -or
+        [int64]$manifest.worker.heartbeat_timeout_ms -ne 5000) {
+        throw 'Codec Pack worker timeouts do not match the bounded Protocol 2 contract.'
     }
 
     if ($manifest.compatibility.app_min_inclusive -cne '0.1.0' -or
-        $manifest.compatibility.app_max_exclusive -cne '0.2.0' -or
-        [int]$manifest.compatibility.worker_protocol_min -ne 1 -or
-        [int]$manifest.compatibility.worker_protocol_max -ne 1 -or
+        $manifest.compatibility.app_max_exclusive -cne '1.0.0' -or
+        [int]$manifest.compatibility.worker_protocol -ne 2 -or
+        [int]$manifest.compatibility.codec_adapter_api -ne 1 -or
+        $manifest.compatibility.tensor_abi -cne 'latentdeck.tensor.v1' -or
+        $manifest.compatibility.python.implementation -cne 'cpython' -or
+        $manifest.compatibility.python.version -cne '3.13' -or
+        $manifest.compatibility.python.platform_tag -cne 'win_amd64' -or
+        $manifest.compatibility.torch_exact_build -cne '2.13.0+cu130' -or
         (@($manifest.compatibility.lc_spec_versions) -join ',') -cne '0.1.0') {
         throw 'Codec Pack application or protocol compatibility is invalid.'
     }
@@ -1376,12 +1599,20 @@ function Test-H3CodecPackDirectory {
         throw 'Codec Pack must declare exactly one H3 profile.'
     }
     Assert-ExactProperties -Object $profiles[0] -Required @(
-        'codec_family', 'profile', 'profile_versions'
+        'codec_family', 'profile', 'profile_version'
     ) -Context 'compatibility.profiles[0]'
     if ($profiles[0].codec_family -cne 'minimax_h3' -or
         $profiles[0].profile -cne 'h3_av_latent' -or
-        (@($profiles[0].profile_versions) -join ',') -cne '0.1.0') {
+        $profiles[0].profile_version -cne '0.1.0') {
         throw 'Codec Pack H3 profile declaration is invalid.'
+    }
+
+    $requiredCapabilities = @(
+        'player', 'realtime', 'resample', 'snapshot_capture', 'live_capture',
+        'raw_import'
+    )
+    if ((@($manifest.capabilities) -join "`0") -cne ($requiredCapabilities -join "`0")) {
+        throw 'H3 Codec Pack v2 must declare the mandatory capabilities and raw import.'
     }
 
     Assert-PortableRelativePath -Path ([string]$manifest.license.notice_path) -Context 'license.notice_path'
@@ -1393,46 +1624,42 @@ function Test-H3CodecPackDirectory {
         throw 'Codec Pack integrity catalog must use the canonical pack-relative path.'
     }
     Assert-Sha256 -Value ([string]$manifest.integrity.catalog_sha256) -Name 'catalog_sha256'
+    Assert-PortableRelativePath -Path ([string]$manifest.runtime_lock.path) -Context 'runtime_lock.path'
+    if ($manifest.runtime_lock.path -cne 'DEPENDENCY_INVENTORY.json') {
+        throw 'Codec Pack runtime lock must bind the curated dependency inventory.'
+    }
+    Assert-Sha256 -Value ([string]$manifest.runtime_lock.sha256) -Name 'runtime_lock.sha256'
+    $runtimeLockPath = Join-Path $resolvedRoot 'DEPENDENCY_INVENTORY.json'
+    if ((Get-FileHash -LiteralPath $runtimeLockPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+        $manifest.runtime_lock.sha256) {
+        throw 'Codec Pack runtime lock hash does not match the dependency inventory.'
+    }
 
     $externalAssets = @($manifest.external_assets)
-    if ($externalAssets.Count -eq 0 -or $externalAssets.Count -gt 16) {
-        throw 'Codec Pack must declare at least one bounded external decoder asset.'
+    if ($externalAssets.Count -ne 1) {
+        throw 'H3 Codec Pack must declare one exact external decoder asset.'
     }
     foreach ($asset in $externalAssets) {
         Assert-ExactProperties -Object $asset -Required @(
-            'asset_id', 'display_name', 'kind', 'required', 'selection', 'format',
-            'accepted_variants'
+            'asset_id', 'display_name', 'required', 'byte_length', 'sha256',
+            'source_url', 'license_label', 'license_url'
         ) -Context 'external asset'
-        Assert-Token -Value ([string]$asset.asset_id) -Name 'asset_id'
-        if ($asset.kind -cne 'decoder_weight' -or
+        Assert-Sha256 -Value ([string]$asset.sha256) -Name 'external asset sha256'
+        if ($asset.asset_id -cne 'taeh3' -or
+            $asset.display_name -cne 'TAEH3 decoder weight' -or
             $asset.required -ne $true -or
-            $asset.selection -cne 'explicit_file' -or
-            $asset.format -cne 'safetensors') {
-            throw 'External asset must remain an explicitly selected decoder weight.'
+            [int64]$asset.byte_length -ne 22709752 -or
+            $asset.sha256 -cne '4fd022bfcab08772fe0536b17ea1a3bbb5625be11e397868d1c5d891863d4c13' -or
+            $asset.source_url -cne 'https://huggingface.co/madebyollin/taehv/resolve/main/taeh3.safetensors' -or
+            $asset.license_label -cne 'MIT' -or
+            $asset.license_url -cne 'https://github.com/madebyollin/taehv/blob/e743234f/LICENSE') {
+            throw 'H3 Codec Pack external TAEH3 asset identity is not exact.'
         }
-        $variants = @($asset.accepted_variants)
-        if ($variants.Count -eq 0 -or $variants.Count -gt 32) {
-            throw 'External asset has no bounded accepted variants.'
-        }
-        $variantIds = [System.Collections.Generic.HashSet[string]]::new(
-            [System.StringComparer]::Ordinal
-        )
-        foreach ($variant in $variants) {
-            Assert-ExactProperties -Object $variant -Required @(
-                'variant_id', 'sha256', 'byte_length', 'source_url',
-                'license_label', 'license_url'
-            ) -Context 'external asset variant'
-            Assert-Token -Value ([string]$variant.variant_id) -Name 'variant_id'
-            if (-not $variantIds.Add([string]$variant.variant_id)) {
-                throw 'External asset contains duplicate variant identifiers.'
-            }
-            Assert-Sha256 -Value ([string]$variant.sha256) -Name 'variant.sha256'
-            if ([int64]$variant.byte_length -le 0 -or
-                ([string]$variant.source_url) -cnotmatch '^https://' -or
-                ([string]$variant.license_url) -cnotmatch '^https://') {
-                throw 'External asset variant metadata is incomplete or unsafe.'
-            }
-        }
+    }
+
+    $adapterPath = Join-Path $resolvedRoot 'runtime/Lib/site-packages/latentdeck_codec_h3/adapter.py'
+    if (-not (Test-Path -LiteralPath $adapterPath -PathType Leaf)) {
+        throw 'H3 Codec Pack is missing the declared Codec SDK v2 adapter entrypoint.'
     }
 
     $catalogPath = Join-Path $resolvedRoot 'integrity.json'
@@ -1593,6 +1820,9 @@ function Expand-SafeCodecPackArchive {
         if (-not $ArchiveStream.CanRead -or -not $ArchiveStream.CanSeek) {
             throw 'Codec Pack archive stream must be readable and seekable.'
         }
+        if ([int64]$ArchiveStream.Length -gt $script:MaximumArchiveBytes) {
+            throw 'Codec Pack archive exceeds the 32 GiB archive bound.'
+        }
         $ArchiveStream.Position = 0
         $archive = [System.IO.Compression.ZipArchive]::new(
             $ArchiveStream,
@@ -1634,7 +1864,11 @@ function Expand-SafeCodecPackArchive {
                     throw "Codec Pack archive contains forbidden payload type '$extension'."
                 }
                 Assert-NotForbiddenLeafName -Name $entryName -Context 'Codec Pack archive'
-                if ($script:ArchiveExtensions -contains $extension -and
+                if ($extension -ceq '.ld') {
+                    Assert-PortableLinkerScriptArchiveEntry `
+                        -Entry $entry `
+                        -Context "Codec Pack archive entry '$entryName'"
+                } elseif ($script:ArchiveExtensions -contains $extension -and
                     $entryName -ine 'runtime/python313.zip') {
                     throw "Codec Pack archive contains an unapproved nested archive '$entryName'."
                 }

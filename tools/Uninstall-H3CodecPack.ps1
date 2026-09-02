@@ -10,7 +10,9 @@ param(
 
     [switch]$RemoveCorrupt,
 
-    [switch]$CleanupQuarantine
+    [switch]$CleanupQuarantine,
+
+    [string]$LifecycleHelperPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,120 +20,66 @@ Set-StrictMode -Version Latest
 
 Import-Module (Join-Path $PSScriptRoot 'CodecPackPackaging.psm1') -Force
 
-Assert-SemVer -Value $PackVersion -Name 'PackVersion'
-if ($Scope -eq 'AllUsers' -and [string]::IsNullOrWhiteSpace($InstallRoot)) {
-    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
-    if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        throw 'An all-users Codec Pack uninstall requires an elevated PowerShell process.'
-    }
+if ($Scope -cne 'CurrentUser') {
+    throw 'Protocol 2 Codec Packs are installed only for the current user.'
 }
-
-$lifecycleMutex = [System.Threading.Mutex]::new(
-    $false,
-    'Global\LatentDeck.CodecPackLifecycle.org.latentdeck.h3'
-)
-$mutexHeld = $false
-try {
-    try {
-        $mutexHeld = $lifecycleMutex.WaitOne([System.TimeSpan]::FromSeconds(30))
-    } catch [System.Threading.AbandonedMutexException] {
-        $mutexHeld = $true
-    }
-    if (-not $mutexHeld) {
-        throw 'Timed out waiting for another Codec Pack lifecycle operation to finish.'
-    }
-
-$root = Get-CodecPackInstallRoot -Scope $Scope -InstallRoot $InstallRoot
-if (-not (Test-Path -LiteralPath $root -PathType Container)) {
-    throw 'The requested Codec Pack install root does not exist.'
-}
-Assert-DirectoryNotReparsePoint -Path $root
-Assert-PathComponentsNotReparsePoints -Path $root
-$packParent = Join-Path $root 'org.latentdeck.h3'
-$destination = Join-Path $packParent $PackVersion
-Assert-ChildPath -ParentPath $root -CandidatePath $packParent | Out-Null
-Assert-ChildPath -ParentPath $packParent -CandidatePath $destination | Out-Null
-$trashRoot = Get-CodecPackAuxiliaryRoot -InstallRoot $root -Kind Trash
-$removalPrefix = ".remove-org.latentdeck.h3-$PackVersion-"
-
-if ($CleanupQuarantine -and (Test-Path -LiteralPath $trashRoot -PathType Container)) {
-    Assert-DirectoryNotReparsePoint -Path $trashRoot
-    Assert-PathComponentsNotReparsePoints -Path $trashRoot
-    $matchingTrash = @(
-        Get-ChildItem -LiteralPath $trashRoot -Force -Directory |
-            Where-Object {
-                $_.Name.StartsWith($removalPrefix, [System.StringComparison]::Ordinal)
-            }
-    )
-    foreach ($trash in $matchingTrash) {
-        Remove-SafeTemporaryDirectory `
-            -ParentPath $trashRoot `
-            -CandidatePath $trash.FullName `
-            -RequiredLeafPrefix $removalPrefix
-    }
-    if (@(Get-ChildItem -LiteralPath $trashRoot -Force).Count -eq 0) {
-        [System.IO.Directory]::Delete($trashRoot, $false)
-    }
-}
-
 if ($CleanupQuarantine) {
-    Write-Output "Matching quarantine cleanup completed for org.latentdeck.h3 $PackVersion; installed versions were not changed."
-    return
+    throw (
+        'CleanupQuarantine is retired. The shared extension lifecycle owns and ' +
+        'recovers its exact staging and quarantine entries.'
+    )
+}
+Assert-SemVer -Value $PackVersion -Name 'PackVersion'
+
+if ([string]::IsNullOrWhiteSpace($LifecycleHelperPath)) {
+    $LifecycleHelperPath = $env:LATENTDECK_H3_LIFECYCLE_HELPER
+}
+if ([string]::IsNullOrWhiteSpace($LifecycleHelperPath)) {
+    throw (
+        'LifecycleHelperPath is required. Use a latentdeck-codec-pack-installer ' +
+        'built from the current source tree.'
+    )
+}
+$resolvedHelper = (Resolve-Path -LiteralPath $LifecycleHelperPath).Path
+$helperItem = Get-Item -LiteralPath $resolvedHelper -Force
+if ($helperItem.PSIsContainer -or
+    ($helperItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw 'LifecycleHelperPath must be a regular non-reparse file.'
 }
 
-if (-not (Test-Path -LiteralPath $destination -PathType Container)) {
-    throw "H3 Codec Pack $PackVersion is not installed in the selected scope."
-}
-Assert-DirectoryNotReparsePoint -Path $packParent
-Assert-DirectoryNotReparsePoint -Path $destination
-Assert-PathComponentsNotReparsePoints -Path $destination
-
-if (-not $RemoveCorrupt) {
-    Test-H3CodecPackDirectory `
-        -PackRoot $destination `
-        -ExpectedPackVersion $PackVersion | Out-Null
-}
-
-[System.IO.Directory]::CreateDirectory($trashRoot) | Out-Null
-Assert-DirectoryNotReparsePoint -Path $trashRoot
-Assert-PathComponentsNotReparsePoints -Path $trashRoot
-$removalPath = Join-Path $trashRoot "$removalPrefix$([guid]::NewGuid().ToString('N'))"
-Assert-SafeTemporaryDirectory `
-    -ParentPath $trashRoot `
-    -CandidatePath $removalPath `
-    -RequiredLeafPrefix $removalPrefix | Out-Null
-$moved = $false
-try {
-    [System.IO.Directory]::Move($destination, $removalPath)
-    $moved = $true
-    Remove-SafeTemporaryDirectory `
-        -ParentPath $trashRoot `
-        -CandidatePath $removalPath `
-        -RequiredLeafPrefix $removalPrefix
-    $moved = $false
-} catch {
-    if ($moved) {
-        throw (
-            "Codec Pack $PackVersion was removed from discovery, but quarantined files " +
-            "could not be deleted at '$removalPath'. Stop Codec Pack workers, then rerun " +
-            "this command with -CleanupQuarantine. Original error: $($_.Exception.Message)"
-        )
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        throw 'LOCALAPPDATA is unavailable; provide a canonical InstallRoot.'
     }
-    throw
+    $localAppData = [System.IO.Path]::GetFullPath($env:LOCALAPPDATA)
+} else {
+    $codecRoot = [System.IO.Path]::GetFullPath($InstallRoot)
+    $latentDeckRoot = [System.IO.Path]::GetDirectoryName($codecRoot)
+    if ([System.IO.Path]::GetFileName($codecRoot) -cne 'CodecPacks' -or
+        [System.IO.Path]::GetFileName($latentDeckRoot) -cne 'LatentDeck') {
+        throw 'InstallRoot must have the canonical <LocalAppData>\LatentDeck\CodecPacks shape.'
+    }
+    $localAppData = [System.IO.Path]::GetDirectoryName($latentDeckRoot)
+}
+$programData = if ([string]::IsNullOrWhiteSpace($env:PROGRAMDATA)) {
+    $localAppData
+} else {
+    [System.IO.Path]::GetFullPath($env:PROGRAMDATA)
 }
 
-if (@(Get-ChildItem -LiteralPath $packParent -Force).Count -eq 0) {
-    [System.IO.Directory]::Delete($packParent, $false)
+$arguments = @(
+    '--local-app-data', $localAppData,
+    '--program-data', $programData,
+    'uninstall',
+    '--version', $PackVersion
+)
+if ($RemoveCorrupt) {
+    $arguments += '--remove-corrupt'
 }
-if ((Test-Path -LiteralPath $trashRoot -PathType Container) -and
-    @(Get-ChildItem -LiteralPath $trashRoot -Force).Count -eq 0) {
-    [System.IO.Directory]::Delete($trashRoot, $false)
+$nativeOutput = @(& $resolvedHelper @arguments 2>&1)
+$nativeExitCode = $LASTEXITCODE
+if ($nativeExitCode -ne 0) {
+    $detail = ($nativeOutput | Out-String).Trim().Replace("`r", ' ').Replace("`n", ' ')
+    throw "Native H3 lifecycle helper failed with exit code $nativeExitCode`: $detail"
 }
-Write-Output "Removed org.latentdeck.h3 $PackVersion from the selected scope."
-} finally {
-    if ($mutexHeld) {
-        $lifecycleMutex.ReleaseMutex()
-    }
-    $lifecycleMutex.Dispose()
-}
+$nativeOutput

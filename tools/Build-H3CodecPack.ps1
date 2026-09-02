@@ -177,13 +177,11 @@ try {
 
     $wheels = Join-Path $workRoot 'wheels'
     [System.IO.Directory]::CreateDirectory($wheels) | Out-Null
-    $localProjects = @(
-        'latentdeck-codec-host',
-        'latentdeck-operator-d2',
-        'latentdeck-operator-q4',
-        'latentdeck-rgb-ring',
-        'latentdeck-codec-h3'
-    )
+    $localProjects = @($lock.local_projects | ForEach-Object { [string]$_.name })
+    if ($localProjects.Count -eq 0 -or
+        $localProjects.Count -ne (@($localProjects | Select-Object -Unique)).Count) {
+        throw 'Codec Pack curation lock local_projects must be a non-empty unique set.'
+    }
     foreach ($project in $localProjects) {
         $buildArguments = @(
             'build', '--wheel', '--package', $project, '--out-dir', $wheels
@@ -316,10 +314,7 @@ try {
             '--local-app-data', $isolatedLocalAppData,
             '--program-data', $isolatedProgramData,
             'install',
-            '--archive', $archivePath,
-            '--expected-sha256', $archiveHash,
-            '--expected-length', [string](Get-Item -LiteralPath $archivePath).Length,
-            '--expected-version', $PackVersion
+            '--archive', $archivePath
         )
         $installedVersion = Join-Path `
             $isolatedLocalAppData `

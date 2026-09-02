@@ -5,6 +5,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $builder = Join-Path $PSScriptRoot 'New-LinkedDevCodecPack.ps1'
+$privateEnvironmentStarter = Join-Path $PSScriptRoot 'Start-PrivateH3TestEnvironment.ps1'
 $temporaryParent = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
 $testRoot = Join-Path $temporaryParent "latentdeck-linked-codec-test-$([guid]::NewGuid().ToString('N'))"
 
@@ -21,6 +22,22 @@ function Write-TestFile {
 }
 
 try {
+    $staleDeckModeRejected = $false
+    try {
+        & $privateEnvironmentStarter `
+            -PythonRuntimeRoot (Join-Path $testRoot 'not-used-runtime') `
+            -PythonSitePackages (Join-Path $testRoot 'not-used-packages') `
+            -Mode LatentDeck | Out-Null
+    } catch {
+        if ($_.Exception.Message -notmatch 'Protocol 2.*Protocol 1 Player-only') {
+            throw
+        }
+        $staleDeckModeRejected = $true
+    }
+    if (-not $staleDeckModeRejected) {
+        throw 'Private linked environment starter still exposes LatentDeck through P1.'
+    }
+
     $runtime = Join-Path $testRoot 'runtime-source'
     $pythonPackages = Join-Path $testRoot 'python-packages'
     $workerPackages = Join-Path $testRoot 'worker-packages'
@@ -33,8 +50,6 @@ try {
     Write-TestFile -Path (Join-Path $runtime 'python313.zip')
     Write-TestFile -Path (Join-Path $runtime 'python313._pth') -Content "python313.zip`n.`nimport site`n"
     Write-TestFile -Path (Join-Path $workerModule '__init__.py') -Content ''
-    Write-TestFile -Path (Join-Path $workerModule 'worker.py')
-    Write-TestFile -Path (Join-Path $workerModule 'd2_worker.py')
 
     $rejected = $false
     try {
@@ -42,19 +57,19 @@ try {
             -PythonRuntimeRoot $runtime `
             -PythonSitePackages $pythonPackages `
             -WorkerSitePackages $workerPackages `
-            -OutputRoot (Join-Path $testRoot 'missing-q4-output') | Out-Null
+            -OutputRoot (Join-Path $testRoot 'missing-player-output') | Out-Null
     }
     catch {
-        if ($_.Exception.Message -notmatch 'q4_worker\.py') {
+        if ($_.Exception.Message -notmatch 'worker\.py') {
             throw
         }
         $rejected = $true
     }
     if (-not $rejected) {
-        throw 'Linked Codec Pack builder accepted worker packages without q4_worker.py.'
+        throw 'Linked Codec Pack builder accepted worker packages without its P1 Player entrypoint.'
     }
 
-    Write-TestFile -Path (Join-Path $workerModule 'q4_worker.py')
+    Write-TestFile -Path (Join-Path $workerModule 'worker.py')
     $validOutput = Join-Path $testRoot 'valid-output'
     & $builder `
         -PythonRuntimeRoot $runtime `
@@ -64,20 +79,14 @@ try {
     $packRoot = Join-Path $validOutput 'org.latentdeck.h3\0.1.0'
     $manifest = Get-Content -Raw -LiteralPath (Join-Path $packRoot 'codec-pack.json') |
         ConvertFrom-Json
-    $expectedEntrypoints = @(
-        @('-B', '-s', '-m', 'latentdeck_codec_h3.worker')
-        @('-B', '-s', '-m', 'latentdeck_codec_h3.d2_worker')
-        @('-B', '-s', '-m', 'latentdeck_codec_h3.q4_worker')
-    )
-    $actualEntrypoints = @(
-        @($manifest.worker.arguments)
-        @($manifest.worker.d2_arguments)
-        @($manifest.worker.q4_arguments)
-    )
-    for ($index = 0; $index -lt $expectedEntrypoints.Count; $index++) {
-        if ((@($actualEntrypoints[$index]) -join "`0") -cne
-            (@($expectedEntrypoints[$index]) -join "`0")) {
-            throw "Linked Codec Pack entrypoint $index does not match the Player/D2/Q4 contract."
+    $expectedEntrypoint = @('-B', '-s', '-m', 'latentdeck_codec_h3.worker')
+    if ((@($manifest.worker.arguments) -join "`0") -cne
+        ($expectedEntrypoint -join "`0")) {
+        throw 'Linked Codec Pack entrypoint does not match the P1 Player bridge contract.'
+    }
+    foreach ($forbidden in @('d2_arguments', 'q4_arguments')) {
+        if ($manifest.worker.PSObject.Properties.Name -contains $forbidden) {
+            throw "P1 linked Codec Pack must not expose Deck worker entrypoint '$forbidden'."
         }
     }
 

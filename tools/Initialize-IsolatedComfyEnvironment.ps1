@@ -225,6 +225,8 @@ $overlayStage = Join-Path $stageRoot 'python_packages'
 $uvCommand = Get-Command uv -CommandType Application -ErrorAction Stop
 $packageSpecs = @(
     [ordered]@{ project = 'latentdeck-cartridge'; path = 'sdk/python'; wheel = 'latentdeck_cartridge-*.whl' },
+    [ordered]@{ project = 'latentdeck-codec-sdk'; path = 'sdk/codec-python'; wheel = 'latentdeck_codec_sdk-*.whl' },
+    [ordered]@{ project = 'latentdeck-deck-sdk'; path = 'sdk/deck-python'; wheel = 'latentdeck_deck_sdk-*.whl' },
     [ordered]@{ project = 'latentdeck-codec-host'; path = 'codec-host/python'; wheel = 'latentdeck_codec_host-*.whl' },
     [ordered]@{ project = 'latentdeck-operator-d2'; path = 'operators/builtin/d2'; wheel = 'latentdeck_operator_d2-*.whl' },
     [ordered]@{ project = 'latentdeck-operator-q4'; path = 'operators/builtin/q4'; wheel = 'latentdeck_operator_q4-*.whl' },
@@ -424,6 +426,7 @@ from safetensors import safe_open
 import torch
 
 import latentdeck_cartridge
+import latentdeck_deck_sdk
 import latentdeck_codec_host
 import latentdeck_operator_d2
 import latentdeck_operator_q4
@@ -431,19 +434,21 @@ import latentdeck_comfy_toolkit
 import latentdeck_comfy_cartridge
 import latentdeck_example_channel_roll
 
-required_distributions = {
-    "latentdeck-cartridge",
-    "latentdeck-codec-host",
-    "latentdeck-operator-d2",
-    "latentdeck-operator-q4",
-    "latentdeck-comfy-toolkit",
-    "latentdeck-comfy-cartridge",
-    "latentdeck-example-channel-roll",
+expected_distributions = {
+    "latentdeck-cartridge": "0.1.0",
+    "latentdeck-codec-sdk": "0.2.0",
+    "latentdeck-deck-sdk": "0.2.0",
+    "latentdeck-codec-host": "0.1.0",
+    "latentdeck-operator-d2": "0.2.0",
+    "latentdeck-operator-q4": "0.2.0",
+    "latentdeck-comfy-toolkit": "0.1.0",
+    "latentdeck-comfy-cartridge": "0.1.0",
+    "latentdeck-example-channel-roll": "0.1.0",
 }
 package_versions = {
-    name: importlib.metadata.version(name) for name in sorted(required_distributions)
+    name: importlib.metadata.version(name) for name in sorted(expected_distributions)
 }
-if set(package_versions.values()) != {"0.1.0"}:
+if package_versions != expected_distributions:
     raise RuntimeError(f"unexpected LatentDeck package versions: {package_versions}")
 
 if not sys.version.startswith("3.13."):

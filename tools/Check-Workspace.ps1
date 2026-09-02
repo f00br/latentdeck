@@ -44,8 +44,10 @@ try {
             --reinstall-package latentdeck-cartridge `
             --reinstall-package latentdeck-codec-h3 `
             --reinstall-package latentdeck-codec-host `
+            --reinstall-package latentdeck-codec-sdk `
             --reinstall-package latentdeck-comfy-cartridge `
             --reinstall-package latentdeck-comfy-toolkit `
+            --reinstall-package latentdeck-deck-sdk `
             --reinstall-package latentdeck-example-channel-roll `
             --reinstall-package latentdeck-operator-d2 `
             --reinstall-package latentdeck-operator-q4 `
@@ -53,7 +55,7 @@ try {
     } 'Python lock/install'
     Invoke-Checked {
         uv run --no-sync ruff check `
-            pyproject.toml codec-host comfy operators sdk/python `
+            pyproject.toml codec-host comfy operators sdk `
             tools/codec_pack_curator.py tools/tests/test_codec_pack_curator.py
     } 'Python lint'
     Invoke-Checked { uv run --no-sync pytest } 'Python tests'
@@ -65,6 +67,9 @@ try {
     Invoke-Checked {
         pwsh -NoProfile -File tools/Test-H3CodecPackSetup.ps1 -NsisRoot $nsisRoot
     } 'H3 Codec Pack setup contract'
+    Invoke-Checked {
+        pwsh -NoProfile -File tools/Test-PrivateProtocol2GpuGate.ps1
+    } 'Private Protocol 2 GPU gate contract'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-DiagnosticBundle.ps1 } 'Diagnostic bundle contract'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-PublicTree.ps1 } 'Public-tree audit'
     Invoke-Checked { git diff --check } 'Working-tree whitespace'

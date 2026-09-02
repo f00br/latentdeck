@@ -41,6 +41,40 @@ function Write-Utf8Text {
     )
 }
 
+function Add-CataloguedFixtureFile {
+    param(
+        [Parameter(Mandatory)]
+        [string]$PackRoot,
+
+        [Parameter(Mandatory)]
+        [string]$RelativePath,
+
+        [Parameter(Mandatory)]
+        [byte[]]$Bytes
+    )
+
+    $filePath = Join-Path $PackRoot $RelativePath
+    [System.IO.Directory]::CreateDirectory((Split-Path -Parent $filePath)) | Out-Null
+    [System.IO.File]::WriteAllBytes($filePath, $Bytes)
+
+    $catalogPath = Join-Path $PackRoot 'integrity.json'
+    $catalog = Get-Content -Raw -LiteralPath $catalogPath | ConvertFrom-Json -Depth 32
+    $catalogFiles = @($catalog.files) + @(
+        Get-IntegrityEntry -RootPath $PackRoot -File (Get-Item -LiteralPath $filePath)
+    )
+    Write-JsonFile -Value ([ordered]@{
+        manifest_version = '1.0.0'
+        files = @($catalogFiles | Sort-Object -Property path -CaseSensitive)
+    }) -Path $catalogPath
+
+    $manifestPath = Join-Path $PackRoot 'codec-pack.json'
+    $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json -Depth 32
+    $manifest.integrity.catalog_sha256 = (
+        Get-FileHash -LiteralPath $catalogPath -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    Write-JsonFile -Value $manifest -Path $manifestPath
+}
+
 function Write-InvalidUtf8InsideAsciiMarker {
     param(
         [Parameter(Mandatory)]
@@ -167,7 +201,7 @@ function Write-SyntheticDependencyMetadata {
         },
         [ordered]@{
             name = 'latentdeck-codec-h3'
-            version = '0.1.0'
+            version = '0.2.0'
             kind = 'repository'
             source_url = 'https://latentdeck.org/'
             license_expression = 'Apache-2.0'
@@ -220,6 +254,138 @@ function Write-SyntheticDependencyMetadata {
 
 try {
     [System.IO.Directory]::CreateDirectory($testRoot) | Out-Null
+
+    $portableSourceProbe = Join-Path $testRoot 'portable-source-probe'
+    Write-Utf8Text `
+        -Path (Join-Path $portableSourceProbe 'documented-placeholder.py') `
+        -Content (
+            "client = Client(password='password', asynchronous=True)`n" +
+            "password = 'password'  # documented fsspec placeholder`n"
+        )
+    Write-Utf8Text `
+        -Path (Join-Path $portableSourceProbe 'runtime-script.ld') `
+        -Content "/* GNU ld script */`nINPUT(libportable_runtime.so)`n"
+    Assert-PackagingSourceTree -RootPath $portableSourceProbe | Out-Null
+
+    Write-Utf8Text `
+        -Path (Join-Path $portableSourceProbe 'wrong-key-placeholder.py') `
+        -Content "client = Client(api_key='password')`n"
+    Assert-Throws `
+        -Context 'only the exact documented password placeholder may bypass source credential scanning' `
+        -Action { Assert-PackagingSourceTree -RootPath $portableSourceProbe | Out-Null }
+    Remove-Item -LiteralPath (Join-Path $portableSourceProbe 'wrong-key-placeholder.py') -Force
+
+    Write-Utf8Text `
+        -Path (Join-Path $portableSourceProbe 'embedded-secret.py') `
+        -Content "client = Client(password='real-secret-value')`n"
+    Assert-Throws `
+        -Context 'portable source scanner must distinguish one exact documented placeholder from a credential' `
+        -Action { Assert-PackagingSourceTree -RootPath $portableSourceProbe | Out-Null }
+    Remove-Item -LiteralPath (Join-Path $portableSourceProbe 'embedded-secret.py') -Force
+
+    foreach ($composedPassword in @(
+        [pscustomobject]@{
+            Name = 'concatenated-password.py'
+            Content = "client = Client(password='password' + 'embedded-secret-value')`n"
+        },
+        [pscustomobject]@{
+            Name = 'conditional-password.py'
+            Content = "client = Client(password='password' if use_placeholder else 'embedded-secret-value')`n"
+        },
+        [pscustomobject]@{
+            Name = 'adjacent-password.py'
+            Content = "client = Client(password='password' 'embedded-secret-value')`n"
+        }
+    )) {
+        $composedPasswordPath = Join-Path $portableSourceProbe $composedPassword.Name
+        Write-Utf8Text -Path $composedPasswordPath -Content $composedPassword.Content
+        Assert-Throws `
+            -Context "the exact password placeholder must reject $($composedPassword.Name) expression continuation" `
+            -Action { Assert-PackagingSourceTree -RootPath $portableSourceProbe | Out-Null }
+        Remove-Item -LiteralPath $composedPasswordPath -Force
+    }
+
+    Write-Utf8Text `
+        -Path (Join-Path $portableSourceProbe 'sensitive-config.json') `
+        -Content '{"password":"password"}'
+    Assert-Throws `
+        -Context 'credential placeholders remain forbidden in sensitive metadata and configuration' `
+        -Action { Assert-PackagingSourceTree -RootPath $portableSourceProbe | Out-Null }
+    Remove-Item -LiteralPath (Join-Path $portableSourceProbe 'sensitive-config.json') -Force
+
+
+    $nestedDeckPath = Join-Path $portableSourceProbe 'nested-deck.ld'
+    $nestedDeckStream = [System.IO.FileStream]::new(
+        $nestedDeckPath,
+        [System.IO.FileMode]::CreateNew,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None
+    )
+    try {
+        $nestedDeck = [System.IO.Compression.ZipArchive]::new(
+            $nestedDeckStream,
+            [System.IO.Compression.ZipArchiveMode]::Create,
+            $false,
+            [System.Text.Encoding]::UTF8
+        )
+        try {
+            $entry = $nestedDeck.CreateEntry('deck-pack.json')
+            $writer = [System.IO.StreamWriter]::new(
+                $entry.Open(),
+                [System.Text.UTF8Encoding]::new($false)
+            )
+            try {
+                $writer.Write('{}')
+            } finally {
+                $writer.Dispose()
+            }
+        } finally {
+            $nestedDeck.Dispose()
+        }
+    } finally {
+        $nestedDeckStream.Dispose()
+    }
+    Assert-Throws `
+        -Context 'a valid Deck ZIP renamed to .ld must remain forbidden inside a Codec Pack source' `
+        -Action { Assert-PackagingSourceTree -RootPath $portableSourceProbe | Out-Null }
+    [byte[]]$nestedDeckBytes = [System.IO.File]::ReadAllBytes($nestedDeckPath)
+    Remove-Item -LiteralPath $nestedDeckPath -Force
+
+    $outerCodecArchivePath = Join-Path $testRoot 'nested-deck-probe.ldcodec'
+    $outerCodecStream = [System.IO.FileStream]::new(
+        $outerCodecArchivePath,
+        [System.IO.FileMode]::CreateNew,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None
+    )
+    try {
+        $outerCodecArchive = [System.IO.Compression.ZipArchive]::new(
+            $outerCodecStream,
+            [System.IO.Compression.ZipArchiveMode]::Create,
+            $false,
+            [System.Text.Encoding]::UTF8
+        )
+        try {
+            $entry = $outerCodecArchive.CreateEntry('runtime/nested-deck.ld')
+            $entryStream = $entry.Open()
+            try {
+                $entryStream.Write($nestedDeckBytes, 0, $nestedDeckBytes.Length)
+            } finally {
+                $entryStream.Dispose()
+            }
+        } finally {
+            $outerCodecArchive.Dispose()
+        }
+    } finally {
+        $outerCodecStream.Dispose()
+    }
+    Assert-Throws `
+        -Context 'safe Codec Pack extraction must reject a nested Deck ZIP under the ambiguous .ld extension' `
+        -Action {
+            Expand-SafeCodecPackArchive `
+                -ArchivePath $outerCodecArchivePath `
+                -DestinationPath (Join-Path $testRoot 'nested-deck-expanded')
+        }
 
     $generatedReleaseSbom = Join-Path $testRoot 'latentdeck-0.1.0-sbom.cdx.json'
     & (Join-Path $PSScriptRoot 'New-Sbom.ps1') -OutputPath $generatedReleaseSbom | Out-Null
@@ -384,9 +550,21 @@ try {
     $sbomSource = Join-Path $testRoot 'SBOM.cdx.json'
     $assetContract = Join-Path $testRoot 'decoder-asset.json'
     [System.IO.Directory]::CreateDirectory($runtimeSource) | Out-Null
-    [System.IO.Directory]::CreateDirectory(
-        (Join-Path $packageSource 'latentdeck_codec_h3')
-    ) | Out-Null
+    foreach ($moduleName in @(
+        'latentdeck_codec_h3',
+        'latentdeck_codec_host',
+        'latentdeck_codec_sdk',
+        'latentdeck_deck_sdk',
+        'latentdeck_cartridge',
+        'latentdeck_rgb_ring'
+    )) {
+        [System.IO.Directory]::CreateDirectory(
+            (Join-Path $packageSource $moduleName)
+        ) | Out-Null
+        Write-Utf8Text `
+            -Path (Join-Path $packageSource "$moduleName/__init__.py") `
+            -Content "__version__ = '0.2.0'`n"
+    }
 
     $python313 = Resolve-TestPython313
     $python313Root = Split-Path -Parent $python313
@@ -396,6 +574,13 @@ try {
     }
     [System.IO.File]::Copy($python313, (Join-Path $runtimeSource 'python.exe'), $false)
     [System.IO.File]::Copy($python313Dll, (Join-Path $runtimeSource 'python313.dll'), $false)
+    foreach ($nativeModule in @('latentdeck_cartridge', 'latentdeck_rgb_ring')) {
+        [System.IO.File]::Copy(
+            $python313Dll,
+            (Join-Path $packageSource "$nativeModule/_native.cp313-win_amd64.pyd"),
+            $false
+        )
+    }
     Write-Utf8Text `
         -Path (Join-Path $runtimeSource 'python313._pth') `
         -Content "python313.zip`n.`nLib/site-packages`n"
@@ -431,24 +616,23 @@ try {
         $zipStream.Dispose()
     }
     Write-Utf8Text `
-        -Path (Join-Path $packageSource 'latentdeck_codec_h3/__init__.py') `
-        -Content "__version__ = '0.1.0'`n"
+        -Path (Join-Path $packageSource 'latentdeck_codec_h3/adapter.py') `
+        -Content "def make_adapter():`n    raise RuntimeError('synthetic packaging fixture')`n"
     Write-Utf8Text `
-        -Path (Join-Path $packageSource 'latentdeck_codec_h3/worker.py') `
-        -Content "raise SystemExit('synthetic packaging fixture')`n"
-    Write-Utf8Text `
-        -Path (Join-Path $packageSource 'latentdeck_codec_h3/d2_worker.py') `
-        -Content "raise SystemExit('synthetic packaging fixture')`n"
-    Write-Utf8Text `
-        -Path (Join-Path $packageSource 'latentdeck_codec_h3/q4_worker.py') `
-        -Content "raise SystemExit('synthetic packaging fixture')`n"
+        -Path (Join-Path $packageSource 'native/runtime-script.ld') `
+        -Content "/* GNU ld script */`nINPUT(libportable_runtime.so)`n"
+    foreach ($hostModule in @('__main__.py', 'runtime_v2.py', 'native_cartridge.py')) {
+        Write-Utf8Text `
+            -Path (Join-Path $packageSource "latentdeck_codec_host/$hostModule") `
+            -Content "# synthetic Protocol 2 packaging fixture`n"
+    }
     Write-Utf8Text `
         -Path $noticeSource `
         -Content "Temporary local CPython identity fixture. Never published or retained.`n"
     Write-Utf8Text `
         -Path $assetContract `
         -Content (@{
-            asset_id = 'org.latentdeck.taeh3'
+            asset_id = 'taeh3'
             display_name = 'TAEH3 decoder weight'
             kind = 'decoder_weight'
             required = $true
@@ -456,12 +640,12 @@ try {
             format = 'safetensors'
             accepted_variants = @(
                 @{
-                    variant_id = 'synthetic-contract-test'
-                    sha256 = ('a' * 64)
-                    byte_length = 1
-                    source_url = 'https://example.invalid/decoder'
-                    license_label = 'test-only'
-                    license_url = 'https://example.invalid/license'
+                    variant_id = 'madebyollin-taeh3-e743234f'
+                    sha256 = '4fd022bfcab08772fe0536b17ea1a3bbb5625be11e397868d1c5d891863d4c13'
+                    byte_length = 22709752
+                    source_url = 'https://huggingface.co/madebyollin/taehv/resolve/main/taeh3.safetensors'
+                    license_label = 'MIT'
+                    license_url = 'https://github.com/madebyollin/taehv/blob/e743234f/LICENSE'
                 }
             )
         } | ConvertTo-Json -Depth 16)
@@ -470,111 +654,179 @@ try {
     Write-SyntheticDependencyMetadata `
         -InventoryPath $inventorySource `
         -SbomPath $sbomSource `
-        -PackVersion '0.1.0'
-    $archive010 = & (Join-Path $PSScriptRoot 'New-H3CodecPack.ps1') `
+        -PackVersion '0.2.0'
+    $archive020 = & (Join-Path $PSScriptRoot 'New-H3CodecPack.ps1') `
         -RuntimeSource $runtimeSource `
         -PackageSource $packageSource `
         -NoticeSource $noticeSource `
         -DependencyInventoryPath $inventorySource `
         -SbomPath $sbomSource `
         -DecoderAssetContractPath $assetContract `
-        -PackVersion '0.1.0' `
+        -PackVersion '0.2.0' `
         -OutputDirectory $outputRoot
-    $hash010 = (Get-FileHash -LiteralPath $archive010 -Algorithm SHA256).Hash.ToLowerInvariant()
+    $hash020 = (Get-FileHash -LiteralPath $archive020 -Algorithm SHA256).Hash.ToLowerInvariant()
 
     $reproOutputRoot = Join-Path $testRoot 'codec-artifacts-repro'
-    $archive010Repro = & (Join-Path $PSScriptRoot 'New-H3CodecPack.ps1') `
+    $archive020Repro = & (Join-Path $PSScriptRoot 'New-H3CodecPack.ps1') `
         -RuntimeSource $runtimeSource `
         -PackageSource $packageSource `
         -NoticeSource $noticeSource `
         -DependencyInventoryPath $inventorySource `
         -SbomPath $sbomSource `
         -DecoderAssetContractPath $assetContract `
-        -PackVersion '0.1.0' `
+        -PackVersion '0.2.0' `
         -OutputDirectory $reproOutputRoot
-    $hash010Repro = (
-        Get-FileHash -LiteralPath $archive010Repro -Algorithm SHA256
+    $hash020Repro = (
+        Get-FileHash -LiteralPath $archive020Repro -Algorithm SHA256
     ).Hash.ToLowerInvariant()
-    if ($hash010Repro -cne $hash010) {
+    if ($hash020Repro -cne $hash020) {
         throw 'Identical Codec Pack inputs did not produce an identical archive SHA-256.'
     }
 
-    $installRoot = Join-Path $testRoot 'installed'
-    & (Join-Path $PSScriptRoot 'Install-H3CodecPack.ps1') `
-        -ArchivePath $archive010 `
-        -TrustedArchiveSha256 $hash010 `
-        -InstallRoot $installRoot | Out-Null
-    $installedManifest010 = Get-Content -Raw -LiteralPath (
-        Join-Path $installRoot 'org.latentdeck.h3/0.1.0/codec-pack.json'
+    $expanded020 = Join-Path $testRoot 'expanded-0.2.0'
+    Expand-SafeCodecPackArchive -ArchivePath $archive020 -DestinationPath $expanded020
+    $manifest020 = Get-Content -Raw -LiteralPath (
+        Join-Path $expanded020 'codec-pack.json'
     ) | ConvertFrom-Json -Depth 20
-    $workerArgumentContracts = @(
-        [pscustomobject]@{
-            Actual = @($installedManifest010.worker.arguments)
-            Expected = @('-I', '-s', '-B', '-m', 'latentdeck_codec_h3.worker')
-        }
-        [pscustomobject]@{
-            Actual = @($installedManifest010.worker.d2_arguments)
-            Expected = @('-I', '-s', '-B', '-m', 'latentdeck_codec_h3.d2_worker')
-        }
-        [pscustomobject]@{
-            Actual = @($installedManifest010.worker.q4_arguments)
-            Expected = @('-I', '-s', '-B', '-m', 'latentdeck_codec_h3.q4_worker')
-        }
+    $expandedLinkerScript = Get-Content -Raw -LiteralPath (
+        Join-Path $expanded020 'runtime/Lib/site-packages/native/runtime-script.ld'
     )
-    foreach ($contract in $workerArgumentContracts) {
-        if (($contract.Actual -join "`0") -cne ($contract.Expected -join "`0")) {
-            throw 'Physical H3 worker entrypoints must disable bytecode writes with -B.'
+    if ($expandedLinkerScript -cne "/* GNU ld script */`nINPUT(libportable_runtime.so)`n") {
+        throw 'Portable .ld linker-script content did not survive Codec Pack validation and expansion.'
+    }
+
+    $nativeTypingStubRoot = Join-Path $testRoot 'native-typing-stub'
+    Expand-SafeCodecPackArchive -ArchivePath $archive020 -DestinationPath $nativeTypingStubRoot
+    Add-CataloguedFixtureFile `
+        -PackRoot $nativeTypingStubRoot `
+        -RelativePath 'runtime/Lib/site-packages/latentdeck_cartridge/_native.pyi' `
+        -Bytes ([System.Text.Encoding]::UTF8.GetBytes("def read_slot(index: int) -> bytes: ...`n"))
+    Test-H3CodecPackDirectory -PackRoot $nativeTypingStubRoot | Out-Null
+
+    $nativePackageShadowRoot = Join-Path $testRoot 'native-package-shadow'
+    Expand-SafeCodecPackArchive -ArchivePath $archive020 -DestinationPath $nativePackageShadowRoot
+    Add-CataloguedFixtureFile `
+        -PackRoot $nativePackageShadowRoot `
+        -RelativePath 'runtime/Lib/site-packages/latentdeck_cartridge/_native/__init__.py' `
+        -Bytes ([System.Text.Encoding]::UTF8.GetBytes("raise RuntimeError('shadowed native binding')`n"))
+    Assert-Throws `
+        -Context 'an importable _native package must not shadow the exact native binding' `
+        -Action { Test-H3CodecPackDirectory -PackRoot $nativePackageShadowRoot | Out-Null }
+
+    $nativeSourceShadowRoot = Join-Path $testRoot 'native-source-shadow'
+    Expand-SafeCodecPackArchive -ArchivePath $archive020 -DestinationPath $nativeSourceShadowRoot
+    Add-CataloguedFixtureFile `
+        -PackRoot $nativeSourceShadowRoot `
+        -RelativePath 'runtime/Lib/site-packages/latentdeck_cartridge/_native.py' `
+        -Bytes ([System.Text.Encoding]::UTF8.GetBytes("raise RuntimeError('ambiguous native binding')`n"))
+    Assert-Throws `
+        -Context 'an importable _native Python module must not accompany the exact native binding' `
+        -Action { Test-H3CodecPackDirectory -PackRoot $nativeSourceShadowRoot | Out-Null }
+
+    $nativeWrongTagRoot = Join-Path $testRoot 'native-wrong-tag'
+    Expand-SafeCodecPackArchive -ArchivePath $archive020 -DestinationPath $nativeWrongTagRoot
+    Add-CataloguedFixtureFile `
+        -PackRoot $nativeWrongTagRoot `
+        -RelativePath 'runtime/Lib/site-packages/latentdeck_cartridge/_native.cp312-win_amd64.pyd' `
+        -Bytes ([System.IO.File]::ReadAllBytes($python313Dll))
+    Assert-Throws `
+        -Context 'a wrong-tag _native extension must not accompany the exact CPython 3.13 binding' `
+        -Action { Test-H3CodecPackDirectory -PackRoot $nativeWrongTagRoot | Out-Null }
+
+    $nativeUntaggedRoot = Join-Path $testRoot 'native-untagged'
+    Expand-SafeCodecPackArchive -ArchivePath $archive020 -DestinationPath $nativeUntaggedRoot
+    Add-CataloguedFixtureFile `
+        -PackRoot $nativeUntaggedRoot `
+        -RelativePath 'runtime/Lib/site-packages/latentdeck_cartridge/_native.pyd' `
+        -Bytes ([System.IO.File]::ReadAllBytes($python313Dll))
+    Assert-Throws `
+        -Context 'an untagged _native extension must not accompany the exact CPython 3.13 binding' `
+        -Action { Test-H3CodecPackDirectory -PackRoot $nativeUntaggedRoot | Out-Null }
+
+    $expectedWorkerArguments020 = @(
+        '-I', '-s', '-B', '-m', 'latentdeck_codec_host',
+        '--worker-protocol', '2',
+        '--codec-pack-id', 'org.latentdeck.h3',
+        '--codec-pack-version', '0.2.0',
+        '--codec-adapter-id', 'org.latentdeck.h3',
+        '--codec-adapter-version', '0.2.0',
+        '--codec-entrypoint', 'latentdeck_codec_h3.adapter:make_adapter'
+    )
+    if ((@($manifest020.worker.arguments) -join "`0") -cne
+        ($expectedWorkerArguments020 -join "`0")) {
+        throw 'Synthetic H3 pack does not select the exact generic Protocol 2 host.'
+    }
+    foreach ($obsoleteWorkerField in @('d2_arguments', 'q4_arguments')) {
+        if ($manifest020.worker.PSObject.Properties.Name -contains $obsoleteWorkerField) {
+            throw "Codec Pack v2 retained obsolete worker.$obsoleteWorkerField."
         }
     }
-    Assert-Throws -Context 'install must refuse an existing version' -Action {
-        & (Join-Path $PSScriptRoot 'Install-H3CodecPack.ps1') `
-            -ArchivePath $archive010 `
-            -TrustedArchiveSha256 $hash010 `
-            -InstallRoot $installRoot | Out-Null
+    $expectedCapabilities = @(
+        'player', 'realtime', 'resample', 'snapshot_capture', 'live_capture',
+        'raw_import'
+    )
+    if ((@($manifest020.capabilities) -join "`0") -cne
+        ($expectedCapabilities -join "`0") -or
+        [int]$manifest020.compatibility.worker_protocol -ne 2 -or
+        [int]$manifest020.compatibility.codec_adapter_api -ne 1 -or
+        $manifest020.adapter.adapter_id -cne 'org.latentdeck.h3' -or
+        $manifest020.adapter.adapter_version -cne '0.2.0' -or
+        $manifest020.adapter.entrypoint -cne 'latentdeck_codec_h3.adapter:make_adapter') {
+        throw 'Synthetic H3 Codec Pack v2 capability or adapter contract is incomplete.'
     }
 
     Write-SyntheticDependencyMetadata `
         -InventoryPath $inventorySource `
         -SbomPath $sbomSource `
-        -PackVersion '0.1.1'
-    $archive011 = & (Join-Path $PSScriptRoot 'New-H3CodecPack.ps1') `
+        -PackVersion '0.2.1'
+    $archive021 = & (Join-Path $PSScriptRoot 'New-H3CodecPack.ps1') `
         -RuntimeSource $runtimeSource `
         -PackageSource $packageSource `
         -NoticeSource $noticeSource `
         -DependencyInventoryPath $inventorySource `
         -SbomPath $sbomSource `
         -DecoderAssetContractPath $assetContract `
-        -PackVersion '0.1.1' `
+        -PackVersion '0.2.1' `
         -OutputDirectory $outputRoot
-    $hash011 = (Get-FileHash -LiteralPath $archive011 -Algorithm SHA256).Hash.ToLowerInvariant()
-    & (Join-Path $PSScriptRoot 'Install-H3CodecPack.ps1') `
-        -ArchivePath $archive011 `
-        -TrustedArchiveSha256 $hash011 `
-        -InstallRoot $installRoot | Out-Null
-
-    $installedManifest011 = Get-Content -Raw -LiteralPath (
-        Join-Path $installRoot 'org.latentdeck.h3/0.1.1/codec-pack.json'
+    $expanded021 = Join-Path $testRoot 'expanded-0.2.1'
+    Expand-SafeCodecPackArchive -ArchivePath $archive021 -DestinationPath $expanded021
+    $manifest021 = Get-Content -Raw -LiteralPath (
+        Join-Path $expanded021 'codec-pack.json'
     ) | ConvertFrom-Json -Depth 20
-    if ($installedManifest011.pack_version -cne '0.1.1' -or
-        $installedManifest011.adapter.adapter_id -cne 'org.latentdeck.h3' -or
-        $installedManifest011.adapter.adapter_version -cne '0.1.0') {
+    if ($manifest021.pack_version -cne '0.2.1' -or
+        $manifest021.adapter.adapter_id -cne 'org.latentdeck.h3' -or
+        $manifest021.adapter.adapter_version -cne '0.2.0') {
         throw 'Codec Pack and H3 adapter versions must remain independently versioned.'
     }
 
-    $packParent = Join-Path $installRoot 'org.latentdeck.h3'
-    if (-not (Test-Path -LiteralPath (Join-Path $packParent '0.1.0') -PathType Container) -or
-        -not (Test-Path -LiteralPath (Join-Path $packParent '0.1.1') -PathType Container)) {
-        throw 'Side-by-side Codec Pack versions were not preserved.'
+    foreach ($lifecycleScriptName in @(
+        'Install-H3CodecPack.ps1',
+        'Uninstall-H3CodecPack.ps1'
+    )) {
+        $lifecycleScript = Get-Content -Raw -LiteralPath (
+            Join-Path $PSScriptRoot $lifecycleScriptName
+        )
+        if ($lifecycleScript -match
+            '(?i)Expand-SafeCodecPackArchive|ZipArchive|Directory\]\:\:Move|Remove-SafeTemporaryDirectory' -or
+            $lifecycleScript -cnotmatch 'LifecycleHelperPath' -or
+            $lifecycleScript -cnotmatch 'latentdeck-codec-pack-installer') {
+            throw "$lifecycleScriptName must remain a thin native lifecycle wrapper."
+        }
     }
-
-    & (Join-Path $PSScriptRoot 'Uninstall-H3CodecPack.ps1') `
-        -PackVersion '0.1.0' `
-        -InstallRoot $installRoot | Out-Null
-    if (Test-Path -LiteralPath (Join-Path $packParent '0.1.0')) {
-        throw 'Version-scoped uninstall left the selected Codec Pack version behind.'
-    }
-    if (-not (Test-Path -LiteralPath (Join-Path $packParent '0.1.1') -PathType Container)) {
-        throw 'Version-scoped uninstall removed another Codec Pack version.'
+    $fullPackBuilder = Get-Content -Raw -LiteralPath (
+        Join-Path $PSScriptRoot 'Build-H3CodecPack.ps1'
+    )
+    foreach ($removedAuthorizationArgument in @(
+        '--expected-sha256',
+        '--expected-length',
+        '--expected-version'
+    )) {
+        if ($fullPackBuilder.Contains($removedAuthorizationArgument)) {
+            throw (
+                'Build-H3CodecPack.ps1 must not pass removed runtime authorization argument ' +
+                "'$removedAuthorizationArgument'; authorization is build-generated and embedded."
+            )
+        }
     }
 
     foreach ($forbiddenFixture in @(
@@ -592,7 +844,7 @@ try {
         Write-SyntheticDependencyMetadata `
             -InventoryPath $inventorySource `
             -SbomPath $sbomSource `
-            -PackVersion '0.1.2'
+            -PackVersion '0.2.2'
         $forbiddenPath = Join-Path $packageSource $forbiddenFixture.Name
         [System.IO.File]::WriteAllBytes($forbiddenPath, $forbiddenFixture.Bytes)
         Assert-Throws -Context "Codec Pack builder must reject $($forbiddenFixture.Name)" -Action {
@@ -603,7 +855,7 @@ try {
                 -DependencyInventoryPath $inventorySource `
                 -SbomPath $sbomSource `
                 -DecoderAssetContractPath $assetContract `
-                -PackVersion '0.1.2' `
+                -PackVersion '0.2.2' `
                 -OutputDirectory $outputRoot | Out-Null
         }
         Remove-Item -LiteralPath $forbiddenPath -Force
@@ -647,7 +899,7 @@ try {
                 -DependencyInventoryPath $inventorySource `
                 -SbomPath $sbomSource `
                 -DecoderAssetContractPath $assetContract `
-                -PackVersion '0.1.2' `
+                -PackVersion '0.2.2' `
                 -OutputDirectory $outputRoot | Out-Null
         }
     } finally {
@@ -655,17 +907,17 @@ try {
     }
 
     $badManifestRoot = Join-Path $testRoot 'bad-manifest-types'
-    Expand-SafeCodecPackArchive -ArchivePath $archive011 -DestinationPath $badManifestRoot
+    Expand-SafeCodecPackArchive -ArchivePath $archive021 -DestinationPath $badManifestRoot
     $badManifestPath = Join-Path $badManifestRoot 'codec-pack.json'
     $badManifest = Get-Content -LiteralPath $badManifestPath -Raw | ConvertFrom-Json
-    $badManifest.worker.probe_timeout_ms = '120000'
+    $badManifest.worker.start_timeout_ms = '120000'
     Write-JsonFile -Value $badManifest -Path $badManifestPath
     Assert-Throws -Context 'string-for-number manifest field must be rejected' -Action {
         Test-H3CodecPackDirectory -PackRoot $badManifestRoot | Out-Null
     }
 
     $badArrayRoot = Join-Path $testRoot 'bad-array-types'
-    Expand-SafeCodecPackArchive -ArchivePath $archive011 -DestinationPath $badArrayRoot
+    Expand-SafeCodecPackArchive -ArchivePath $archive021 -DestinationPath $badArrayRoot
     $badArrayManifestPath = Join-Path $badArrayRoot 'codec-pack.json'
     $badArrayManifest = Get-Content -LiteralPath $badArrayManifestPath -Raw | ConvertFrom-Json
     $badArrayManifest.worker.arguments = [pscustomobject]@{ invalid = 'object' }
@@ -675,7 +927,7 @@ try {
     }
 
     $badCatalogRoot = Join-Path $testRoot 'bad-catalog-types'
-    Expand-SafeCodecPackArchive -ArchivePath $archive011 -DestinationPath $badCatalogRoot
+    Expand-SafeCodecPackArchive -ArchivePath $archive021 -DestinationPath $badCatalogRoot
     $badCatalogPath = Join-Path $badCatalogRoot 'integrity.json'
     $badCatalogText = [System.IO.File]::ReadAllText($badCatalogPath)
     $badCatalogText = [regex]::new('"byte_length"\s*:\s*([0-9]+)').Replace(
@@ -699,7 +951,7 @@ try {
     }
 
     $badUtf8ManifestRoot = Join-Path $testRoot 'bad-utf8-manifest'
-    Expand-SafeCodecPackArchive -ArchivePath $archive011 -DestinationPath $badUtf8ManifestRoot
+    Expand-SafeCodecPackArchive -ArchivePath $archive021 -DestinationPath $badUtf8ManifestRoot
     $badUtf8ManifestPath = Join-Path $badUtf8ManifestRoot 'codec-pack.json'
     Write-InvalidUtf8InsideAsciiMarker `
         -Path $badUtf8ManifestPath `
@@ -709,7 +961,7 @@ try {
     }
 
     $badUtf8CatalogRoot = Join-Path $testRoot 'bad-utf8-catalog'
-    Expand-SafeCodecPackArchive -ArchivePath $archive011 -DestinationPath $badUtf8CatalogRoot
+    Expand-SafeCodecPackArchive -ArchivePath $archive021 -DestinationPath $badUtf8CatalogRoot
     $badUtf8CatalogPath = Join-Path $badUtf8CatalogRoot 'integrity.json'
     Write-InvalidUtf8InsideAsciiMarker `
         -Path $badUtf8CatalogPath `
@@ -724,38 +976,8 @@ try {
         Test-H3CodecPackDirectory -PackRoot $badUtf8CatalogRoot | Out-Null
     }
 
-    $discoveryChildren = @(
-        Get-ChildItem -LiteralPath $packParent -Force -Directory |
-            Select-Object -ExpandProperty Name
-    )
-    if (@($discoveryChildren | Where-Object { $_ -notmatch '^[0-9]+\.[0-9]+\.[0-9]+' }).Count -gt 0) {
-        throw 'Install/removal work directories leaked into Codec Pack discovery.'
-    }
-
-    & (Join-Path $PSScriptRoot 'Uninstall-H3CodecPack.ps1') `
-        -PackVersion '0.1.1' `
-        -InstallRoot $installRoot `
-        -CleanupQuarantine | Out-Null
-    if (-not (Test-Path -LiteralPath (Join-Path $packParent '0.1.1') -PathType Container)) {
-        throw 'CleanupQuarantine uninstalled a healthy reinstalled Codec Pack version.'
-    }
-
-    & (Join-Path $PSScriptRoot 'Uninstall-H3CodecPack.ps1') `
-        -PackVersion '0.1.1' `
-        -InstallRoot $installRoot | Out-Null
-
-    foreach ($auxiliaryKind in @('Staging', 'Trash')) {
-        $auxiliaryRoot = Get-CodecPackAuxiliaryRoot `
-            -InstallRoot $installRoot `
-            -Kind $auxiliaryKind
-        if ((Test-Path -LiteralPath $auxiliaryRoot) -and
-            @(Get-ChildItem -LiteralPath $auxiliaryRoot -Force).Count -gt 0) {
-            throw "Codec Pack $auxiliaryKind work root was not cleaned."
-        }
-    }
-
     Write-Host 'RELEASE PACKAGING CONTRACT: PASS' -ForegroundColor Green
-    Write-Host 'Verified: independent NSIS config, fresh lock-bound application SBOM/no prebuilt reuse, offline embedded Tauri frontend/custom-protocol contract, pinned Spout2 SBOM/license/notice delivery, Spout release feature, strict JSON types, CPython x64 identity, out-of-discovery staging, integrity, side-by-side install, exact-version uninstall, payload rejection.'
+    Write-Host 'Verified: independent NSIS config, fresh lock-bound application SBOM/no prebuilt reuse, offline embedded Tauri frontend/custom-protocol contract, pinned Spout2 SBOM/license/notice delivery, Spout release feature, strict Protocol 2 H3 manifest/worker/capability contracts, CPython x64 identity, deterministic .ldcodec archives, integrity, thin native lifecycle wrappers, and payload rejection.'
 } finally {
     if (Test-Path -LiteralPath $testRoot) {
         Remove-Item -LiteralPath $testRoot -Recurse -Force

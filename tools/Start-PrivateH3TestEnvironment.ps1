@@ -17,6 +17,13 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+if ($Mode -ceq 'LatentDeck') {
+    throw (
+        'LatentDeck requires an installed Protocol 2 Codec Pack. The linked ' +
+        'development helper is an explicit Protocol 1 Player-only bridge.'
+    )
+}
+
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $artifactsRoot = Join-Path $repoRoot 'artifacts'
 [System.IO.Directory]::CreateDirectory($artifactsRoot) | Out-Null
@@ -83,30 +90,31 @@ try {
     $packRoot = Join-Path $codecRoot 'org.latentdeck.h3\0.1.0'
     $manifestPath = Join-Path $packRoot 'codec-pack.json'
     $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-    foreach ($name in @('arguments', 'd2_arguments', 'q4_arguments')) {
-        if (@($manifest.worker.$name).Count -eq 0) {
-            throw "Prepared linked Codec Pack omitted worker.$name."
+    if (@($manifest.worker.arguments).Count -eq 0) {
+        throw 'Prepared linked Codec Pack omitted its P1 Player worker arguments.'
+    }
+    foreach ($forbiddenWorkerField in @('d2_arguments', 'q4_arguments')) {
+        if ($manifest.worker.PSObject.Properties.Name -contains $forbiddenWorkerField) {
+            throw "P1 linked helper must not expose Deck worker.$forbiddenWorkerField."
         }
     }
 
     $runtimePython = Join-Path $packRoot $manifest.worker.executable.Replace('/', '\')
     $probe = @'
 import importlib
-for name in (
-    "latentdeck_codec_h3.worker",
-    "latentdeck_codec_h3.d2_worker",
-    "latentdeck_codec_h3.q4_worker",
-):
-    importlib.import_module(name)
+importlib.import_module("latentdeck_codec_h3.worker")
 '@
     & $runtimePython -B -s -c $probe
     if ($LASTEXITCODE -ne 0) {
-        throw 'Linked H3 runtime could not import every Player/D2/Q4 entrypoint.'
+        throw 'Linked H3 runtime could not import its P1 Player entrypoint.'
     }
 
     $receipt = [ordered]@{
         schema_version = 1
-        purpose = 'private_linked_h3_runtime_test'
+        purpose = 'private_linked_h3_player_p1_test'
+        worker_protocol = 1
+        player_only_bridge = $true
+        latentdeck_supported = $false
         distributable = $false
         installed = $false
         created_utc = [DateTime]::UtcNow.ToString('o')
@@ -118,8 +126,6 @@ for name in (
         source_policy = 'read_only_inputs'
         entrypoints = [ordered]@{
             player = @($manifest.worker.arguments)
-            d2 = @($manifest.worker.d2_arguments)
-            q4 = @($manifest.worker.q4_arguments)
         }
     }
     $receiptPath = Join-Path $testRoot 'test-environment.json'
@@ -131,7 +137,10 @@ for name in (
 
     Write-Host "Prepared isolated linked H3 test environment: $testRoot" -ForegroundColor Green
     Write-Host "Codec discovery root: $codecRoot"
-    Write-Warning 'This environment links machine-local packages. It is private, non-distributable, and not installed.'
+    Write-Warning (
+        'This environment links machine-local packages. It is private, ' +
+        'non-distributable, not installed, and supports only the P1 Player bridge.'
+    )
 
     if ($Mode -eq 'PrepareOnly') {
         Write-Output $receiptPath
@@ -140,7 +149,7 @@ for name in (
 
     $nodeRoot = & (Join-Path $PSScriptRoot 'Get-PinnedNode.ps1')
     $pnpm = Join-Path $nodeRoot 'pnpm.cmd'
-    $package = if ($Mode -eq 'LatentDeck') { '@latentdeck/app' } else { '@latentdeck/player' }
+    $package = '@latentdeck/player'
     $previousLocalAppData = $env:LOCALAPPDATA
     $previousProgramData = $env:PROGRAMDATA
     $previousPrivateCodecRoot = $env:LATENTDECK_PRIVATE_CODEC_ROOT

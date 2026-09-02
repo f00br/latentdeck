@@ -10,7 +10,11 @@ param(
     [ValidateSet('CurrentUser', 'AllUsers')]
     [string]$Scope = 'CurrentUser',
 
-    [string]$InstallRoot
+    [string]$InstallRoot,
+
+    [switch]$Repair,
+
+    [string]$LifecycleHelperPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,149 +23,69 @@ $ProgressPreference = 'SilentlyContinue'
 
 Import-Module (Join-Path $PSScriptRoot 'CodecPackPackaging.psm1') -Force
 
+if ($Scope -cne 'CurrentUser') {
+    throw 'Protocol 2 Codec Packs are installed only for the current user.'
+}
 Assert-Sha256 -Value $TrustedArchiveSha256 -Name 'TrustedArchiveSha256'
+
 $resolvedArchive = (Resolve-Path -LiteralPath $ArchivePath).Path
 $archiveItem = Get-Item -LiteralPath $resolvedArchive -Force
 if ($archiveItem.PSIsContainer -or
-    ($archiveItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-    $archiveItem.Length -eq 0 -or
-    $archiveItem.Length -gt 20GB) {
+    ($archiveItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw 'Codec Pack archive must be a regular non-reparse file.'
 }
-if ($Scope -eq 'AllUsers' -and [string]::IsNullOrWhiteSpace($InstallRoot)) {
-    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
-    if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        throw 'An all-users Codec Pack install requires an elevated PowerShell process.'
-    }
+$measuredArchiveSha256 = (
+    Get-FileHash -LiteralPath $resolvedArchive -Algorithm SHA256
+).Hash.ToLowerInvariant()
+if ($measuredArchiveSha256 -cne $TrustedArchiveSha256) {
+    throw "Codec Pack archive SHA-256 mismatch: found $measuredArchiveSha256"
 }
 
-$lifecycleMutex = [System.Threading.Mutex]::new(
-    $false,
-    'Global\LatentDeck.CodecPackLifecycle.org.latentdeck.h3'
-)
-$mutexHeld = $false
-try {
-    try {
-        $mutexHeld = $lifecycleMutex.WaitOne([System.TimeSpan]::FromSeconds(30))
-    } catch [System.Threading.AbandonedMutexException] {
-        $mutexHeld = $true
-    }
-    if (-not $mutexHeld) {
-        throw 'Timed out waiting for another Codec Pack lifecycle operation to finish.'
-    }
-
-$root = Get-CodecPackInstallRoot -Scope $Scope -InstallRoot $InstallRoot
-$existing = $root
-while (-not [string]::IsNullOrWhiteSpace($existing) -and
-    -not (Test-Path -LiteralPath $existing)) {
-    $parent = Split-Path -Parent $existing
-    if ($parent -eq $existing) {
-        break
-    }
-    $existing = $parent
+if ([string]::IsNullOrWhiteSpace($LifecycleHelperPath)) {
+    $LifecycleHelperPath = $env:LATENTDECK_H3_LIFECYCLE_HELPER
 }
-if (-not [string]::IsNullOrWhiteSpace($existing) -and
-    (Test-Path -LiteralPath $existing -PathType Container)) {
-    Assert-DirectoryNotReparsePoint -Path $existing
-}
-
-[System.IO.Directory]::CreateDirectory($root) | Out-Null
-Assert-DirectoryNotReparsePoint -Path $root
-Assert-PathComponentsNotReparsePoints -Path $root
-$packParent = Join-Path $root 'org.latentdeck.h3'
-[System.IO.Directory]::CreateDirectory($packParent) | Out-Null
-Assert-DirectoryNotReparsePoint -Path $packParent
-Assert-PathComponentsNotReparsePoints -Path $packParent
-Assert-ChildPath -ParentPath $root -CandidatePath $packParent | Out-Null
-
-$stagingRoot = Get-CodecPackAuxiliaryRoot -InstallRoot $root -Kind Staging
-[System.IO.Directory]::CreateDirectory($stagingRoot) | Out-Null
-Assert-DirectoryNotReparsePoint -Path $stagingRoot
-Assert-PathComponentsNotReparsePoints -Path $stagingRoot
-$stagingPath = Join-Path $stagingRoot ".install-$([guid]::NewGuid().ToString('N'))"
-Assert-SafeTemporaryDirectory `
-    -ParentPath $stagingRoot `
-    -CandidatePath $stagingPath `
-    -RequiredLeafPrefix '.install-' | Out-Null
-
-try {
-    $archiveStream = [System.IO.FileStream]::new(
-        $resolvedArchive,
-        [System.IO.FileMode]::Open,
-        [System.IO.FileAccess]::Read,
-        [System.IO.FileShare]::None
+if ([string]::IsNullOrWhiteSpace($LifecycleHelperPath)) {
+    throw (
+        'LifecycleHelperPath is required. Use the exact build-authorized ' +
+        'latentdeck-codec-pack-installer produced for this archive.'
     )
-    try {
-        if ($archiveStream.Length -eq 0 -or $archiveStream.Length -gt 20GB) {
-            throw 'Codec Pack archive is empty or exceeds its compressed-size limit.'
-        }
-        $sha256 = [System.Security.Cryptography.SHA256]::Create()
-        try {
-            $archiveHash = [System.Convert]::ToHexString(
-                $sha256.ComputeHash($archiveStream)
-            ).ToLowerInvariant()
-        } finally {
-            $sha256.Dispose()
-        }
-        if ($archiveHash -cne $TrustedArchiveSha256) {
-            throw "Codec Pack archive SHA-256 mismatch: found $archiveHash"
-        }
-        $archiveStream.Position = 0
-        Expand-SafeCodecPackArchive `
-            -ArchiveStream $archiveStream `
-            -DestinationPath $stagingPath
-    } finally {
-        $archiveStream.Dispose()
-    }
-    $manifest = Test-H3CodecPackDirectory -PackRoot $stagingPath
-    $destination = Join-Path $packParent ([string]$manifest.pack_version)
-    Assert-ChildPath -ParentPath $packParent -CandidatePath $destination | Out-Null
-    if (Test-Path -LiteralPath $destination) {
-        throw "Codec Pack version is already installed; refusing overwrite: $($manifest.pack_version)"
-    }
-    if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
-        $otherScope = if ($Scope -eq 'CurrentUser') { 'AllUsers' } else { 'CurrentUser' }
-        $otherRoot = Get-CodecPackInstallRoot -Scope $otherScope
-        $otherVersion = Join-Path $otherRoot "org.latentdeck.h3/$($manifest.pack_version)"
-        if (Test-Path -LiteralPath $otherVersion) {
-            throw (
-                "The same Codec Pack version exists in the $otherScope scope. " +
-                'Remove that copy before installing to avoid a discovery conflict.'
-            )
-        }
-    }
+}
+$resolvedHelper = (Resolve-Path -LiteralPath $LifecycleHelperPath).Path
+$helperItem = Get-Item -LiteralPath $resolvedHelper -Force
+if ($helperItem.PSIsContainer -or
+    ($helperItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw 'LifecycleHelperPath must be a regular non-reparse file.'
+}
 
-    [System.IO.Directory]::Move($stagingPath, $destination)
-    try {
-        Assert-PathComponentsNotReparsePoints -Path $destination
-        Test-H3CodecPackDirectory `
-            -PackRoot $destination `
-            -ExpectedPackVersion ([string]$manifest.pack_version) | Out-Null
-    } catch {
-        if ((Test-Path -LiteralPath $destination -PathType Container) -and
-            -not (Test-Path -LiteralPath $stagingPath)) {
-            [System.IO.Directory]::Move($destination, $stagingPath)
-        }
-        throw
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        throw 'LOCALAPPDATA is unavailable; provide a canonical InstallRoot.'
     }
-    $stagingPath = $null
-    Write-Output $destination
-} finally {
-    if ($null -ne $stagingPath) {
-        Remove-SafeTemporaryDirectory `
-            -ParentPath $stagingRoot `
-            -CandidatePath $stagingPath `
-            -RequiredLeafPrefix '.install-'
+    $localAppData = [System.IO.Path]::GetFullPath($env:LOCALAPPDATA)
+} else {
+    $codecRoot = [System.IO.Path]::GetFullPath($InstallRoot)
+    $latentDeckRoot = [System.IO.Path]::GetDirectoryName($codecRoot)
+    if ([System.IO.Path]::GetFileName($codecRoot) -cne 'CodecPacks' -or
+        [System.IO.Path]::GetFileName($latentDeckRoot) -cne 'LatentDeck') {
+        throw 'InstallRoot must have the canonical <LocalAppData>\LatentDeck\CodecPacks shape.'
     }
-    if ((Test-Path -LiteralPath $stagingRoot -PathType Container) -and
-        @(Get-ChildItem -LiteralPath $stagingRoot -Force).Count -eq 0) {
-        [System.IO.Directory]::Delete($stagingRoot, $false)
-    }
+    $localAppData = [System.IO.Path]::GetDirectoryName($latentDeckRoot)
 }
-} finally {
-    if ($mutexHeld) {
-        $lifecycleMutex.ReleaseMutex()
-    }
-    $lifecycleMutex.Dispose()
+$programData = if ([string]::IsNullOrWhiteSpace($env:PROGRAMDATA)) {
+    $localAppData
+} else {
+    [System.IO.Path]::GetFullPath($env:PROGRAMDATA)
 }
+
+$operation = if ($Repair) { 'repair' } else { 'install' }
+$nativeOutput = @(& $resolvedHelper `
+    --local-app-data $localAppData `
+    --program-data $programData `
+    $operation `
+    --archive $resolvedArchive 2>&1)
+$nativeExitCode = $LASTEXITCODE
+if ($nativeExitCode -ne 0) {
+    $detail = ($nativeOutput | Out-String).Trim().Replace("`r", ' ').Replace("`n", ' ')
+    throw "Native H3 lifecycle helper failed with exit code $nativeExitCode`: $detail"
+}
+$nativeOutput

@@ -733,6 +733,8 @@ Assert-True -Condition ($receipt.packages.install_mode -ceq 'wheel_target_no_dep
 
 $requiredPackages = @(
     'latentdeck-cartridge',
+    'latentdeck-codec-sdk',
+    'latentdeck-deck-sdk',
     'latentdeck-codec-host',
     'latentdeck-operator-d2',
     'latentdeck-operator-q4',

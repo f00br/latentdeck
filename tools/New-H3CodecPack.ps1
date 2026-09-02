@@ -105,6 +105,14 @@ Assert-ExactProperties -Object $assetContract -Required @(
     'asset_id', 'display_name', 'kind', 'required', 'selection', 'format',
     'accepted_variants'
 ) -Context 'decoder asset contract'
+$assetVariants = @($assetContract.accepted_variants)
+if ($assetVariants.Count -ne 1) {
+    throw 'Protocol 2 H3 packs require one exact external decoder asset declaration.'
+}
+$assetVariant = $assetVariants[0]
+Assert-ExactProperties -Object $assetVariant -Required @(
+    'variant_id', 'sha256', 'byte_length', 'source_url', 'license_label', 'license_url'
+) -Context 'decoder asset variant'
 
 $finalDirectory = Join-Path $outputRoot $PackVersion
 if (Test-Path -LiteralPath $finalDirectory) {
@@ -151,10 +159,17 @@ try {
         $false
     )
 
-    $payloadFiles = @(Get-ChildItem -LiteralPath $packRoot -File -Force -Recurse | Sort-Object {
-        Convert-ToPortableRelativePath -RootPath $packRoot -Path $_.FullName
-    })
-    if ($payloadFiles.Count -eq 0 -or $payloadFiles.Count -gt 32768) {
+    $payloadFilesByPath = [System.Collections.Generic.SortedDictionary[
+        string, System.IO.FileInfo
+    ]]::new([System.StringComparer]::Ordinal)
+    foreach ($payloadFile in Get-ChildItem -LiteralPath $packRoot -File -Force -Recurse) {
+        $portablePath = Convert-ToPortableRelativePath `
+            -RootPath $packRoot `
+            -Path $payloadFile.FullName
+        $payloadFilesByPath.Add($portablePath, $payloadFile)
+    }
+    $payloadFiles = @($payloadFilesByPath.Values)
+    if ($payloadFiles.Count -eq 0 -or $payloadFiles.Count -gt 32766) {
         throw "Codec Pack payload has an invalid file count: $($payloadFiles.Count)"
     }
 
@@ -172,13 +187,16 @@ try {
 
     $manifestPath = Join-Path $packRoot 'codec-pack.json'
     Write-JsonFile -Value ([ordered]@{
-        manifest_version = '1.0.0'
+        manifest_version = '2.0.0'
+        kind = 'codec_pack'
         pack_id = 'org.latentdeck.h3'
         pack_version = $PackVersion
         display_name = 'LatentDeck H3 Codec Pack'
+        summary = 'MiniMax H3 adapter and isolated runtime for LatentDeck.'
         publisher = [ordered]@{
             name = $PublisherName
             url = if ([string]::IsNullOrWhiteSpace($PublisherUrl)) { $null } else { $PublisherUrl }
+            identity_claim = 'self_declared'
         }
         license = [ordered]@{
             spdx_or_label = $LicenseLabel
@@ -190,40 +208,74 @@ try {
         }
         compatibility = [ordered]@{
             app_min_inclusive = '0.1.0'
-            app_max_exclusive = '0.2.0'
-            worker_protocol_min = 1
-            worker_protocol_max = 1
+            app_max_exclusive = '1.0.0'
+            worker_protocol = 2
+            codec_adapter_api = 1
+            tensor_abi = 'latentdeck.tensor.v1'
+            python = [ordered]@{
+                implementation = 'cpython'
+                version = '3.13'
+                platform_tag = 'win_amd64'
+            }
+            torch_exact_build = '2.13.0+cu130'
             lc_spec_versions = @('0.1.0')
             profiles = @(
                 [ordered]@{
                     codec_family = 'minimax_h3'
                     profile = 'h3_av_latent'
-                    profile_versions = @('0.1.0')
+                    profile_version = '0.1.0'
                 }
             )
         }
-        worker = [ordered]@{
-            executable = 'runtime/python.exe'
-            arguments = @('-I', '-s', '-B', '-m', 'latentdeck_codec_h3.worker')
-            d2_arguments = @('-I', '-s', '-B', '-m', 'latentdeck_codec_h3.d2_worker')
-            q4_arguments = @('-I', '-s', '-B', '-m', 'latentdeck_codec_h3.q4_worker')
-            working_directory = 'runtime'
-            probe_timeout_ms = 120000
-        }
         adapter = [ordered]@{
             adapter_id = 'org.latentdeck.h3'
-            adapter_version = '0.1.0'
+            adapter_version = '0.2.0'
+            entrypoint = 'latentdeck_codec_h3.adapter:make_adapter'
+        }
+        worker = [ordered]@{
+            executable = 'runtime/python.exe'
+            arguments = @(
+                '-I', '-s', '-B', '-m', 'latentdeck_codec_host',
+                '--worker-protocol', '2',
+                '--codec-pack-id', 'org.latentdeck.h3',
+                '--codec-pack-version', $PackVersion,
+                '--codec-adapter-id', 'org.latentdeck.h3',
+                '--codec-adapter-version', '0.2.0',
+                '--codec-entrypoint', 'latentdeck_codec_h3.adapter:make_adapter'
+            )
+            working_directory = 'runtime'
+            start_timeout_ms = 120000
+            heartbeat_timeout_ms = 5000
+        }
+        capabilities = @(
+            'player', 'realtime', 'resample', 'snapshot_capture', 'live_capture',
+            'raw_import'
+        )
+        external_assets = @(
+            [ordered]@{
+                asset_id = [string]$assetContract.asset_id
+                display_name = [string]$assetContract.display_name
+                required = [bool]$assetContract.required
+                byte_length = [int64]$assetVariant.byte_length
+                sha256 = [string]$assetVariant.sha256
+                source_url = [string]$assetVariant.source_url
+                license_label = [string]$assetVariant.license_label
+                license_url = [string]$assetVariant.license_url
+            }
+        )
+        runtime_lock = [ordered]@{
+            path = 'DEPENDENCY_INVENTORY.json'
+            sha256 = (Get-FileHash -LiteralPath $inventoryPath -Algorithm SHA256).Hash.ToLowerInvariant()
         }
         integrity = [ordered]@{
             catalog_path = 'integrity.json'
             catalog_sha256 = $catalogHash
         }
-        external_assets = @($assetContract)
     }) -Path $manifestPath
 
     Test-H3CodecPackDirectory -PackRoot $packRoot -ExpectedPackVersion $PackVersion | Out-Null
 
-    $archiveName = "LatentDeck-H3-CodecPack-$PackVersion-windows-x64.zip"
+    $archiveName = "LatentDeck-H3-CodecPack-$PackVersion-windows-x64.ldcodec"
     $archiveStagePath = Join-Path $outputStage $archiveName
     New-DeterministicZip -SourceDirectory $packRoot -DestinationPath $archiveStagePath
 

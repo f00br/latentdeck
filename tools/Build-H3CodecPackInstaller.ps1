@@ -41,7 +41,7 @@ if ($archive.PSIsContainer -or
     $archive.Length -gt 20GB) {
     throw 'Codec Pack setup payload must be a regular non-reparse ZIP below 20 GiB.'
 }
-$expectedArchiveName = "LatentDeck-H3-CodecPack-$PackVersion-windows-x64.zip"
+$expectedArchiveName = "LatentDeck-H3-CodecPack-$PackVersion-windows-x64.ldcodec"
 if ($archive.Name -cne $expectedArchiveName) {
     throw "Codec Pack setup payload must retain canonical name '$expectedArchiveName'."
 }
@@ -58,7 +58,7 @@ if (-not [string]::Equals(
     $archiveDirectory,
     [System.StringComparison]::OrdinalIgnoreCase
 )) {
-    throw 'Codec Pack setup must be built beside its exact adjacent payload ZIP.'
+    throw 'Codec Pack setup must be built beside its exact adjacent .ldcodec payload.'
 }
 [System.IO.Directory]::CreateDirectory($outputRoot) | Out-Null
 $setupName = "LatentDeck-H3-CodecPack-$PackVersion-setup.exe"
@@ -269,11 +269,26 @@ try {
         throw 'Codec Pack EstimatedSize does not fit the Windows Installed Apps field.'
     }
 
+    $helperAuthorizationPath = Join-Path $workRoot 'h3-helper-authorization.json'
+    Write-Utf8Json -Value ([ordered]@{
+        schema_version = 1
+        packages = @(
+            [ordered]@{
+                pack_id = 'org.latentdeck.h3'
+                pack_version = $PackVersion
+                archive_sha256 = $archiveSha256
+                archive_byte_length = [int64]$archive.Length
+            }
+        )
+    }) -Path $helperAuthorizationPath
+
     $helperTargetRoot = Join-Path $artifactsRoot 'codec-pack-installer-target'
     $savedTargetDirectory = $env:CARGO_TARGET_DIR
     $savedRustFlags = $env:RUSTFLAGS
+    $savedAuthorizationFile = $env:LATENTDECK_H3_AUTHORIZATION_FILE
     try {
         $env:CARGO_TARGET_DIR = $helperTargetRoot
+        $env:LATENTDECK_H3_AUTHORIZATION_FILE = $helperAuthorizationPath
         if ([string]::IsNullOrWhiteSpace($savedRustFlags)) {
             $env:RUSTFLAGS = '-C target-feature=+crt-static'
         } else {
@@ -294,6 +309,7 @@ try {
     } finally {
         $env:CARGO_TARGET_DIR = $savedTargetDirectory
         $env:RUSTFLAGS = $savedRustFlags
+        $env:LATENTDECK_H3_AUTHORIZATION_FILE = $savedAuthorizationFile
     }
     $helperPath = Join-Path `
         $helperTargetRoot `
@@ -421,6 +437,12 @@ try {
             crt = 'static'
             delivery = 'embedded_in_setup_and_uninstaller'
             installed_as_loose_file = $false
+            authorization = [ordered]@{
+                source = 'build_generated_exact_allowlist'
+                pack_version = $PackVersion
+                archive_sha256 = $archiveSha256
+                archive_byte_length = [int64]$archive.Length
+            }
         }
         publisher_signature = if ([string]::IsNullOrWhiteSpace($SigningCommand)) {
             'not_present_local_rc'
@@ -597,6 +619,12 @@ try {
             static_crt = $true
             delivery = 'embedded_in_setup_and_uninstaller'
             installed_as_loose_file = $false
+            authorization = [ordered]@{
+                source = 'build_generated_exact_allowlist'
+                pack_version = $PackVersion
+                archive_sha256 = $archiveSha256
+                archive_byte_length = [int64]$archive.Length
+            }
         }
         sbom = [ordered]@{
             name = 'installer-SBOM.cdx.json'

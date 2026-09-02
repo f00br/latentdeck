@@ -306,7 +306,7 @@ payload_present:
   File "/oname=${HELPER_FILE}" "${HELPER_PATH}"
 
   DetailPrint "Validating ${ARCHIVE_NAME} and installing immutable pack ${PACK_VERSION}..."
-  nsExec::ExecToStack '"$PLUGINSDIR\${HELPER_FILE}" --local-app-data "$LOCALAPPDATA" --program-data "$ProgramDataRoot" install --archive "$EXEDIR\${ARCHIVE_NAME}" --expected-sha256 "${ARCHIVE_SHA256}" --expected-length "${ARCHIVE_LENGTH}" --expected-version "${PACK_VERSION}"'
+  nsExec::ExecToStack '"$PLUGINSDIR\${HELPER_FILE}" --local-app-data "$LOCALAPPDATA" --program-data "$ProgramDataRoot" install --archive "$EXEDIR\${ARCHIVE_NAME}"'
   Pop $InstallResult
   Pop $InstallOutput
   Call NormalizeHelperExit

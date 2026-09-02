@@ -306,7 +306,7 @@ function Write-SyntheticDependencyMetadata {
         },
         [ordered]@{
             name = 'latentdeck-codec-h3'
-            version = '0.1.0'
+            version = '0.2.0'
             kind = 'repository'
             source_url = 'https://latentdeck.org/'
             license_expression = 'Apache-2.0'
@@ -369,7 +369,10 @@ function New-SyntheticPackFixture {
         [string]$Variant,
 
         [Parameter(Mandatory)]
-        [pscustomobject]$Python313
+        [pscustomobject]$Python313,
+
+        [ValidateSet('None', 'Py', 'Pyi')]
+        [string]$CredentialPayloadKind = 'None'
     )
 
     $fixtureRoot = Join-Path $ParentRoot "$PackVersion-$Variant"
@@ -435,11 +438,42 @@ function New-SyntheticPackFixture {
 
     Write-Utf8Text `
         -Path (Join-Path $packageModule '__init__.py') `
-        -Content "__version__ = '0.1.0'`nFIXTURE_VARIANT = '$Variant'`n"
-    foreach ($workerName in @('worker.py', 'd2_worker.py', 'q4_worker.py')) {
+        -Content "__version__ = '0.2.0'`nFIXTURE_VARIANT = '$Variant'`n"
+    Write-Utf8Text `
+        -Path (Join-Path $packageModule 'adapter.py') `
+        -Content "def make_adapter():`n    raise RuntimeError('synthetic setup fixture')`n"
+    if ($CredentialPayloadKind -cne 'None') {
+        $credentialExtension = if ($CredentialPayloadKind -ceq 'Py') { '.py' } else { '.pyi' }
         Write-Utf8Text `
-            -Path (Join-Path $packageModule $workerName) `
-            -Content "raise SystemExit('synthetic setup fixture $Variant')`n"
+            -Path (Join-Path $packageModule "credential_leak$credentialExtension") `
+            -Content "api_key = 'ld_fixture_secret_value_1234567890'`n"
+    }
+
+    $protocol2Modules = @(
+        'latentdeck_codec_host',
+        'latentdeck_codec_sdk',
+        'latentdeck_deck_sdk',
+        'latentdeck_cartridge',
+        'latentdeck_rgb_ring'
+    )
+    foreach ($moduleName in $protocol2Modules) {
+        $moduleRoot = Join-Path $packageSource $moduleName
+        [System.IO.Directory]::CreateDirectory($moduleRoot) | Out-Null
+        Write-Utf8Text `
+            -Path (Join-Path $moduleRoot '__init__.py') `
+            -Content "__version__ = '0.2.0'`n"
+    }
+    foreach ($hostModule in @('__main__.py', 'runtime_v2.py', 'native_cartridge.py')) {
+        Write-Utf8Text `
+            -Path (Join-Path $packageSource "latentdeck_codec_host/$hostModule") `
+            -Content "# synthetic Protocol 2 setup fixture $Variant`n"
+    }
+    foreach ($nativeModule in @('latentdeck_cartridge', 'latentdeck_rgb_ring')) {
+        [System.IO.File]::Copy(
+            $Python313.Dll,
+            (Join-Path $packageSource "$nativeModule/_native.cp313-win_amd64.pyd"),
+            $false
+        )
     }
     Write-Utf8Text `
         -Path $noticeSource `
@@ -449,7 +483,7 @@ function New-SyntheticPackFixture {
         -SbomPath $sbomSource `
         -PackVersion $PackVersion
     Write-Utf8Text -Path $assetContract -Content (([ordered]@{
-        asset_id = 'org.latentdeck.taeh3'
+        asset_id = 'taeh3'
         display_name = 'TAEH3 decoder weight'
         kind = 'decoder_weight'
         required = $true
@@ -457,12 +491,12 @@ function New-SyntheticPackFixture {
         format = 'safetensors'
         accepted_variants = @(
             [ordered]@{
-                variant_id = 'synthetic-contract-test'
-                sha256 = ('c' * 64)
-                byte_length = 1
-                source_url = 'https://example.invalid/decoder'
-                license_label = 'test-only'
-                license_url = 'https://example.invalid/license'
+                variant_id = 'madebyollin-taeh3-e743234f'
+                sha256 = '4fd022bfcab08772fe0536b17ea1a3bbb5625be11e397868d1c5d891863d4c13'
+                byte_length = 22709752
+                source_url = 'https://huggingface.co/madebyollin/taehv/resolve/main/taeh3.safetensors'
+                license_label = 'MIT'
+                license_url = 'https://github.com/madebyollin/taehv/blob/e743234f/LICENSE'
             }
         )
     } | ConvertTo-Json -Depth 16) + "`n")
@@ -486,6 +520,22 @@ function New-SyntheticPackFixture {
     Test-H3CodecPackDirectory `
         -PackRoot $expandedRoot `
         -ExpectedPackVersion $PackVersion | Out-Null
+    $expandedManifest = Get-Content -Raw -LiteralPath (
+        Join-Path $expandedRoot 'codec-pack.json'
+    ) | ConvertFrom-Json -Depth 20
+    $expectedCapabilities = @(
+        'player', 'realtime', 'resample', 'snapshot_capture', 'live_capture',
+        'raw_import'
+    )
+    $expectedWorkerPrefix = @('-I', '-s', '-B', '-m', 'latentdeck_codec_host')
+    if ((@($expandedManifest.capabilities) -join "`0") -cne
+        ($expectedCapabilities -join "`0") -or
+        ((@($expandedManifest.worker.arguments)[0..4]) -join "`0") -cne
+        ($expectedWorkerPrefix -join "`0") -or
+        [int]$expandedManifest.compatibility.worker_protocol -ne 2 -or
+        $expandedManifest.adapter.adapter_version -cne '0.2.0') {
+        throw 'Synthetic Setup fixture is not the complete H3 Protocol 2 + raw_import pack.'
+    }
     $archiveItem = Get-Item -LiteralPath $archivePath
     return [pscustomobject]@{
         Version = $PackVersion
@@ -594,21 +644,11 @@ function New-InstallArguments {
         [Parameter(Mandatory)]
         [pscustomobject]$Fixture,
 
-        [string]$ArchivePath,
-
-        [string]$ExpectedSha256,
-
-        [long]$ExpectedLength = -1
+        [string]$ArchivePath
     )
 
     if ([string]::IsNullOrWhiteSpace($ArchivePath)) {
         $ArchivePath = $Fixture.ArchivePath
-    }
-    if ([string]::IsNullOrWhiteSpace($ExpectedSha256)) {
-        $ExpectedSha256 = $Fixture.ArchiveSha256
-    }
-    if ($ExpectedLength -lt 0) {
-        $ExpectedLength = [int64]$Fixture.ArchiveLength
     }
     if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA) -or
         [string]::IsNullOrWhiteSpace($env:PROGRAMDATA)) {
@@ -618,10 +658,25 @@ function New-InstallArguments {
         '--local-app-data', $env:LOCALAPPDATA,
         '--program-data', $env:PROGRAMDATA,
         'install',
-        '--archive', $ArchivePath,
-        '--expected-sha256', $ExpectedSha256,
-        '--expected-length', ([string]$ExpectedLength),
-        '--expected-version', $Fixture.Version
+        '--archive', $ArchivePath
+    )
+}
+
+function New-VerifyArguments {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Version
+    )
+
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA) -or
+        [string]::IsNullOrWhiteSpace($env:PROGRAMDATA)) {
+        throw 'Helper lifecycle tests require explicit isolated known-folder roots.'
+    }
+    return @(
+        '--local-app-data', $env:LOCALAPPDATA,
+        '--program-data', $env:PROGRAMDATA,
+        'verify',
+        '--version', $Version
     )
 }
 
@@ -911,11 +966,11 @@ try {
     $reproSbomOne = Join-Path $testRoot 'repro-installer-sbom-one.json'
     $reproSbomTwo = Join-Path $testRoot 'repro-installer-sbom-two.json'
     & (Join-Path $PSScriptRoot 'New-H3CodecPackInstallerSbom.ps1') `
-        -PackVersion '0.1.1' `
+        -PackVersion '0.2.1' `
         -OutputPath $reproSbomOne `
         -NsisRoot $pinnedNsisRoot | Out-Null
     & (Join-Path $PSScriptRoot 'New-H3CodecPackInstallerSbom.ps1') `
-        -PackVersion '0.1.1' `
+        -PackVersion '0.2.1' `
         -OutputPath $reproSbomTwo `
         -NsisRoot $pinnedNsisRoot | Out-Null
     $reproSbomOneBytes = [System.IO.File]::ReadAllBytes($reproSbomOne)
@@ -933,10 +988,10 @@ try {
     $rustLicensesOne = Join-Path $testRoot 'installer-rust-licenses-one.txt'
     $rustLicensesTwo = Join-Path $testRoot 'installer-rust-licenses-two.txt'
     & (Join-Path $PSScriptRoot 'New-H3CodecPackInstallerRustLicenses.ps1') `
-        -PackVersion '0.1.1' `
+        -PackVersion '0.2.1' `
         -OutputPath $rustLicensesOne | Out-Null
     & (Join-Path $PSScriptRoot 'New-H3CodecPackInstallerRustLicenses.ps1') `
-        -PackVersion '0.1.1' `
+        -PackVersion '0.2.1' `
         -OutputPath $rustLicensesTwo | Out-Null
     $rustLicensesOneBytes = [System.IO.File]::ReadAllBytes($rustLicensesOne)
     $rustLicensesTwoBytes = [System.IO.File]::ReadAllBytes($rustLicensesTwo)
@@ -979,24 +1034,57 @@ try {
         -Message 'Installer Rust license bundle is incomplete, non-deterministic, or path-bearing.'
 
     $python313 = Resolve-TestPython313
+    $credentialFixtureResults = @{}
+    foreach ($credentialPayload in @(
+        [pscustomobject]@{ Kind = 'Py'; Extension = '.py' },
+        [pscustomobject]@{ Kind = 'Pyi'; Extension = '.pyi' }
+    )) {
+        $credentialFailure = $null
+        try {
+            New-SyntheticPackFixture `
+                -ParentRoot $testRoot `
+                -PackVersion '0.2.0' `
+                -Variant "credential-leak-$($credentialPayload.Kind.ToLowerInvariant())" `
+                -Python313 $python313 `
+                -CredentialPayloadKind $credentialPayload.Kind | Out-Null
+        } catch {
+            $credentialFailure = $_.Exception.Message
+        }
+        $credentialFixtureResults[$credentialPayload.Extension] = $credentialFailure
+    }
+    foreach ($credentialExtension in @('.py', '.pyi')) {
+        $expectedCredentialFailure = (
+            "packaging source 'latentdeck_codec_h3/credential_leak$credentialExtension' " +
+            'contains credential-like material.'
+        )
+        Assert-Condition `
+            -Condition (
+                [string]$credentialFixtureResults[$credentialExtension] -ceq
+                    $expectedCredentialFailure
+            ) `
+            -Message (
+                "Codec Pack builder accepted credential-like material in $credentialExtension. " +
+                'Result: ' + [string]$credentialFixtureResults[$credentialExtension]
+            )
+    }
     $fixture010 = New-SyntheticPackFixture `
         -ParentRoot $testRoot `
-        -PackVersion '0.1.0' `
+        -PackVersion '0.2.0' `
         -Variant 'base' `
         -Python313 $python313
     $fixture011 = New-SyntheticPackFixture `
         -ParentRoot $testRoot `
-        -PackVersion '0.1.1' `
+        -PackVersion '0.2.1' `
         -Variant 'base' `
         -Python313 $python313
     $fixture011Different = New-SyntheticPackFixture `
         -ParentRoot $testRoot `
-        -PackVersion '0.1.1' `
+        -PackVersion '0.2.1' `
         -Variant 'different-bytes' `
         -Python313 $python313
     $fixture011Equivalent = New-EquivalentRepackedFixture `
         -Fixture $fixture011 `
-        -ArchivePath (Join-Path $testRoot 'equivalent-repacked-0.1.1.zip')
+        -ArchivePath (Join-Path $testRoot 'equivalent-repacked-0.2.1.ldcodec')
     Assert-Condition `
         -Condition ($fixture011.ArchiveSha256 -cne $fixture011Different.ArchiveSha256) `
         -Message 'Same-version immutability fixtures unexpectedly have identical hashes.'
@@ -1016,7 +1104,7 @@ try {
     try {
         & (Join-Path $PSScriptRoot 'Build-H3CodecPackInstaller.ps1') `
             -ArchivePath $duplicateSumsArchive `
-            -PackVersion '0.1.1' `
+            -PackVersion '0.2.1' `
             -OutputDirectory $duplicateSumsRoot | Out-Null
     } catch {
         $duplicateSumsFailure = $_.Exception.Message
@@ -1024,17 +1112,20 @@ try {
     Assert-Condition `
         -Condition (
             -not [string]::IsNullOrWhiteSpace($duplicateSumsFailure) -and
-            $duplicateSumsFailure -match '(?i)only the exact selected' -and
+            $duplicateSumsFailure -match '(?i)(?:contain )?only the exact selected' -and
             -not (Test-Path -LiteralPath (
-                Join-Path $duplicateSumsRoot 'LatentDeck-H3-CodecPack-0.1.1-setup.exe'
+                Join-Path $duplicateSumsRoot 'LatentDeck-H3-CodecPack-0.2.1-setup.exe'
             ))
         ) `
-        -Message 'Setup builder accepted duplicate payload entries in SHA256SUMS.txt.'
+        -Message (
+            'Setup builder accepted duplicate payload entries in SHA256SUMS.txt. Result: ' +
+            [string]$duplicateSumsFailure
+        )
 
     $tamperedNsisSbomFailure = $null
     try {
         & (Join-Path $PSScriptRoot 'New-H3CodecPackInstallerSbom.ps1') `
-            -PackVersion '0.1.1' `
+            -PackVersion '0.2.1' `
             -OutputPath (Join-Path $testRoot 'tampered-nsis-installer-sbom.json') `
             -NsisRoot $tamperedNsisRoot | Out-Null
     } catch {
@@ -1053,7 +1144,7 @@ try {
     $tamperedNsisBuilderFailure = $null
     $tamperedBuilderParameters = @{
         ArchivePath = $fixture011.ArchivePath
-        PackVersion = '0.1.1'
+        PackVersion = '0.2.1'
         OutputDirectory = $fixture011.OutputRoot
         NsisRoot = $tamperedNsisRoot
     }
@@ -1075,7 +1166,7 @@ try {
 
     $buildParameters = @{
         ArchivePath = $fixture011.ArchivePath
-        PackVersion = '0.1.1'
+        PackVersion = '0.2.1'
         OutputDirectory = $fixture011.OutputRoot
     }
     if (-not [string]::IsNullOrWhiteSpace($NsisRoot)) {
@@ -1090,7 +1181,7 @@ try {
         throw 'Codec Pack setup builder did not end with a valid setup executable path.'
     }
     $setupPath = (Resolve-Path -LiteralPath $reportedSetupPath).Path
-    $expectedSetupName = 'LatentDeck-H3-CodecPack-0.1.1-setup.exe'
+    $expectedSetupName = 'LatentDeck-H3-CodecPack-0.2.1-setup.exe'
     Assert-Condition `
         -Condition ((Split-Path -Leaf $setupPath) -ceq $expectedSetupName) `
         -Message 'Codec Pack setup name is not canonical.'
@@ -1103,10 +1194,66 @@ try {
         -Condition ($setupItem.Length -lt 64MB) `
         -Message 'Codec Pack setup embedded the payload or exceeded the small-bootstrapper limit.'
 
+    $productionHelperPath = Join-Path `
+        $artifactsRoot `
+        'codec-pack-installer-target/x86_64-pc-windows-msvc/release/latentdeck-codec-pack-installer.exe'
+    $productionHelperPath = (Resolve-Path -LiteralPath $productionHelperPath).Path
+    Assert-WindowsPe `
+        -Path $productionHelperPath `
+        -ExpectedMachine 0x8664 `
+        -Context 'Production Codec Pack lifecycle helper'
+    $productionHelperSha256 = (
+        Get-FileHash -LiteralPath $productionHelperPath -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+
     if ([string]::IsNullOrWhiteSpace($LifecycleHelperPath)) {
+        $testHelperAuthorizationPath = Join-Path $testRoot 'test-helper-authorization.json'
+        $testHelperAuthorization = [ordered]@{
+            schema_version = 1
+            packages = @(
+                [ordered]@{
+                    pack_id = 'org.latentdeck.h3'
+                    pack_version = $fixture010.Version
+                    archive_sha256 = $fixture010.ArchiveSha256
+                    archive_byte_length = [int64]$fixture010.ArchiveLength
+                },
+                [ordered]@{
+                    pack_id = 'org.latentdeck.h3'
+                    pack_version = $fixture011.Version
+                    archive_sha256 = $fixture011.ArchiveSha256
+                    archive_byte_length = [int64]$fixture011.ArchiveLength
+                }
+            )
+        }
+        Write-Utf8Text `
+            -Path $testHelperAuthorizationPath `
+            -Content (($testHelperAuthorization | ConvertTo-Json -Depth 10) + "`n")
+        $testHelperTargetRoot = Join-Path $testRoot 'codec-pack-installer-test-target'
+        $savedTargetDirectory = $env:CARGO_TARGET_DIR
+        $savedRustFlags = $env:RUSTFLAGS
+        $savedAuthorizationFile = $env:LATENTDECK_H3_AUTHORIZATION_FILE
+        try {
+            $env:CARGO_TARGET_DIR = $testHelperTargetRoot
+            $env:LATENTDECK_H3_AUTHORIZATION_FILE = $testHelperAuthorizationPath
+            if ([string]::IsNullOrWhiteSpace($savedRustFlags)) {
+                $env:RUSTFLAGS = '-C target-feature=+crt-static'
+            } else {
+                $env:RUSTFLAGS = "$savedRustFlags -C target-feature=+crt-static"
+            }
+            & cargo build --locked --release --offline `
+                --target x86_64-pc-windows-msvc `
+                --package latentdeck-codec-pack-installer
+            if ($LASTEXITCODE -ne 0) {
+                throw "Test lifecycle helper build failed with exit code $LASTEXITCODE."
+            }
+        } finally {
+            $env:CARGO_TARGET_DIR = $savedTargetDirectory
+            $env:RUSTFLAGS = $savedRustFlags
+            $env:LATENTDECK_H3_AUTHORIZATION_FILE = $savedAuthorizationFile
+        }
         $LifecycleHelperPath = Join-Path `
-            $artifactsRoot `
-            'codec-pack-installer-target/x86_64-pc-windows-msvc/release/latentdeck-codec-pack-installer.exe'
+            $testHelperTargetRoot `
+            'x86_64-pc-windows-msvc/release/latentdeck-codec-pack-installer.exe'
     }
     $LifecycleHelperPath = (Resolve-Path -LiteralPath $LifecycleHelperPath).Path
     Assert-WindowsPe `
@@ -1118,9 +1265,6 @@ try {
     $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json -Depth 30
     $setupSha256 = (
         Get-FileHash -LiteralPath $setupPath -Algorithm SHA256
-    ).Hash.ToLowerInvariant()
-    $helperSha256 = (
-        Get-FileHash -LiteralPath $LifecycleHelperPath -Algorithm SHA256
     ).Hash.ToLowerInvariant()
     $installerSbomPath = Join-Path $fixture011.OutputRoot 'installer-SBOM.cdx.json'
     $installerNoticesPath = Join-Path $fixture011.OutputRoot 'INSTALLER_THIRD_PARTY_NOTICES.md'
@@ -1155,7 +1299,7 @@ try {
         -Condition (
             $receipt.schema_version -eq 1 -and
             $receipt.pack_id -ceq 'org.latentdeck.h3' -and
-            $receipt.pack_version -ceq '0.1.1' -and
+            $receipt.pack_version -ceq '0.2.1' -and
             $receipt.setup.name -ceq $expectedSetupName -and
             [int64]$receipt.setup.byte_length -eq [int64]$setupItem.Length -and
             $receipt.setup.sha256 -ceq $setupSha256 -and
@@ -1165,10 +1309,14 @@ try {
             $receipt.payload.name -ceq $fixture011.ArchiveName -and
             [int64]$receipt.payload.byte_length -eq $fixture011.ArchiveLength -and
             $receipt.payload.sha256 -ceq $fixture011.ArchiveSha256 -and
-            $receipt.helper.sha256 -ceq $helperSha256 -and
+            $receipt.helper.sha256 -ceq $productionHelperSha256 -and
             $receipt.helper.static_crt -eq $true -and
             $receipt.helper.delivery -ceq 'embedded_in_setup_and_uninstaller' -and
             $receipt.helper.installed_as_loose_file -eq $false -and
+            $receipt.helper.authorization.source -ceq 'build_generated_exact_allowlist' -and
+            $receipt.helper.authorization.pack_version -ceq $fixture011.Version -and
+            $receipt.helper.authorization.archive_sha256 -ceq $fixture011.ArchiveSha256 -and
+            [int64]$receipt.helper.authorization.archive_byte_length -eq $fixture011.ArchiveLength -and
             $receipt.sbom.name -ceq 'installer-SBOM.cdx.json' -and
             [int64]$receipt.sbom.byte_length -eq [int64]$installerSbomItem.Length -and
             $receipt.sbom.sha256 -ceq $installerSbomSha256 -and
@@ -1298,7 +1446,7 @@ try {
             $isolatedLocalAppData `
             'LatentDeck/CodecPacks/org.latentdeck.h3'
         $lifecycleParent = Join-Path $isolatedLocalAppData 'LatentDeck'
-        $stagingRoot = Join-Path $lifecycleParent 'CodecPackStaging'
+        $stagingRoot = Join-Path $lifecycleParent 'ExtensionStaging'
         $staleStaging = Join-Path `
             $stagingRoot `
             '.install-00000000000000000000000000000001'
@@ -1333,7 +1481,7 @@ try {
                 "$($tamperedSetupProcess.ExitCode), expected 20."
             )
 
-        $missingArchivePath = Join-Path $testRoot 'does-not-exist.zip'
+        $missingArchivePath = Join-Path $testRoot 'does-not-exist.ldcodec'
         $missingResult = Invoke-NativeResult `
             -Executable $LifecycleHelperPath `
             -Arguments (New-InstallArguments `
@@ -1344,7 +1492,7 @@ try {
             -ExpectedExitCodes @(20) `
             -Context 'missing archive rejection'
 
-        $tamperedArchivePath = Join-Path $testRoot 'tampered.zip'
+        $tamperedArchivePath = Join-Path $testRoot 'tampered.ldcodec'
         [System.IO.File]::Copy($fixture011.ArchivePath, $tamperedArchivePath, $false)
         $tamperedBytes = [System.IO.File]::ReadAllBytes($tamperedArchivePath)
         $tamperIndex = [Math]::Min(128, $tamperedBytes.Length - 1)
@@ -1360,24 +1508,30 @@ try {
             -ExpectedExitCodes @(20) `
             -Context 'tampered archive rejection'
 
-        $wrongHashResult = Invoke-NativeResult `
+        $runtimeAuthorizationInjectionResult = Invoke-NativeResult `
             -Executable $LifecycleHelperPath `
-            -Arguments (New-InstallArguments `
-                -Fixture $fixture011 `
-                -ExpectedSha256 ('0' * 64))
+            -Arguments (@(
+                New-InstallArguments -Fixture $fixture011
+            ) + @(
+                '--expected-sha256', ('0' * 64),
+                '--expected-length', ([string]$fixture011.ArchiveLength),
+                '--expected-version', $fixture011.Version
+            ))
         Assert-NativeExit `
-            -Result $wrongHashResult `
-            -ExpectedExitCodes @(20) `
-            -Context 'wrong trusted hash rejection'
-        $wrongLengthResult = Invoke-NativeResult `
+            -Result $runtimeAuthorizationInjectionResult `
+            -ExpectedExitCodes @(10) `
+            -Context 'runtime authorization argument rejection'
+
+        $unknownHashResult = Invoke-NativeResult `
             -Executable $LifecycleHelperPath `
-            -Arguments (New-InstallArguments `
-                -Fixture $fixture011 `
-                -ExpectedLength ($fixture011.ArchiveLength + 1))
+            -Arguments (New-InstallArguments -Fixture $fixture011Equivalent)
         Assert-NativeExit `
-            -Result $wrongLengthResult `
-            -ExpectedExitCodes @(20) `
-            -Context 'wrong trusted byte-length rejection'
+            -Result $unknownHashResult `
+            -ExpectedExitCodes @(40) `
+            -Context 'unknown valid archive hash rejection'
+        Assert-Condition `
+            -Condition ($unknownHashResult.Output -like '*extension.package_untrusted*') `
+            -Message 'Unknown valid archive hash did not report extension.package_untrusted.'
         Assert-Condition `
             -Condition (
                 -not (Test-Path -LiteralPath $packParent) -or
@@ -1402,8 +1556,8 @@ try {
             ) `
             -Message 'Lifecycle cleanup did not remove only the exact stale staging directory.'
 
-        $installed010 = Join-Path $packParent '0.1.0'
-        $installed011 = Join-Path $packParent '0.1.1'
+        $installed010 = Join-Path $packParent '0.2.0'
+        $installed011 = Join-Path $packParent '0.2.1'
         Assert-Condition `
             -Condition (
                 (Test-Path -LiteralPath $installed010 -PathType Container) -and
@@ -1445,6 +1599,50 @@ try {
             -Condition ((Get-DirectoryFingerprint -Root $installed011) -ceq $original011Fingerprint) `
             -Message 'Same-byte reinstall changed the installed pack.'
 
+        $installedAdapterPath = Join-Path `
+            $installed011 `
+            'runtime/Lib/site-packages/latentdeck_codec_h3/__init__.py'
+        Add-Content `
+            -LiteralPath $installedAdapterPath `
+            -Value '# deliberate existing-version corruption' `
+            -Encoding utf8
+        $corruptExistingInstall = Invoke-NativeResult `
+            -Executable $LifecycleHelperPath `
+            -Arguments (New-InstallArguments -Fixture $fixture011)
+        Assert-NativeExit `
+            -Result $corruptExistingInstall `
+            -ExpectedExitCodes @(20) `
+            -Context 'corrupt exact version is not reported as already installed'
+        Assert-Condition `
+            -Condition ($corruptExistingInstall.Output -like '*extension.integrity_failed*') `
+            -Message 'Corrupt exact install did not surface integrity_failed.'
+        $corruptExistingVerify = Invoke-NativeResult `
+            -Executable $LifecycleHelperPath `
+            -Arguments (New-VerifyArguments -Version $fixture011.Version)
+        Assert-NativeExit `
+            -Result $corruptExistingVerify `
+            -ExpectedExitCodes @(20) `
+            -Context 'explicit corrupt exact-version verification'
+        $explicitRepairOutput = @(& (Join-Path $PSScriptRoot 'Install-H3CodecPack.ps1') `
+            -ArchivePath $fixture011.ArchivePath `
+            -TrustedArchiveSha256 $fixture011.ArchiveSha256 `
+            -InstallRoot (Join-Path $env:LOCALAPPDATA 'LatentDeck/CodecPacks') `
+            -LifecycleHelperPath $LifecycleHelperPath `
+            -Repair)
+        Assert-Condition `
+            -Condition (($explicitRepairOutput | Out-String) -like '*repaired org.latentdeck.h3*') `
+            -Message 'Explicit build-authorized H3 repair wrapper did not report success.'
+        $repairedVerify = Invoke-NativeResult `
+            -Executable $LifecycleHelperPath `
+            -Arguments (New-VerifyArguments -Version $fixture011.Version)
+        Assert-NativeExit `
+            -Result $repairedVerify `
+            -ExpectedExitCodes @(0) `
+            -Context 'verification after explicit H3 repair'
+        Assert-Condition `
+            -Condition ((Get-DirectoryFingerprint -Root $installed011) -ceq $original011Fingerprint) `
+            -Message 'Explicit H3 repair did not restore the exact build-authorized tree.'
+
         $installedTamperedArchiveResult = Invoke-NativeResult `
             -Executable $LifecycleHelperPath `
             -Arguments (New-InstallArguments `
@@ -1454,15 +1652,6 @@ try {
             -Result $installedTamperedArchiveResult `
             -ExpectedExitCodes @(20) `
             -Context 'installed version does not bypass adjacent archive binding'
-        $installedWrongHashResult = Invoke-NativeResult `
-            -Executable $LifecycleHelperPath `
-            -Arguments (New-InstallArguments `
-                -Fixture $fixture011 `
-                -ExpectedSha256 ('0' * 64))
-        Assert-NativeExit `
-            -Result $installedWrongHashResult `
-            -ExpectedExitCodes @(20) `
-            -Context 'installed version does not bypass trusted hash validation'
         Assert-Condition `
             -Condition ((Get-DirectoryFingerprint -Root $installed011) -ceq $original011Fingerprint) `
             -Message 'Rejected archive binding changed the installed pack.'
@@ -1472,8 +1661,11 @@ try {
             -Arguments (New-InstallArguments -Fixture $fixture011Equivalent)
         Assert-NativeExit `
             -Result $equivalentRepackResult `
-            -ExpectedExitCodes @(30) `
-            -Context 'equivalent repacked tree immutable no-op'
+            -ExpectedExitCodes @(40) `
+            -Context 'equivalent repacked tree is not build-authorized'
+        Assert-Condition `
+            -Condition ($equivalentRepackResult.Output -like '*extension.package_untrusted*') `
+            -Message 'Equivalent repack did not fail with package_untrusted.'
         Assert-Condition `
             -Condition ((Get-DirectoryFingerprint -Root $installed011) -ceq $original011Fingerprint) `
             -Message 'Equivalent-tree repack changed the installed pack.'
@@ -1484,13 +1676,13 @@ try {
         Assert-NativeExit `
             -Result $differentBytesResult `
             -ExpectedExitCodes @(40) `
-            -Context 'different valid tree same-version conflict'
+            -Context 'different valid tree is not build-authorized'
         Assert-Condition `
             -Condition ((Get-DirectoryFingerprint -Root $installed011) -ceq $original011Fingerprint) `
             -Message 'Rejected same-version bytes changed the installed pack.'
 
         $trashRoot = Join-Path $lifecycleParent 'CodecPackTrash'
-        $prereleaseVersion = '0.1.1-alpha'
+        $prereleaseVersion = '0.2.1-alpha'
         $prereleaseLength = [System.Text.Encoding]::UTF8.GetByteCount($prereleaseVersion)
         $prereleaseQuarantine = Join-Path $trashRoot (
             ".remove-org.latentdeck.h3-v$prereleaseLength-$prereleaseVersion-" +
@@ -1501,7 +1693,7 @@ try {
 
         $stableUninstallWithPrereleaseQuarantine = Invoke-NativeResult `
             -Executable $LifecycleHelperPath `
-            -Arguments (New-UninstallArguments -Version '0.1.1')
+            -Arguments (New-UninstallArguments -Version '0.2.1')
         Assert-NativeExit `
             -Result $stableUninstallWithPrereleaseQuarantine `
             -ExpectedExitCodes @(0) `
@@ -1537,7 +1729,7 @@ try {
             -LiteralPath $installed011 `
             -Destination $programPackParent `
             -Recurse
-        $programInstalled011 = Join-Path $programPackParent '0.1.1'
+        $programInstalled011 = Join-Path $programPackParent '0.2.1'
         Test-H3CodecPackDirectory -PackRoot $programInstalled011 | Out-Null
         $program011Fingerprint = Get-DirectoryFingerprint -Root $programInstalled011
         $local011BeforeCrossScope = Get-DirectoryFingerprint -Root $installed011
@@ -1546,8 +1738,8 @@ try {
             -Arguments (New-InstallArguments -Fixture $fixture011)
         Assert-NativeExit `
             -Result $crossScopeResult `
-            -ExpectedExitCodes @(40) `
-            -Context 'healthy local plus exact all-users conflict'
+            -ExpectedExitCodes @(30) `
+            -Context 'current-user immutable version with ignored all-users tree'
         Assert-Condition `
             -Condition (
                 (Get-DirectoryFingerprint -Root $installed011) -ceq $local011BeforeCrossScope -and
@@ -1557,11 +1749,11 @@ try {
 
         $uninstall010 = Invoke-NativeResult `
             -Executable $LifecycleHelperPath `
-            -Arguments (New-UninstallArguments -Version '0.1.0')
+            -Arguments (New-UninstallArguments -Version '0.2.0')
         Assert-NativeExit `
             -Result $uninstall010 `
             -ExpectedExitCodes @(0) `
-            -Context 'exact-version 0.1.0 uninstall'
+            -Context 'exact-version 0.2.0 uninstall'
         Assert-Condition `
             -Condition (
                 -not (Test-Path -LiteralPath $installed010) -and
@@ -1575,7 +1767,7 @@ try {
             -Encoding utf8
         $corruptUninstall = Invoke-NativeResult `
             -Executable $LifecycleHelperPath `
-            -Arguments (New-UninstallArguments -Version '0.1.1')
+            -Arguments (New-UninstallArguments -Version '0.2.1')
         Assert-NativeExit `
             -Result $corruptUninstall `
             -ExpectedExitCodes @(20) `
@@ -1586,7 +1778,7 @@ try {
 
         $forceUninstall = Invoke-NativeResult `
             -Executable $LifecycleHelperPath `
-            -Arguments (New-UninstallArguments -Version '0.1.1' -RemoveCorrupt)
+            -Arguments (New-UninstallArguments -Version '0.2.1' -RemoveCorrupt)
         Assert-NativeExit `
             -Result $forceUninstall `
             -ExpectedExitCodes @(0) `
@@ -1633,7 +1825,8 @@ try {
     Write-Host (
         'Verified: small unsigned NSIS PE, canonical name, exact setup/receipt/checksum binding, ' +
         'required adjacent payload, isolated native install failures, equivalent-tree proof, ' +
-        'same-version and cross-scope conflicts, exact temporary ownership, side-by-side versions, ' +
+        'same-version immutability, current-user scope isolation, exact temporary ownership, ' +
+        'side-by-side versions, ' +
         'exact uninstall, explicit corrupt removal, and no installer metadata inside the pack. ' +
         'A successful Windows setup/Installed Apps lifecycle remains the clean-machine gate.'
     )

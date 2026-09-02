@@ -33,7 +33,7 @@ if (-not (Test-Path -LiteralPath $workerPackages -PathType Container)) {
     throw 'WorkerSitePackages must be an existing directory.'
 }
 $workerModuleRoot = Join-Path $workerPackages 'latentdeck_codec_h3'
-foreach ($entrypoint in @('__init__.py', 'worker.py', 'd2_worker.py', 'q4_worker.py')) {
+foreach ($entrypoint in @('__init__.py', 'worker.py')) {
     $entrypointPath = Join-Path $workerModuleRoot $entrypoint
     if (-not (Test-Path -LiteralPath $entrypointPath -PathType Leaf)) {
         throw "WorkerSitePackages does not contain required H3 entrypoint latentdeck_codec_h3/$entrypoint."
@@ -194,8 +194,6 @@ $manifest = [ordered]@{
     worker           = [ordered]@{
         executable       = 'runtime/python.exe'
         arguments        = @('-B', '-s', '-m', 'latentdeck_codec_h3.worker')
-        d2_arguments     = @('-B', '-s', '-m', 'latentdeck_codec_h3.d2_worker')
-        q4_arguments     = @('-B', '-s', '-m', 'latentdeck_codec_h3.q4_worker')
         working_directory = 'runtime'
         probe_timeout_ms = 120000
     }
