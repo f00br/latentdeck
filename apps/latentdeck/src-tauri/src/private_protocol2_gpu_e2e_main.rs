@@ -272,6 +272,7 @@ impl GateConfig {
         let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
             .canonicalize()
+            .map(|path| without_windows_verbatim_prefix(&path))
             .map_err(|_| "repository root is unavailable")?;
         let source_commit = clean_source_commit(&repository_root)?;
         let base_root = required_existing_directory(BASE_ROOT_ENV)?;
@@ -419,6 +420,7 @@ fn required_existing_directory(name: &str) -> GateResult<PathBuf> {
         return Err("required directory must be a non-reparse directory");
     }
     path.canonicalize()
+        .map(|path| without_windows_verbatim_prefix(&path))
         .map_err(|_| "required directory cannot be canonicalized")
 }
 
@@ -429,6 +431,7 @@ fn required_regular_file(name: &str) -> GateResult<PathBuf> {
         return Err("required file must be one non-empty non-reparse regular file");
     }
     path.canonicalize()
+        .map(|path| without_windows_verbatim_prefix(&path))
         .map_err(|_| "required file cannot be canonicalized")
 }
 
@@ -450,8 +453,19 @@ fn required_new_absolute_path(name: &str) -> GateResult<PathBuf> {
     }
     let parent = parent
         .canonicalize()
+        .map(|path| without_windows_verbatim_prefix(&path))
         .map_err(|_| "private output parent cannot be canonicalized")?;
     Ok(parent.join(file_name))
+}
+
+fn without_windows_verbatim_prefix(path: &Path) -> PathBuf {
+    let rendered = path.to_string_lossy();
+    if let Some(rest) = rendered.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    rendered
+        .strip_prefix(r"\\?\")
+        .map_or_else(|| path.to_path_buf(), PathBuf::from)
 }
 
 fn required_absolute(name: &str) -> GateResult<PathBuf> {

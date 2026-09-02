@@ -18,6 +18,7 @@ fn private_protocol2_gpu_runner_is_an_executable_evidence_producer() {
         "STABILITY_SECONDS",
         "tokio::task::yield_now",
         "app.run_return",
+        "without_windows_verbatim_prefix",
         "write_validated_receipt",
     ] {
         assert!(
