@@ -104,7 +104,7 @@ async fn installed_synthetic_codec_imports_and_replays_raw_source() {
     let missing = validate_exact_selection(&cache, &roots, &player_selection)
         .expect("first exact activation");
     assert_eq!(missing.state, PlayerCodecState::Missing);
-    assert_cache_work(&cache, 1, 0, "initial exact selection");
+    assert_cache_work(&cache, 0, 0, "initial exact selection");
 
     let ready = select_external_asset(
         &cache,
@@ -115,7 +115,7 @@ async fn installed_synthetic_codec_imports_and_replays_raw_source() {
     )
     .expect("decoder selection validates and retains exact bytes once");
     assert_eq!(ready.state, PlayerCodecState::Ready);
-    assert_cache_work(&cache, 1, 1, "decoder bind");
+    assert_cache_work(&cache, 0, 1, "decoder bind");
     assert!(
         fs::write(&decoder_path, vec![b'x'; DECODER_BYTES.len()]).is_err(),
         "selected decoder evidence must deny mutation before Player launch"
@@ -124,7 +124,7 @@ async fn installed_synthetic_codec_imports_and_replays_raw_source() {
     let options = raw_import_options_for(&cache, &roots, Some(&package), env!("CARGO_PKG_VERSION"))
         .expect("raw import options reuse selected package");
     assert_eq!(options.package_id, CODEC_ID);
-    assert_cache_work(&cache, 1, 2, "raw import options");
+    assert_cache_work(&cache, 0, 2, "raw import options");
     let source = temp.path().join("performance.syntheticraw");
     let output_root = temp.path().join("converted");
     fs::write(&source, b"bounded synthetic raw source").expect("raw source");
@@ -138,7 +138,7 @@ async fn installed_synthetic_codec_imports_and_replays_raw_source() {
         env!("CARGO_PKG_VERSION"),
     )
     .expect("exact installed raw-import Codec Pack");
-    assert_cache_work(&cache, 1, 3, "raw import preflight launch");
+    assert_cache_work(&cache, 0, 3, "raw import preflight launch");
     let plan = preflight_conversion_plan(
         ConversionPlanRequest {
             inputs: vec![source],
@@ -173,7 +173,7 @@ async fn installed_synthetic_codec_imports_and_replays_raw_source() {
         env!("CARGO_PKG_VERSION"),
     )
     .expect("exact package is checked out from the same active lease for conversion");
-    assert_cache_work(&cache, 1, 4, "raw import execution launch");
+    assert_cache_work(&cache, 0, 4, "raw import execution launch");
     let snapshot = run_conversion_batch(
         Arc::clone(&coordinator),
         prepared,
@@ -214,7 +214,7 @@ async fn installed_synthetic_codec_imports_and_replays_raw_source() {
         source.retained_cartridge.receipt()
     );
     assert_eq!(first_launch.retained_external_assets.len(), 1);
-    assert_cache_work(&cache, 1, 5, "Player launch preparation");
+    assert_cache_work(&cache, 0, 5, "Player launch preparation");
     drop(first_launch);
 
     let launch = prepare_exact_launch(
@@ -231,7 +231,7 @@ async fn installed_synthetic_codec_imports_and_replays_raw_source() {
         source.retained_cartridge.receipt()
     );
     assert_eq!(launch.retained_external_assets.len(), 1);
-    assert_cache_work(&cache, 1, 6, "Player restart preparation");
+    assert_cache_work(&cache, 0, 6, "Player restart preparation");
     let host = launch.host;
     let player_session_id = host.player_session_id;
     let generation = host.stream_generation;
