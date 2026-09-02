@@ -821,7 +821,10 @@ async fn start_deck(
     if initial.deck_session_id != session_id
         || initial.stream_generation != generation
         || initial.deck_revision != 1
-        || !matches!(initial.state, DeckState::Ready | DeckState::Paused)
+        || !matches!(
+            initial.state,
+            DeckState::Ready | DeckState::Paused | DeckState::Playing
+        )
     {
         return Err("Deck startup returned an invalid exact status");
     }

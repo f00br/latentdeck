@@ -40,6 +40,14 @@ fn private_protocol2_gpu_runner_is_an_executable_evidence_producer() {
             "legacy Protocol 1 seam remains in private runner: {forbidden}"
         );
     }
+    assert!(
+        !source.contains("!matches!(initial.state, DeckState::Ready | DeckState::Paused)"),
+        "the GPU gate cannot reject Playing after it enables source transport"
+    );
+    assert!(
+        source.contains("DeckState::Ready | DeckState::Paused | DeckState::Playing"),
+        "the GPU gate must accept the exact Playing status produced after startup transport"
+    );
 
     let orchestrator = include_str!("../../../../tools/Run-PrivateProtocol2GpuE2E.ps1");
     for required in [
