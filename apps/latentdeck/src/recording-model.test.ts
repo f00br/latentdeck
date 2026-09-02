@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import d2Faceplate from "./D2Faceplate.svelte?raw";
-import q4Faceplate from "./Q4Faceplate.svelte?raw";
+import genericWorkspace from "./GenericDeckWorkspace.svelte?raw";
 import {
   decodedRecordingControls,
   describeDecodedRecording,
@@ -55,13 +54,12 @@ describe("decoded MP4 recording policy", () => {
     );
   });
 
-  it("wires the same decoded MP4 recorder into both Deck faceplates", () => {
-    for (const faceplate of [d2Faceplate, q4Faceplate]) {
-      expect(faceplate).toContain("recordingStatusGet()");
-      expect(faceplate).toContain("toggleDecodedRecording()");
-      expect(faceplate).toContain("Record MP4");
-      expect(faceplate).toContain("Video-only H.264");
-      expect(faceplate).toContain("recordingActive");
-    }
+  it("wires one session-scoped recorder into the generic Deck workspace", () => {
+    expect(genericWorkspace).toContain("recordingStatusGet(sessionId)");
+    expect(genericWorkspace).toContain("recordingAction()");
+    expect(genericWorkspace).toContain("Record MP4");
+    expect(genericWorkspace).toContain("video-only H.264");
+    expect(genericWorkspace).toContain("recordingActive()");
+    expect(genericWorkspace).toContain("captureActive()");
   });
 });

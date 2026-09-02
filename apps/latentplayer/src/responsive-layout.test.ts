@@ -92,7 +92,7 @@ describe("LatentPlayer single-window layout contract", () => {
     expect(appSource).toContain("item.metadata.latentSlots");
     expect(appSource).toContain("item.metadata.latentHeight");
     expect(appSource).toContain("item.metadata.latentWidth");
-    expect(appSource).toContain("item.metadata.payloadSha256");
+    expect(appSource).toContain("item.metadata.sourceSha256");
     expect(appSource).toContain('class="item-fingerprint"');
     expect(appSource).toContain("conversionCancelledCount(conversion)");
   });

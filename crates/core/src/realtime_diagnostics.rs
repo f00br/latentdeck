@@ -9,7 +9,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
-use latentdeck_control::MetricsSnapshot;
+use latentdeck_control::{
+    MetricsSnapshot,
+    v2::{MAX_EXTERNAL_ASSETS, MetricsSnapshot as Protocol2MetricsSnapshot},
+};
+use uuid::Uuid;
 
 /// Current realtime snapshot and diagnostic bundle schema.
 pub const REALTIME_DIAGNOSTIC_SCHEMA_VERSION: u16 = 1;
@@ -70,6 +74,9 @@ pub enum RealtimeDiagnosticError {
     /// A session does not belong to the selected product.
     #[error("diagnostic session does not match product")]
     ProductSessionMismatch,
+    /// A diagnostics-only Protocol 2 command returned a different typed reply.
+    #[error("diagnostic Protocol 2 acknowledgement does not match the request")]
+    ProtocolMismatch,
     /// A second session of the same kind was supplied.
     #[error("diagnostic session kind is duplicated")]
     DuplicateSession,
@@ -271,20 +278,116 @@ impl DiagnosticGpuIdentity {
     }
 }
 
-/// Path-free codec pack and selected decoder identity.
+/// Closed compute device selected by one Protocol 2 codec session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Protocol2ComputeDevice {
+    /// Adapter executes tensors on CPU.
+    Cpu,
+    /// Adapter executes tensors on one explicitly selected CUDA device.
+    Cuda,
+}
+
+/// One exact, path-free Protocol 2 external-asset binding.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct Protocol2ExternalAssetIdentity {
+    asset_id: SanitizedToken,
+    sha256: Sha256Token,
+    byte_length: u64,
+}
+
+impl Protocol2ExternalAssetIdentity {
+    /// Construct a bounded external-asset identity without retaining its path.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a zero or oversized byte length.
+    pub fn new(
+        asset_id: SanitizedToken,
+        sha256: Sha256Token,
+        byte_length: u64,
+    ) -> Result<Self, RealtimeDiagnosticError> {
+        if !(1..=MAX_COUNTER_VALUE).contains(&byte_length) {
+            return Err(RealtimeDiagnosticError::InvalidCounter);
+        }
+        Ok(Self {
+            asset_id,
+            sha256,
+            byte_length,
+        })
+    }
+}
+
+/// Exact Protocol 2 codec/profile/adapter/device identity.
+///
+/// External assets are sorted by `asset_id` and duplicate IDs are rejected so
+/// semantically identical selections always serialize identically.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct Protocol2CodecIdentity {
+    profile_version: SanitizedToken,
+    adapter: SanitizedToken,
+    adapter_version: SanitizedToken,
+    compute_device: Protocol2ComputeDevice,
+    device_ordinal: u8,
+    external_assets: Vec<Protocol2ExternalAssetIdentity>,
+}
+
+impl Protocol2CodecIdentity {
+    /// Construct one deterministic, bounded Protocol 2 selection identity.
+    ///
+    /// # Errors
+    ///
+    /// Rejects more than 16 assets or duplicate asset IDs.
+    pub fn new(
+        profile_version: SanitizedToken,
+        adapter: SanitizedToken,
+        adapter_version: SanitizedToken,
+        compute_device: Protocol2ComputeDevice,
+        device_ordinal: u8,
+        mut external_assets: Vec<Protocol2ExternalAssetIdentity>,
+    ) -> Result<Self, RealtimeDiagnosticError> {
+        if external_assets.len() > MAX_EXTERNAL_ASSETS {
+            return Err(RealtimeDiagnosticError::LimitExceeded(
+                "protocol2_external_assets",
+            ));
+        }
+        external_assets.sort_by(|left, right| left.asset_id.as_str().cmp(right.asset_id.as_str()));
+        if external_assets
+            .windows(2)
+            .any(|pair| pair[0].asset_id == pair[1].asset_id)
+        {
+            return Err(RealtimeDiagnosticError::InvalidToken);
+        }
+        Ok(Self {
+            profile_version,
+            adapter,
+            adapter_version,
+            compute_device,
+            device_ordinal,
+            external_assets,
+        })
+    }
+}
+
+/// Path-free codec pack identity. Protocol 1 retains the historical selected
+/// decoder shape; Protocol 2 adds its exact adapter/profile/assets selection
+/// under the optional `protocol2` section without changing Protocol 1 JSON.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DiagnosticCodecIdentity {
     codec_family: SanitizedToken,
     profile: SanitizedToken,
     codec_pack: SanitizedToken,
     codec_pack_version: SanitizedToken,
-    decoder: SanitizedToken,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decoder: Option<SanitizedToken>,
     #[serde(skip_serializing_if = "Option::is_none")]
     decoder_sha256: Option<Sha256Token>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    protocol2: Option<Protocol2CodecIdentity>,
 }
 
 impl DiagnosticCodecIdentity {
-    /// Construct an installed, missing, or incompatible codec identity.
+    /// Construct an installed, missing, or incompatible Protocol 1 identity.
     ///
     /// Closed tokens such as `missing` may represent unavailable components;
     /// the decoder hash is optional for that reason.
@@ -302,8 +405,29 @@ impl DiagnosticCodecIdentity {
             profile,
             codec_pack,
             codec_pack_version,
-            decoder,
+            decoder: Some(decoder),
             decoder_sha256,
+            protocol2: None,
+        }
+    }
+
+    /// Construct an exact Protocol 2 identity without inventing a decoder.
+    #[must_use]
+    pub const fn new_protocol2(
+        codec_family: SanitizedToken,
+        profile: SanitizedToken,
+        codec_pack: SanitizedToken,
+        codec_pack_version: SanitizedToken,
+        protocol2: Protocol2CodecIdentity,
+    ) -> Self {
+        Self {
+            codec_family,
+            profile,
+            codec_pack,
+            codec_pack_version,
+            decoder: None,
+            decoder_sha256: None,
+            protocol2: Some(protocol2),
         }
     }
 }
@@ -312,18 +436,45 @@ impl DiagnosticCodecIdentity {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct WorkerDiagnosticCounters {
     worker_uptime_ns: u64,
-    decode_batches_total: u64,
-    decoded_frames_total: u64,
-    ring_backpressure_total: u64,
-    presentation_skipped_total: u64,
-    last_decode_duration_ns: u64,
-    ring_write_sequence: u64,
-    ring_read_sequence: u64,
-    ring_occupancy: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decode_batches_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decoded_frames_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ring_backpressure_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    presentation_skipped_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_decode_duration_ns: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ring_write_sequence: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ring_read_sequence: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ring_occupancy: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     gpu_allocated_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     gpu_reserved_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    protocol2: Option<Protocol2WorkerDiagnosticCounters>,
+}
+
+/// Exact cumulative counters declared by Protocol 2 `metrics.get`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct Protocol2WorkerDiagnosticCounters {
+    #[serde(rename = "commands_total")]
+    commands: u64,
+    #[serde(rename = "commands_failed_total")]
+    commands_failed: u64,
+    #[serde(rename = "player_steps_total")]
+    player_steps: u64,
+    #[serde(rename = "deck_process_total")]
+    deck_processes: u64,
+    #[serde(rename = "capture_slots_total")]
+    capture_slots: u64,
+    #[serde(rename = "decoded_frames_total")]
+    decoded_frames: u64,
 }
 
 impl WorkerDiagnosticCounters {
@@ -352,16 +503,58 @@ impl WorkerDiagnosticCounters {
         }
         Ok(Self {
             worker_uptime_ns: metrics.worker_uptime_ns,
-            decode_batches_total: metrics.decode_batches_total,
-            decoded_frames_total: metrics.decoded_frames_total,
-            ring_backpressure_total: metrics.ring_backpressure_total,
-            presentation_skipped_total: metrics.presentation_skipped_total,
-            last_decode_duration_ns: metrics.last_decode_duration_ns,
-            ring_write_sequence: metrics.ring_write_sequence,
-            ring_read_sequence: metrics.ring_read_sequence,
-            ring_occupancy: metrics.ring_occupancy,
+            decode_batches_total: Some(metrics.decode_batches_total),
+            decoded_frames_total: Some(metrics.decoded_frames_total),
+            ring_backpressure_total: Some(metrics.ring_backpressure_total),
+            presentation_skipped_total: Some(metrics.presentation_skipped_total),
+            last_decode_duration_ns: Some(metrics.last_decode_duration_ns),
+            ring_write_sequence: Some(metrics.ring_write_sequence),
+            ring_read_sequence: Some(metrics.ring_read_sequence),
+            ring_occupancy: Some(metrics.ring_occupancy),
             gpu_allocated_bytes: metrics.gpu_allocated_bytes,
             gpu_reserved_bytes: metrics.gpu_reserved_bytes,
+            protocol2: None,
+        })
+    }
+
+    /// Copy exact Protocol 2 counters without inventing legacy ring/GPU data.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RealtimeDiagnosticError::InvalidCounter`] if any received
+    /// value is outside the diagnostic safety envelope.
+    pub fn from_protocol2_metrics_snapshot(
+        metrics: &Protocol2MetricsSnapshot,
+    ) -> Result<Self, RealtimeDiagnosticError> {
+        validate_counters(&[
+            metrics.worker_uptime_ns,
+            metrics.commands_total,
+            metrics.commands_failed_total,
+            metrics.player_steps_total,
+            metrics.deck_process_total,
+            metrics.capture_slots_total,
+            metrics.decoded_frames_total,
+        ])?;
+        Ok(Self {
+            worker_uptime_ns: metrics.worker_uptime_ns,
+            decode_batches_total: None,
+            decoded_frames_total: None,
+            ring_backpressure_total: None,
+            presentation_skipped_total: None,
+            last_decode_duration_ns: None,
+            ring_write_sequence: None,
+            ring_read_sequence: None,
+            ring_occupancy: None,
+            gpu_allocated_bytes: None,
+            gpu_reserved_bytes: None,
+            protocol2: Some(Protocol2WorkerDiagnosticCounters {
+                commands: metrics.commands_total,
+                commands_failed: metrics.commands_failed_total,
+                player_steps: metrics.player_steps_total,
+                deck_processes: metrics.deck_process_total,
+                capture_slots: metrics.capture_slots_total,
+                decoded_frames: metrics.decoded_frames_total,
+            }),
         })
     }
 }
@@ -492,7 +685,7 @@ impl StableErrorRecord {
     }
 }
 
-/// Shared realtime measurements for a D2, Q4, or Player session.
+/// Shared realtime measurements for a Deck or Player session.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RealtimeSessionMetrics {
     duration_ms: u64,
@@ -547,59 +740,78 @@ impl RealtimeSessionMetrics {
     }
 }
 
-/// LD-D2 realtime section with two exact cartridge archive hashes.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct D2DiagnosticSession {
-    operator: SanitizedToken,
-    cartridge_sha256: [Sha256Token; 2],
-    metrics: RealtimeSessionMetrics,
+/// Exact worker and Deck package identity for one Protocol 2 Deck actor.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct Protocol2DeckSessionIdentity {
+    protocol_version: u16,
+    worker_session_id: Uuid,
+    deck_session_id: Uuid,
+    deck_package: SanitizedToken,
+    deck_package_version: SanitizedToken,
+    operator_version: SanitizedToken,
 }
 
-impl D2DiagnosticSession {
-    /// Construct an LD-D2 session section.
-    #[must_use]
-    pub const fn new(
-        operator: SanitizedToken,
-        cartridge_sha256: [Sha256Token; 2],
-        metrics: RealtimeSessionMetrics,
-    ) -> Self {
-        Self {
-            operator,
-            cartridge_sha256,
-            metrics,
-        }
-    }
-}
-
-/// LD-Q4 realtime section with an explicit carrier and four archive hashes.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct Q4DiagnosticSession {
-    operator: SanitizedToken,
-    carrier_slot: u8,
-    cartridge_sha256: [Sha256Token; 4],
-    metrics: RealtimeSessionMetrics,
-}
-
-impl Q4DiagnosticSession {
-    /// Construct an LD-Q4 session section.
+impl Protocol2DeckSessionIdentity {
+    /// Construct the path-free identity for one authenticated P2 worker/Deck
+    /// session pair.
     ///
     /// # Errors
     ///
-    /// Rejects carrier slots outside the closed `0..=3` range.
+    /// Rejects nil session IDs.
+    pub fn new(
+        worker_session_id: Uuid,
+        deck_session_id: Uuid,
+        deck_package: SanitizedToken,
+        deck_package_version: SanitizedToken,
+        operator_version: SanitizedToken,
+    ) -> Result<Self, RealtimeDiagnosticError> {
+        if worker_session_id.is_nil() || deck_session_id.is_nil() {
+            return Err(RealtimeDiagnosticError::InvalidToken);
+        }
+        Ok(Self {
+            protocol_version: 2,
+            worker_session_id,
+            deck_session_id,
+            deck_package,
+            deck_package_version,
+            operator_version,
+        })
+    }
+}
+
+/// Codec-neutral Protocol 2 Deck session with one to sixteen exact cartridge
+/// archive identities. This is the authoritative diagnostic shape after the
+/// installed `.ld` runtime replaces historical hardcoded Deck actors.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct GenericDeckDiagnosticSession {
+    operator: SanitizedToken,
+    cartridge_sha256: Vec<Sha256Token>,
+    metrics: RealtimeSessionMetrics,
+    protocol2: Protocol2DeckSessionIdentity,
+}
+
+impl GenericDeckDiagnosticSession {
+    /// Construct one bounded, path-free generic Deck diagnostic section.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty or over-limit source identity set.
     pub fn new(
         operator: SanitizedToken,
-        carrier_slot: u8,
-        cartridge_sha256: [Sha256Token; 4],
+        cartridge_sha256: Vec<Sha256Token>,
         metrics: RealtimeSessionMetrics,
+        protocol2: Protocol2DeckSessionIdentity,
     ) -> Result<Self, RealtimeDiagnosticError> {
-        if carrier_slot > 3 {
-            return Err(RealtimeDiagnosticError::InvalidCounter);
+        if cartridge_sha256.is_empty() || cartridge_sha256.len() > 16 {
+            return Err(RealtimeDiagnosticError::LimitExceeded(
+                "deck_cartridge_sha256",
+            ));
         }
         Ok(Self {
             operator,
-            carrier_slot,
             cartridge_sha256,
             metrics,
+            protocol2,
         })
     }
 }
@@ -660,16 +872,14 @@ impl Default for InactiveApplicationDiagnosticSession {
     }
 }
 
-/// One of the supported 0.1 application session kinds.
+/// One of the supported application session kinds.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RealtimeDiagnosticSession {
     /// No active actor at capture; an optional stable final error distinguishes
     /// startup/missing-codec state from an ended failed session.
     NoActiveSession(InactiveApplicationDiagnosticSession),
-    /// LD-D2 synthesis session.
-    DeckD2(D2DiagnosticSession),
-    /// LD-Q4 carrier/donor synthesis session.
-    DeckQ4(Q4DiagnosticSession),
+    /// One exact installed `.ld` Deck running through Protocol 2.
+    Deck(GenericDeckDiagnosticSession),
     /// `LatentPlayer` playback session.
     Player(PlayerDiagnosticSession),
 }
@@ -685,9 +895,7 @@ pub struct RealtimeDiagnosticSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     inactive_application: Option<InactiveApplicationDiagnosticSession>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    deck_d2: Option<D2DiagnosticSession>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    deck_q4: Option<Q4DiagnosticSession>,
+    deck: Option<GenericDeckDiagnosticSession>,
     #[serde(skip_serializing_if = "Option::is_none")]
     player: Option<PlayerDiagnosticSession>,
 }
@@ -713,15 +921,14 @@ impl RealtimeDiagnosticSnapshot {
             gpu,
             codec,
             inactive_application: None,
-            deck_d2: None,
-            deck_q4: None,
+            deck: None,
             player: None,
         };
         snapshot.insert_session(primary_session)?;
         Ok(snapshot)
     }
 
-    /// Add the other Deck session kind while preserving the required section.
+    /// Add another compatible session section while preserving the required section.
     ///
     /// # Errors
     ///
@@ -740,32 +947,21 @@ impl RealtimeDiagnosticSnapshot {
     ) -> Result<(), RealtimeDiagnosticError> {
         match session {
             RealtimeDiagnosticSession::NoActiveSession(value) => {
-                if self.deck_d2.is_some() || self.deck_q4.is_some() || self.player.is_some() {
+                if self.deck.is_some() || self.player.is_some() {
                     return Err(RealtimeDiagnosticError::ConflictingSessionState);
                 }
                 if self.inactive_application.replace(value).is_some() {
                     return Err(RealtimeDiagnosticError::DuplicateSession);
                 }
             }
-            RealtimeDiagnosticSession::DeckD2(value) => {
+            RealtimeDiagnosticSession::Deck(value) => {
                 if self.product.product() != DiagnosticProduct::LatentDeck {
                     return Err(RealtimeDiagnosticError::ProductSessionMismatch);
                 }
                 if self.inactive_application.is_some() {
                     return Err(RealtimeDiagnosticError::ConflictingSessionState);
                 }
-                if self.deck_d2.replace(value).is_some() {
-                    return Err(RealtimeDiagnosticError::DuplicateSession);
-                }
-            }
-            RealtimeDiagnosticSession::DeckQ4(value) => {
-                if self.product.product() != DiagnosticProduct::LatentDeck {
-                    return Err(RealtimeDiagnosticError::ProductSessionMismatch);
-                }
-                if self.inactive_application.is_some() {
-                    return Err(RealtimeDiagnosticError::ConflictingSessionState);
-                }
-                if self.deck_q4.replace(value).is_some() {
+                if self.deck.replace(value).is_some() {
                     return Err(RealtimeDiagnosticError::DuplicateSession);
                 }
             }

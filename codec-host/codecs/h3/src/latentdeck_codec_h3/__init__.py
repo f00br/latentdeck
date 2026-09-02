@@ -3,7 +3,7 @@
 from .cartridge import CartridgeLoadError, H3Cycle, H3VideoSource, load_video_source
 from .presentation import H3CadenceError, H3PresentationCadence, StreamingDecoder
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 CODEC_FAMILY = "minimax_h3"
 PROFILE_VERSION = "0.1.0"
 

@@ -1,19 +1,21 @@
 use std::collections::BTreeMap;
 use std::fs;
 
-use latentdeck_control::MetricsSnapshot;
+use latentdeck_control::{MetricsSnapshot, v2::MetricsSnapshot as Protocol2MetricsSnapshot};
 use latentdeck_core::realtime_diagnostics::{
-    D2DiagnosticSession, DiagnosticBundleInput, DiagnosticCodecIdentity,
-    DiagnosticCollectionLimits, DiagnosticEventLevel, DiagnosticEventRecord, DiagnosticEventSource,
-    DiagnosticGpuIdentity, DiagnosticLogSource, DiagnosticProduct, DiagnosticProductIdentity,
-    InactiveApplicationDiagnosticSession, PlayerDiagnosticSession, PresentationDiagnosticCounters,
-    Q4DiagnosticSession, RealtimeDiagnosticError, RealtimeDiagnosticSession,
-    RealtimeDiagnosticSnapshot, RealtimeSessionMetrics, SanitizedToken, Sha256Token,
-    StableErrorRecord, StableErrorSource, TimingDistribution, WorkerDiagnosticCounters,
-    collect_diagnostic_events, write_diagnostic_bundle_atomic,
+    DiagnosticBundleInput, DiagnosticCodecIdentity, DiagnosticCollectionLimits,
+    DiagnosticEventLevel, DiagnosticEventRecord, DiagnosticEventSource, DiagnosticGpuIdentity,
+    DiagnosticLogSource, DiagnosticProduct, DiagnosticProductIdentity,
+    GenericDeckDiagnosticSession, InactiveApplicationDiagnosticSession, PlayerDiagnosticSession,
+    PresentationDiagnosticCounters, Protocol2CodecIdentity, Protocol2ComputeDevice,
+    Protocol2DeckSessionIdentity, Protocol2ExternalAssetIdentity, RealtimeDiagnosticError,
+    RealtimeDiagnosticSession, RealtimeDiagnosticSnapshot, RealtimeSessionMetrics, SanitizedToken,
+    Sha256Token, StableErrorRecord, StableErrorSource, TimingDistribution,
+    WorkerDiagnosticCounters, collect_diagnostic_events, write_diagnostic_bundle_atomic,
 };
 use serde_json::Value;
 use tempfile::TempDir;
+use uuid::Uuid;
 
 const TIMESTAMP_MS: u64 = 1_800_000_000_000;
 
@@ -99,33 +101,33 @@ fn session_metrics() -> RealtimeSessionMetrics {
 }
 
 fn deck_snapshot() -> RealtimeDiagnosticSnapshot {
-    let d2 = D2DiagnosticSession::new(
-        token("xs5-sinkhorn"),
-        [hash(b"cartridge a"), hash(b"cartridge b")],
-        session_metrics(),
-    );
-    let q4 = Q4DiagnosticSession::new(
-        token("xs5-topk"),
-        0,
-        [
+    let session = GenericDeckDiagnosticSession::new(
+        token("org.example.operator"),
+        vec![
             hash(b"cartridge a"),
             hash(b"cartridge b"),
             hash(b"cartridge c"),
-            hash(b"cartridge b"),
+            hash(b"cartridge d"),
         ],
-        session_metrics(),
+        protocol2_session_metrics(),
+        Protocol2DeckSessionIdentity::new(
+            Uuid::parse_str("10000000-0000-4000-8000-000000000001").unwrap(),
+            Uuid::parse_str("10000000-0000-4000-8000-000000000002").unwrap(),
+            token("org.example.deck"),
+            token("0.2.0"),
+            token("0.2.0"),
+        )
+        .expect("P2 Deck identity"),
     )
-    .expect("Q4 session");
+    .expect("generic Deck session");
     RealtimeDiagnosticSnapshot::new(
         TIMESTAMP_MS,
         product(DiagnosticProduct::LatentDeck),
         gpu(),
-        codec(),
-        RealtimeDiagnosticSession::DeckD2(d2),
+        protocol2_codec_identity(),
+        RealtimeDiagnosticSession::Deck(session),
     )
     .expect("Deck snapshot")
-    .with_session(RealtimeDiagnosticSession::DeckQ4(q4))
-    .expect("second Deck section")
 }
 
 fn inactive_player_snapshot() -> RealtimeDiagnosticSnapshot {
@@ -227,51 +229,236 @@ fn bundle_contains_exact_path_free_realtime_layout() {
     );
 }
 
+#[test]
+fn protocol2_identity_is_exact_deterministic_and_path_free() {
+    let protocol2_codec = protocol2_codec_identity();
+    let metrics = protocol2_session_metrics();
+    let worker_session = Uuid::parse_str("20000000-0000-4000-8000-000000000001").unwrap();
+    let deck_session = Uuid::parse_str("20000000-0000-4000-8000-000000000002").unwrap();
+    let session = GenericDeckDiagnosticSession::new(
+        token("org.example.operator"),
+        vec![hash(b"source a"), hash(b"source b")],
+        metrics,
+        Protocol2DeckSessionIdentity::new(
+            worker_session,
+            deck_session,
+            token("org.example.deck"),
+            token("0.2.0"),
+            token("0.2.0"),
+        )
+        .expect("P2 Deck session"),
+    )
+    .expect("generic P2 session");
+    let snapshot = RealtimeDiagnosticSnapshot::new(
+        TIMESTAMP_MS,
+        product(DiagnosticProduct::LatentDeck),
+        gpu(),
+        protocol2_codec,
+        RealtimeDiagnosticSession::Deck(session),
+    )
+    .expect("P2 snapshot");
+    let value = serde_json::to_value(snapshot).expect("serialize P2 snapshot");
+
+    assert_eq!(value["codec"]["codec_family"], "synthetic_codec");
+    assert_eq!(value["codec"]["profile"], "latent_signal");
+    assert_eq!(value["codec"]["codec_pack"], "org.example.codec");
+    assert_eq!(value["codec"]["codec_pack_version"], "2.4.1");
+    assert!(value["codec"].get("decoder").is_none());
+    assert!(value["codec"].get("decoder_sha256").is_none());
+    assert_eq!(value["codec"]["protocol2"]["profile_version"], "7.3.0");
+    assert_eq!(
+        value["codec"]["protocol2"]["adapter"],
+        "org.example.adapter"
+    );
+    assert_eq!(value["codec"]["protocol2"]["adapter_version"], "0.2.0");
+    assert_eq!(value["codec"]["protocol2"]["compute_device"], "cpu");
+    assert_eq!(value["codec"]["protocol2"]["device_ordinal"], 0);
+    assert_eq!(
+        value["codec"]["protocol2"]["external_assets"][0]["asset_id"],
+        "asset-a"
+    );
+    assert_eq!(
+        value["codec"]["protocol2"]["external_assets"][1]["asset_id"],
+        "asset-z"
+    );
+    assert_eq!(
+        value["deck"]["protocol2"]["worker_session_id"],
+        worker_session.to_string()
+    );
+    assert_eq!(
+        value["deck"]["protocol2"]["deck_session_id"],
+        deck_session.to_string()
+    );
+    assert_eq!(
+        value["deck"]["metrics"]["worker"]["protocol2"]["deck_process_total"],
+        7
+    );
+    assert!(
+        value["deck"]["metrics"]["worker"]
+            .get("ring_occupancy")
+            .is_none()
+    );
+
+    let encoded = serde_json::to_string(&value).unwrap();
+    assert!(!encoded.contains("C:\\"));
+    assert!(!encoded.contains("/Users/"));
+    assert!(!encoded.contains("decoder"));
+    let legacy = serde_json::to_value(codec()).expect("serialize P1 codec identity");
+    assert_eq!(legacy["decoder"], "taehv-taeh3");
+    assert!(legacy.get("protocol2").is_none());
+}
+
+#[test]
+fn generic_protocol2_deck_snapshot_keeps_exact_package_and_source_identities() {
+    let worker_session = Uuid::parse_str("30000000-0000-4000-8000-000000000001").unwrap();
+    let deck_session = Uuid::parse_str("30000000-0000-4000-8000-000000000002").unwrap();
+    let session = GenericDeckDiagnosticSession::new(
+        token("org.example.operator"),
+        vec![hash(b"source a"), hash(b"source b"), hash(b"source c")],
+        protocol2_session_metrics(),
+        Protocol2DeckSessionIdentity::new(
+            worker_session,
+            deck_session,
+            token("org.example.deck"),
+            token("0.2.0"),
+            token("0.2.0"),
+        )
+        .expect("generic P2 identity"),
+    )
+    .expect("generic Deck diagnostics");
+    let snapshot = RealtimeDiagnosticSnapshot::new(
+        TIMESTAMP_MS,
+        product(DiagnosticProduct::LatentDeck),
+        gpu(),
+        protocol2_codec_identity(),
+        RealtimeDiagnosticSession::Deck(session),
+    )
+    .expect("generic snapshot");
+    let value = serde_json::to_value(snapshot).expect("serialize generic snapshot");
+
+    assert_eq!(value["deck"]["operator"], "org.example.operator");
+    assert_eq!(
+        value["deck"]["cartridge_sha256"].as_array().unwrap().len(),
+        3
+    );
+    assert_eq!(
+        value["deck"]["protocol2"]["deck_package"],
+        "org.example.deck"
+    );
+    assert_eq!(
+        value["deck"]["protocol2"]["worker_session_id"],
+        worker_session.to_string()
+    );
+    assert!(value.get("player").is_none());
+}
+
+fn protocol2_codec_identity() -> DiagnosticCodecIdentity {
+    let assets = vec![
+        Protocol2ExternalAssetIdentity::new(token("asset-z"), hash(b"asset z"), 22)
+            .expect("asset z"),
+        Protocol2ExternalAssetIdentity::new(token("asset-a"), hash(b"asset a"), 11)
+            .expect("asset a"),
+    ];
+    DiagnosticCodecIdentity::new_protocol2(
+        token("synthetic_codec"),
+        token("latent_signal"),
+        token("org.example.codec"),
+        token("2.4.1"),
+        Protocol2CodecIdentity::new(
+            token("7.3.0"),
+            token("org.example.adapter"),
+            token("0.2.0"),
+            Protocol2ComputeDevice::Cpu,
+            0,
+            assets,
+        )
+        .expect("P2 codec identity"),
+    )
+}
+
+fn protocol2_session_metrics() -> RealtimeSessionMetrics {
+    let worker =
+        WorkerDiagnosticCounters::from_protocol2_metrics_snapshot(&Protocol2MetricsSnapshot {
+            worker_uptime_ns: 10,
+            commands_total: 9,
+            commands_failed_total: 1,
+            player_steps_total: 0,
+            deck_process_total: 7,
+            capture_slots_total: 3,
+            decoded_frames_total: 24,
+        })
+        .expect("P2 worker counters");
+    RealtimeSessionMetrics::new(
+        1_000,
+        24.0,
+        0.0,
+        TimingDistribution::new(0, 0.0, 0.0, 0.0, 0.0).unwrap(),
+        TimingDistribution::new(0, 0.0, 0.0, 0.0, 0.0).unwrap(),
+        worker,
+        PresentationDiagnosticCounters::new(0, None, Some(0)).unwrap(),
+        Vec::new(),
+    )
+    .expect("P2 session metrics")
+}
+
+#[test]
+fn protocol2_identity_rejects_unsafe_or_ambiguous_values() {
+    assert!(SanitizedToken::parse("C:\\private\\asset").is_err());
+    let duplicated = vec![
+        Protocol2ExternalAssetIdentity::new(token("same"), hash(b"one"), 1).unwrap(),
+        Protocol2ExternalAssetIdentity::new(token("same"), hash(b"two"), 2).unwrap(),
+    ];
+    assert!(
+        Protocol2CodecIdentity::new(
+            token("1.0.0"),
+            token("org.example.adapter"),
+            token("1.0.0"),
+            Protocol2ComputeDevice::Cuda,
+            1,
+            duplicated,
+        )
+        .is_err()
+    );
+    assert!(
+        Protocol2DeckSessionIdentity::new(
+            Uuid::nil(),
+            Uuid::new_v4(),
+            token("org.example.deck"),
+            token("1.0.0"),
+            token("1.0.0"),
+        )
+        .is_err()
+    );
+}
+
 fn assert_realtime_payload(realtime: &Value) {
     assert_eq!(realtime["product"]["product"], "latent_deck");
     assert_eq!(realtime["gpu"]["adapter"], "NVIDIA-GeForce-RTX-4070");
     assert_eq!(realtime["gpu"]["driver"], "NVIDIA-32.0.15.6094");
-    assert_eq!(realtime["codec"]["codec_family"], "minimax_h3");
-    assert_eq!(realtime["codec"]["decoder"], "taehv-taeh3");
+    assert_eq!(realtime["codec"]["codec_family"], "synthetic_codec");
     assert_eq!(
-        realtime["codec"]["decoder_sha256"].as_str().unwrap().len(),
-        64
+        realtime["codec"]["protocol2"]["adapter"],
+        "org.example.adapter"
     );
-    assert_eq!(realtime["deck_d2"]["operator"], "xs5-sinkhorn");
+    assert_eq!(realtime["deck"]["operator"], "org.example.operator");
     assert_eq!(
-        realtime["deck_d2"]["cartridge_sha256"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
-    assert_eq!(realtime["deck_q4"]["carrier_slot"], 0);
-    assert_eq!(
-        realtime["deck_q4"]["cartridge_sha256"]
+        realtime["deck"]["cartridge_sha256"]
             .as_array()
             .unwrap()
             .len(),
         4
     );
-    let metrics = &realtime["deck_d2"]["metrics"];
+    assert_eq!(
+        realtime["deck"]["protocol2"]["deck_package"],
+        "org.example.deck"
+    );
+    let metrics = &realtime["deck"]["metrics"];
     assert_eq!(metrics["target_fps"], 24.0);
-    assert_eq!(metrics["measured_fps"], 23.99);
-    assert_eq!(metrics["frame_intervals_ms"]["p95_ms"], 43.0);
-    assert_eq!(metrics["control_latency_ms"]["p95_ms"], 120.0);
-    assert_eq!(metrics["worker"]["worker_uptime_ns"], 9_000_000_000_u64);
-    assert_eq!(metrics["worker"]["decode_batches_total"], 35);
-    assert_eq!(metrics["worker"]["decoded_frames_total"], 576);
-    assert_eq!(metrics["worker"]["ring_backpressure_total"], 2);
-    assert_eq!(metrics["worker"]["presentation_skipped_total"], 3);
-    assert_eq!(metrics["worker"]["last_decode_duration_ns"], 1_500_000);
-    assert_eq!(metrics["worker"]["ring_write_sequence"], 576);
-    assert_eq!(metrics["worker"]["ring_read_sequence"], 575);
-    assert_eq!(metrics["worker"]["ring_occupancy"], 1);
-    assert_eq!(metrics["worker"]["gpu_allocated_bytes"], 2_000_000_000_u64);
-    assert_eq!(metrics["worker"]["gpu_reserved_bytes"], 3_000_000_000_u64);
-    assert_eq!(metrics["presentation"]["frames_presented"], 576);
-    assert_eq!(metrics["presentation"]["frames_dropped"], 3);
-    assert_eq!(metrics["stable_errors"][0]["code"], "worker.backpressure");
+    assert_eq!(metrics["measured_fps"], 0.0);
+    assert_eq!(metrics["worker"]["protocol2"]["commands_total"], 9);
+    assert_eq!(metrics["worker"]["protocol2"]["deck_process_total"], 7);
+    assert_eq!(metrics["worker"]["protocol2"]["capture_slots_total"], 3);
+    assert_eq!(metrics["presentation"]["frames_presented"], 0);
 }
 
 #[test]
@@ -304,8 +491,7 @@ fn inactive_startup_and_active_player_sessions_are_truthful() {
     let parsed = parse_stored_zip(&fs::read(&inactive_path).unwrap());
     let realtime: Value = serde_json::from_slice(&parsed["realtime.json"]).unwrap();
     assert_eq!(realtime["inactive_application"]["no_active_session"], true);
-    assert!(realtime.get("deck_d2").is_none());
-    assert!(realtime.get("deck_q4").is_none());
+    assert!(realtime.get("deck").is_none());
     assert!(realtime.get("player").is_none());
 
     let player = PlayerDiagnosticSession::new(hash(b"player cartridge"), session_metrics());

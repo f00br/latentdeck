@@ -21,6 +21,7 @@ use std::{
 use latentdeck_control::{
     Ack, AuthToken, Command, Envelope, Event, InboundPolicy, MAX_CONTROL_FRAME_BYTES, Message,
     SessionValidator, ShutdownReason, WireUuid, WorkerShutdown, decode_envelope, encode_envelope,
+    v2 as protocol2,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -59,7 +60,9 @@ use windows_sys::Win32::{
     System::JobObjects::QueryInformationJobObject,
 };
 
-use super::{ValidatedWorkerLaunch, WorkerExit, WorkerSupervisorError, encode_bootstrap};
+use super::{
+    ValidatedWorkerLaunch, WorkerExit, WorkerSupervisorError, encode_bootstrap, encode_bootstrap_v2,
+};
 
 const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
 const FORCED_TERMINATION_EXIT_CODE: u32 = 1;
@@ -85,6 +88,29 @@ pub struct WorkerSession {
     child: Child,
     job: JobObject,
     validator: SessionValidator,
+    started_at: Instant,
+    worker_pid: u32,
+}
+
+/// A spawned Protocol 2 worker that has not completed its authenticated hello.
+pub struct PendingWorkerV2 {
+    session_id: WireUuid,
+    expected_token: protocol2::WorkerHelloAuthToken,
+    pipe: NamedPipeServer,
+    child: Child,
+    job: JobObject,
+    worker_pid: u32,
+    connect_timeout: Duration,
+}
+
+/// One authenticated Protocol 2 worker session. Dropping it closes the same
+/// kill-on-close Job Object used by the accepted Protocol 1 boundary.
+pub struct WorkerSessionV2 {
+    session_id: WireUuid,
+    pipe: NamedPipeServer,
+    child: Child,
+    job: JobObject,
+    validator: protocol2::SessionValidator,
     started_at: Instant,
     worker_pid: u32,
 }
@@ -150,6 +176,80 @@ pub async fn spawn_worker(
     }
 
     Ok(PendingWorker {
+        session_id,
+        expected_token,
+        pipe,
+        child,
+        job,
+        worker_pid,
+        connect_timeout: launch.connect_timeout,
+    })
+}
+
+/// Spawn the exact validated executable behind the authenticated Protocol 2
+/// Named Pipe boundary.
+///
+/// The bootstrap remains a single bounded `MessagePack` record delivered over
+/// stdin. Protocol selection is explicit at this call site; this function
+/// never retries through [`spawn_worker`].
+///
+/// # Errors
+///
+/// Returns an error without leaving the child running when pipe security,
+/// spawn, Job Object assignment, randomness, or bootstrap delivery fails.
+pub async fn spawn_worker_v2(
+    launch: ValidatedWorkerLaunch,
+) -> Result<PendingWorkerV2, WorkerSupervisorError> {
+    let session_id = WireUuid::new_v4();
+    let pipe_name = format!(r"\\.\pipe\latentdeck-worker-v2-{session_id}");
+    let mut token_bytes = [0_u8; 32];
+    getrandom::fill(&mut token_bytes).map_err(|_| WorkerSupervisorError::Random)?;
+    let expected_token = protocol2::WorkerHelloAuthToken::new(token_bytes);
+    token_bytes.fill(0);
+
+    let pipe = create_secure_pipe(&pipe_name)?;
+    let job = JobObject::new()?;
+
+    let mut command = ProcessCommand::new(&launch.executable);
+    command
+        .args(&launch.arguments)
+        .current_dir(&launch.working_directory)
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .creation_flags(CREATE_NO_WINDOW);
+    configure_worker_environment(&mut command)?;
+    let mut child = command.spawn().map_err(WorkerSupervisorError::Spawn)?;
+    let worker_pid = child.id().ok_or_else(|| {
+        WorkerSupervisorError::Spawn(io::Error::other("spawned worker has no process identifier"))
+    })?;
+
+    if let Err(error) = job.assign(&child) {
+        terminate_uncontained_child(&mut child).await;
+        return Err(error);
+    }
+
+    let mut bootstrap = encode_bootstrap_v2(session_id, &pipe_name, &expected_token)?;
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = job.terminate();
+        let _ = child.wait().await;
+        bootstrap.fill(0);
+        return Err(WorkerSupervisorError::BootstrapWrite(io::Error::other(
+            "worker stdin was not piped",
+        )));
+    };
+    let write_result = stdin.write_all(&bootstrap).await;
+    bootstrap.fill(0);
+    drop(stdin);
+    if let Err(error) = write_result {
+        let _ = job.terminate();
+        let _ = child.wait().await;
+        return Err(WorkerSupervisorError::BootstrapWrite(error));
+    }
+
+    Ok(PendingWorkerV2 {
         session_id,
         expected_token,
         pipe,
@@ -450,6 +550,276 @@ impl WorkerSession {
     }
 }
 
+impl PendingWorkerV2 {
+    /// Authenticate exactly one Protocol 2 client and consume the pending
+    /// supervisor.
+    ///
+    /// # Errors
+    ///
+    /// A timeout, early process exit, wrong client PID/token, malformed frame,
+    /// or non-hello first message terminates this session. It is never resumed
+    /// through Protocol 1.
+    pub async fn connect(mut self) -> Result<WorkerSessionV2, WorkerSupervisorError> {
+        let deadline = Instant::now() + self.connect_timeout;
+        let connected = timeout_at(deadline, async {
+            tokio::select! {
+                biased;
+                result = self.pipe.connect() => result.map_err(WorkerSupervisorError::PipeIo),
+                status = self.child.wait() => Err(process_exit_error(status)),
+            }
+        })
+        .await
+        .map_err(|_| WorkerSupervisorError::ConnectTimeout)?;
+        connected?;
+
+        let client_pid = named_pipe_client_pid(&self.pipe)?;
+        if client_pid != self.worker_pid {
+            let _ = self.job.terminate();
+            let _ = self.child.wait().await;
+            return Err(WorkerSupervisorError::PeerProcessMismatch);
+        }
+
+        let first = timeout_at(deadline, async {
+            tokio::select! {
+                biased;
+                result = read_envelope_v2(&mut self.pipe) => result,
+                status = self.child.wait() => Err(process_exit_error(status)),
+            }
+        })
+        .await
+        .map_err(|_| WorkerSupervisorError::HandshakeTimeout)??;
+
+        let mut validator = protocol2::SessionValidator::new(
+            self.session_id.as_uuid(),
+            protocol2::InboundPolicy::ResponsesAndEvents,
+        );
+        validator.validate_inbound(&first)?;
+        let protocol2::Message::Event(event_message) = &first.message else {
+            return Err(WorkerSupervisorError::UnexpectedHandshake);
+        };
+        if event_message.caused_by.is_some() {
+            return Err(WorkerSupervisorError::UnexpectedHandshake);
+        }
+        let protocol2::Event::WorkerHello(hello) = &event_message.event else {
+            return Err(WorkerSupervisorError::UnexpectedHandshake);
+        };
+        if hello.worker_pid != self.worker_pid
+            || !hello.auth_token.constant_time_eq(&self.expected_token)
+        {
+            let _ = self.job.terminate();
+            let _ = self.child.wait().await;
+            return Err(WorkerSupervisorError::AuthenticationFailed);
+        }
+
+        Ok(WorkerSessionV2 {
+            session_id: self.session_id,
+            pipe: self.pipe,
+            child: self.child,
+            job: self.job,
+            validator,
+            started_at: Instant::now(),
+            worker_pid: self.worker_pid,
+        })
+    }
+
+    #[must_use]
+    pub const fn session_id(&self) -> WireUuid {
+        self.session_id
+    }
+
+    #[must_use]
+    pub const fn worker_pid(&self) -> u32 {
+        self.worker_pid
+    }
+}
+
+impl WorkerSessionV2 {
+    #[must_use]
+    pub const fn session_id(&self) -> WireUuid {
+        self.session_id
+    }
+
+    #[must_use]
+    pub const fn worker_pid(&self) -> u32 {
+        self.worker_pid
+    }
+
+    /// Number of additional Protocol 2 replies/events this session can
+    /// validate after its authenticated hello.
+    #[must_use]
+    pub fn remaining_inbound_message_budget(&self) -> usize {
+        self.validator.remaining_inbound_message_budget()
+    }
+
+    /// Number of additional Protocol 2 commands this session can register.
+    #[must_use]
+    pub fn remaining_outbound_message_budget(&self) -> usize {
+        self.validator.remaining_outbound_message_budget()
+    }
+
+    /// Borrow the authenticated child process handle for one synchronous
+    /// handle-duplication operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the child was already reaped.
+    pub fn with_process_handle<T>(
+        &self,
+        operation: impl FnOnce(BorrowedHandle<'_>) -> T,
+    ) -> Result<T, WorkerSupervisorError> {
+        let raw_handle = self
+            .child
+            .raw_handle()
+            .ok_or(WorkerSupervisorError::ProcessHandleUnavailable)?;
+        // SAFETY: Tokio owns this live child process handle for `self`; the
+        // borrow cannot escape `operation` and no ownership is transferred.
+        let borrowed = unsafe { BorrowedHandle::borrow_raw(raw_handle) };
+        Ok(operation(borrowed))
+    }
+
+    /// Send one typed Protocol 2 command using the next validated sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Protocol 2 validation/session error or fatal pipe I/O error.
+    pub async fn send_command(
+        &mut self,
+        command: protocol2::Command,
+    ) -> Result<WireUuid, WorkerSupervisorError> {
+        let message_id = WireUuid::new_v4();
+        let envelope = protocol2::Envelope::new(
+            self.session_id.as_uuid(),
+            self.validator.next_outbound_sequence(),
+            message_id.as_uuid(),
+            elapsed_ns(self.started_at),
+            protocol2::Message::Command(command),
+        );
+        self.validator.track_outbound_command(&envelope)?;
+        write_envelope_v2(&mut self.pipe, &envelope).await?;
+        Ok(message_id)
+    }
+
+    /// Receive and validate the next Protocol 2 worker reply/event while also
+    /// observing process exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns on timeout, pipe/protocol failure, or process exit. None of
+    /// those errors restarts the worker or changes protocol.
+    pub async fn receive(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<protocol2::Envelope, WorkerSupervisorError> {
+        let deadline = Instant::now() + timeout;
+        let envelope = timeout_at(deadline, async {
+            tokio::select! {
+                biased;
+                result = read_envelope_v2(&mut self.pipe) => result,
+                status = self.child.wait() => Err(process_exit_error(status)),
+            }
+        })
+        .await
+        .map_err(|_| WorkerSupervisorError::ReceiveTimeout)??;
+        self.validator.validate_inbound(&envelope)?;
+        Ok(envelope)
+    }
+
+    /// Observe an already-completed Protocol 2 worker without blocking.
+    ///
+    /// # Errors
+    ///
+    /// Returns an operating-system observation failure.
+    pub fn try_wait(&mut self) -> Result<Option<WorkerExit>, WorkerSupervisorError> {
+        self.child
+            .try_wait()
+            .map(|status| status.map(WorkerExit::from))
+            .map_err(WorkerSupervisorError::PipeIo)
+    }
+
+    /// Wait for the Protocol 2 worker process to exit without restarting it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an operating-system wait failure.
+    pub async fn wait_for_exit(&mut self) -> Result<WorkerExit, WorkerSupervisorError> {
+        self.child
+            .wait()
+            .await
+            .map(WorkerExit::from)
+            .map_err(WorkerSupervisorError::PipeIo)
+    }
+
+    /// Request exact Protocol 2 orderly shutdown, require the matching reason,
+    /// and then require process exit within the same bounded deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the worker rejects/malforms the acknowledgement, exits
+    /// early, or misses the deadline.
+    pub async fn request_shutdown(
+        &mut self,
+        reason: protocol2::ShutdownReason,
+        timeout: Duration,
+    ) -> Result<WorkerExit, WorkerSupervisorError> {
+        let command_id = self
+            .send_command(protocol2::Command::SessionShutdown(
+                protocol2::SessionShutdown { reason },
+            ))
+            .await?;
+        let deadline = Instant::now() + timeout;
+
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(WorkerSupervisorError::ShutdownTimeout);
+            }
+            let envelope = self.receive(remaining).await.map_err(|error| {
+                if matches!(error, WorkerSupervisorError::ReceiveTimeout) {
+                    WorkerSupervisorError::ShutdownTimeout
+                } else {
+                    error
+                }
+            })?;
+            match envelope.message {
+                protocol2::Message::Ack(reply) if reply.reply_to == command_id.as_uuid() => {
+                    match reply.ack {
+                        protocol2::Ack::SessionShutdown(ack) if ack.reason == reason => break,
+                        _ => return Err(WorkerSupervisorError::ShutdownRejected),
+                    }
+                }
+                protocol2::Message::Error(reply) if reply.reply_to == command_id.as_uuid() => {
+                    return Err(WorkerSupervisorError::ShutdownRejected);
+                }
+                _ => {}
+            }
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(WorkerSupervisorError::ShutdownTimeout);
+        }
+        timeout_at(deadline, self.child.wait())
+            .await
+            .map_err(|_| WorkerSupervisorError::ShutdownTimeout)?
+            .map(WorkerExit::from)
+            .map_err(WorkerSupervisorError::PipeIo)
+    }
+
+    /// Terminate the entire Protocol 2 worker Job Object and wait for the main
+    /// process.
+    ///
+    /// # Errors
+    ///
+    /// Returns only if Job Object termination or process wait fails.
+    pub async fn force_kill(&mut self) -> Result<WorkerExit, WorkerSupervisorError> {
+        if let Some(exit) = self.try_wait()? {
+            return Ok(exit);
+        }
+        self.job.terminate()?;
+        self.wait_for_exit().await
+    }
+}
+
 async fn terminate_uncontained_child(child: &mut Child) {
     let _ = child.start_kill();
     let _ = child.wait().await;
@@ -511,6 +881,44 @@ where
             maximum: MAX_CONTROL_FRAME_BYTES,
         }
     })?;
+    pipe.write_all(&length.to_le_bytes())
+        .await
+        .map_err(WorkerSupervisorError::PipeIo)?;
+    pipe.write_all(&payload)
+        .await
+        .map_err(WorkerSupervisorError::PipeIo)?;
+    pipe.flush().await.map_err(WorkerSupervisorError::PipeIo)
+}
+
+async fn read_envelope_v2<R>(pipe: &mut R) -> Result<protocol2::Envelope, WorkerSupervisorError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut prefix = [0_u8; 4];
+    pipe.read_exact(&mut prefix)
+        .await
+        .map_err(WorkerSupervisorError::PipeIo)?;
+    let length = u32::from_le_bytes(prefix) as usize;
+    if !(1..=protocol2::MAX_FRAME_BYTES).contains(&length) {
+        return Err(protocol2::CodecError::FrameLength.into());
+    }
+    let mut payload = vec![0_u8; length];
+    pipe.read_exact(&mut payload)
+        .await
+        .map_err(WorkerSupervisorError::PipeIo)?;
+    protocol2::decode_messagepack(&payload).map_err(WorkerSupervisorError::from)
+}
+
+async fn write_envelope_v2<W>(
+    pipe: &mut W,
+    envelope: &protocol2::Envelope,
+) -> Result<(), WorkerSupervisorError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let payload = protocol2::encode_messagepack(envelope)?;
+    let length = u32::try_from(payload.len())
+        .map_err(|_| WorkerSupervisorError::Protocol2Codec(protocol2::CodecError::FrameLength))?;
     pipe.write_all(&length.to_le_bytes())
         .await
         .map_err(WorkerSupervisorError::PipeIo)?;
@@ -840,7 +1248,10 @@ mod tests {
     use latentdeck_control::{
         AckReply, BoundedVec, EventMessage, ShutdownAck, WORKER_PROTOCOL_VERSION, WorkerHello,
     };
-    use serde::Deserialize;
+    use serde::{
+        Deserialize, Deserializer,
+        de::{self, SeqAccess, Visitor},
+    };
     use tokio::net::windows::named_pipe::ClientOptions;
 
     use super::*;
@@ -854,6 +1265,55 @@ mod tests {
         "worker_supervisor::platform::tests::worker_exit_before_connect_helper";
     const EXIT_AFTER_HELLO_HELPER: &str =
         "worker_supervisor::platform::tests::worker_exit_after_hello_helper";
+    const GOOD_P2_HELPER: &str = "worker_supervisor::platform::tests::worker_v2_child_helper";
+    const BAD_P2_TOKEN_HELPER: &str =
+        "worker_supervisor::platform::tests::worker_v2_bad_token_helper";
+
+    #[derive(Clone, Copy)]
+    struct ChildAuthToken([u8; 32]);
+
+    impl<'de> Deserialize<'de> for ChildAuthToken {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct TokenVisitor;
+
+            impl<'de> Visitor<'de> for TokenVisitor {
+                type Value = ChildAuthToken;
+
+                fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    formatter.write_str("exactly 32 authentication bytes")
+                }
+
+                fn visit_bytes<E: de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+                    let bytes = value
+                        .try_into()
+                        .map_err(|_| E::invalid_length(value.len(), &self))?;
+                    Ok(ChildAuthToken(bytes))
+                }
+
+                fn visit_byte_buf<E: de::Error>(self, value: Vec<u8>) -> Result<Self::Value, E> {
+                    self.visit_bytes(&value)
+                }
+
+                fn visit_seq<A: SeqAccess<'de>>(
+                    self,
+                    mut sequence: A,
+                ) -> Result<Self::Value, A::Error> {
+                    let mut bytes = [0_u8; 32];
+                    for (index, byte) in bytes.iter_mut().enumerate() {
+                        *byte = sequence
+                            .next_element()?
+                            .ok_or_else(|| de::Error::invalid_length(index, &self))?;
+                    }
+                    if sequence.next_element::<u8>()?.is_some() {
+                        return Err(de::Error::invalid_length(33, &self));
+                    }
+                    Ok(ChildAuthToken(bytes))
+                }
+            }
+
+            deserializer.deserialize_bytes(TokenVisitor)
+        }
+    }
 
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -861,7 +1321,17 @@ mod tests {
         bootstrap_version: u16,
         session_id: WireUuid,
         pipe_name: String,
-        auth_token: AuthToken,
+        auth_token: ChildAuthToken,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ChildBootstrapV2 {
+        bootstrap_version: u16,
+        protocol_version: u16,
+        session_id: WireUuid,
+        pipe_name: String,
+        auth_token: protocol2::WorkerHelloAuthToken,
     }
 
     #[test]
@@ -929,6 +1399,32 @@ mod tests {
             client.remaining_outbound_message_budget(),
             latentdeck_control::MAX_MESSAGES_PER_SESSION - 1
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn protocol2_authenticates_and_completes_exact_shutdown() {
+        let pending = spawn_worker_v2(helper_launch(GOOD_P2_HELPER))
+            .await
+            .expect("spawn Protocol 2 worker");
+        let session_id = pending.session_id();
+        let worker_pid = pending.worker_pid();
+        let mut session = pending.connect().await.expect("authenticated P2 session");
+        assert_eq!(session.session_id(), session_id);
+        assert_eq!(session.worker_pid(), worker_pid);
+        assert_eq!(
+            session.remaining_inbound_message_budget(),
+            protocol2::MAX_MESSAGES_PER_SESSION - 1
+        );
+        assert_eq!(
+            session.remaining_outbound_message_budget(),
+            protocol2::MAX_MESSAGES_PER_SESSION
+        );
+
+        let exit = session
+            .request_shutdown(protocol2::ShutdownReason::HostExit, Duration::from_secs(10))
+            .await
+            .expect("Protocol 2 orderly shutdown");
+        assert!(exit.success, "P2 helper should exit successfully: {exit}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1000,6 +1496,17 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn protocol2_rejects_a_wrong_token_without_protocol1_retry() {
+        let pending = spawn_worker_v2(helper_launch(BAD_P2_TOKEN_HELPER))
+            .await
+            .expect("spawn Protocol 2 worker");
+        let Err(error) = pending.connect().await else {
+            panic!("bad Protocol 2 token was accepted");
+        };
+        assert!(matches!(error, WorkerSupervisorError::AuthenticationFailed));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn observes_exit_before_connect_without_waiting_for_timeout() {
         let pending = spawn_worker(helper_launch(EARLY_EXIT_HELPER))
             .await
@@ -1054,6 +1561,18 @@ mod tests {
         run_worker_hello_then_exit();
     }
 
+    #[test]
+    #[ignore = "spawned by the Protocol 2 worker supervisor contract test"]
+    fn worker_v2_child_helper() {
+        run_worker_child_v2(false);
+    }
+
+    #[test]
+    #[ignore = "spawned by the Protocol 2 worker supervisor authentication test"]
+    fn worker_v2_bad_token_helper() {
+        run_worker_child_v2(true);
+    }
+
     fn helper_launch(test_name: &str) -> ValidatedWorkerLaunch {
         let executable = std::env::current_exe().expect("test executable");
         let working_directory = executable
@@ -1085,7 +1604,7 @@ mod tests {
             let hello_token = if bad_token {
                 AuthToken::new([0_u8; 32])
             } else {
-                bootstrap.auth_token
+                AuthToken::new(bootstrap.auth_token.0)
             };
             let adapters = BoundedVec::try_from_vec(vec!["org.latentdeck.h3".to_owned()])
                 .expect("adapter list");
@@ -1138,6 +1657,85 @@ mod tests {
         });
     }
 
+    fn run_worker_child_v2(bad_token: bool) {
+        let bootstrap = read_child_bootstrap_v2();
+        assert_eq!(bootstrap.bootstrap_version, protocol2::PROTOCOL_VERSION);
+        assert_eq!(bootstrap.protocol_version, protocol2::PROTOCOL_VERSION);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("child runtime");
+        runtime.block_on(async move {
+            let mut client = ClientOptions::new()
+                .open(&bootstrap.pipe_name)
+                .expect("connect to Protocol 2 supervisor pipe");
+            let hello_token = if bad_token {
+                protocol2::WorkerHelloAuthToken::new([0_u8; 32])
+            } else {
+                bootstrap.auth_token
+            };
+            let hello = protocol2::Envelope::new(
+                bootstrap.session_id.as_uuid(),
+                1,
+                WireUuid::new_v4().as_uuid(),
+                1,
+                protocol2::Message::Event(protocol2::EventMessage {
+                    caused_by: None,
+                    event: protocol2::Event::WorkerHello(protocol2::WorkerHello {
+                        auth_token: hello_token,
+                        worker_pid: std::process::id(),
+                        worker_identity: "org.latentdeck.test.worker".to_owned(),
+                        runtime_identity: "test-runtime-cpython-3.13".to_owned(),
+                        protocol_min: protocol2::PROTOCOL_VERSION,
+                        protocol_max: protocol2::PROTOCOL_VERSION,
+                    }),
+                }),
+            );
+            write_envelope_v2(&mut client, &hello)
+                .await
+                .expect("write Protocol 2 hello");
+
+            if bad_token {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                return;
+            }
+
+            let command = read_envelope_v2(&mut client)
+                .await
+                .expect("Protocol 2 shutdown command");
+            let protocol2::Message::Command(protocol2::Command::SessionShutdown(shutdown)) =
+                command.message
+            else {
+                panic!("test Protocol 2 worker expected session.shutdown");
+            };
+            let ack = protocol2::Envelope::new(
+                bootstrap.session_id.as_uuid(),
+                2,
+                WireUuid::new_v4().as_uuid(),
+                2,
+                protocol2::Message::Ack(protocol2::AckReply {
+                    reply_to: command.message_id,
+                    ack: protocol2::Ack::SessionShutdown(protocol2::ShutdownAck {
+                        reason: shutdown.reason,
+                    }),
+                    status: protocol2::StatusSnapshot {
+                        session: protocol2::SessionState::Stopping,
+                        codec: protocol2::CodecState::Unloaded,
+                        player: protocol2::PlayerState::Empty,
+                        deck: protocol2::DeckState::Empty,
+                        capture: protocol2::CaptureState::Idle,
+                        open_session_count: 0,
+                        foreground_output_session: None,
+                        output_lease_pinned: false,
+                    },
+                }),
+            );
+            write_envelope_v2(&mut client, &ack)
+                .await
+                .expect("write Protocol 2 shutdown ack");
+        });
+    }
+
     fn run_worker_hello_then_exit() {
         let bootstrap = read_child_bootstrap();
         assert_eq!(bootstrap.bootstrap_version, BOOTSTRAP_VERSION);
@@ -1159,7 +1757,7 @@ mod tests {
                 Message::Event(EventMessage {
                     caused_by: None,
                     event: Event::WorkerHello(WorkerHello {
-                        auth_token: bootstrap.auth_token,
+                        auth_token: AuthToken::new(bootstrap.auth_token.0),
                         worker_version: "test-worker-0.1.0".to_owned(),
                         protocol_min: WORKER_PROTOCOL_VERSION,
                         protocol_max: WORKER_PROTOCOL_VERSION,
@@ -1222,5 +1820,19 @@ mod tests {
         let mut payload = vec![0_u8; length];
         stdin.read_exact(&mut payload).expect("bootstrap payload");
         rmp_serde::from_slice(&payload).expect("bootstrap MessagePack")
+    }
+
+    fn read_child_bootstrap_v2() -> ChildBootstrapV2 {
+        let stdin = std::io::stdin();
+        let mut stdin = stdin.lock();
+        let mut prefix = [0_u8; 4];
+        stdin.read_exact(&mut prefix).expect("P2 bootstrap prefix");
+        let length = u32::from_le_bytes(prefix) as usize;
+        assert!((1..=MAX_BOOTSTRAP_BYTES).contains(&length));
+        let mut payload = vec![0_u8; length];
+        stdin
+            .read_exact(&mut payload)
+            .expect("P2 bootstrap payload");
+        rmp_serde::from_slice(&payload).expect("P2 bootstrap MessagePack")
     }
 }

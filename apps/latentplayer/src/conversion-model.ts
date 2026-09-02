@@ -11,8 +11,8 @@ export interface ConversionError {
 }
 
 export interface ConversionMetadata {
-  payloadBytes: number;
-  payloadSha256: string;
+  sourceBytes: number;
+  sourceSha256: string;
   storageDtype: "F16" | "F32";
   latentSlots: number;
   latentHeight: number;
@@ -21,6 +21,29 @@ export interface ConversionMetadata {
   decodedHeight: number;
   decodedFrames: number;
   audioPresent: boolean;
+}
+
+export interface RawImportProfile {
+  codecFamily: string;
+  profile: string;
+  profileVersion: string;
+}
+
+export interface RawImportCodecOptions {
+  packageId: string;
+  packageVersion: string;
+  adapterId: string;
+  adapterVersion: string;
+  displayName: string;
+  profiles: RawImportProfile[];
+}
+
+export interface RawImportSelection {
+  packageId: string;
+  packageVersion: string;
+  adapterId: string;
+  adapterVersion: string;
+  profile: RawImportProfile;
 }
 
 export interface ConversionItem {
@@ -34,6 +57,7 @@ export interface ConversionItem {
 
 export interface ConversionSnapshot {
   phase: ConversionPhase;
+  selection: Omit<RawImportSelection, "displayName" | "profiles">;
   items: ConversionItem[];
   completed: number;
   failed: number;
@@ -52,6 +76,7 @@ export function conversionControls(
   snapshot: ConversionSnapshot | null,
   inputCount: number,
   outputSelected: boolean,
+  profileSelected: boolean,
   busy: boolean,
 ): ConversionControls {
   const active =
@@ -59,11 +84,16 @@ export function conversionControls(
   const hasReadyItem =
     snapshot?.items.some((item) => item.status === "ready") === true;
   return {
-    preflight: !busy && !active && inputCount > 0 && outputSelected,
+    preflight:
+      !busy && !active && inputCount > 0 && outputSelected && profileSelected,
     start: !busy && snapshot?.phase === "planned" && hasReadyItem,
     stopAfterCurrent: !busy && snapshot?.phase === "running",
     changeSelection: !busy && !active,
   };
+}
+
+export function rawImportProfileKey(profile: RawImportProfile): string {
+  return `${profile.codecFamily}\u0000${profile.profile}\u0000${profile.profileVersion}`;
 }
 
 export function conversionIsActive(

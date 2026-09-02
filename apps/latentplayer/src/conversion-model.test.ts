@@ -13,6 +13,17 @@ function snapshot(
 ): ConversionSnapshot {
   return {
     phase,
+    selection: {
+      packageId: "org.example.codec",
+      packageVersion: "0.2.0",
+      adapterId: "org.example.codec.adapter",
+      adapterVersion: "0.2.0",
+      profile: {
+        codecFamily: "example_codec",
+        profile: "example_latent",
+        profileVersion: "0.1.0",
+      },
+    },
     items: [
       {
         sourceName: "clip.safetensors",
@@ -32,29 +43,39 @@ function snapshot(
 
 describe("conversion controls", () => {
   it("moves a prepared batch through start and stop-after-current states", () => {
-    expect(conversionControls(null, 0, false, false)).toEqual({
+    expect(conversionControls(null, 0, false, false, false)).toEqual({
       preflight: false,
       start: false,
       stopAfterCurrent: false,
       changeSelection: true,
     });
-    expect(conversionControls(null, 2, true, false).preflight).toBe(true);
-    expect(conversionControls(snapshot("planned"), 2, true, false)).toEqual({
+    expect(conversionControls(null, 2, true, true, false).preflight).toBe(true);
+    expect(conversionControls(null, 2, true, false, false).preflight).toBe(
+      false,
+    );
+    expect(
+      conversionControls(snapshot("planned"), 2, true, true, false),
+    ).toEqual({
       preflight: true,
       start: true,
       stopAfterCurrent: false,
       changeSelection: true,
     });
     expect(
-      conversionControls(snapshot("planned", "failed"), 2, true, false).start,
+      conversionControls(snapshot("planned", "failed"), 2, true, true, false)
+        .start,
     ).toBe(false);
-    expect(conversionControls(snapshot("running"), 2, true, false)).toEqual({
+    expect(
+      conversionControls(snapshot("running"), 2, true, true, false),
+    ).toEqual({
       preflight: false,
       start: false,
       stopAfterCurrent: true,
       changeSelection: false,
     });
-    expect(conversionControls(snapshot("stopping"), 2, true, false)).toEqual({
+    expect(
+      conversionControls(snapshot("stopping"), 2, true, true, false),
+    ).toEqual({
       preflight: false,
       start: false,
       stopAfterCurrent: false,

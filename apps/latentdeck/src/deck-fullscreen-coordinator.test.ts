@@ -10,7 +10,7 @@ describe("Deck fullscreen coordinator", () => {
     const enterGate = deferred<void>();
     const exitGate = deferred<void>();
     const events: string[] = [];
-    let activeSurface: DeckSurface = "d2";
+    let activeSurface: DeckSurface = "deck";
     let hostFullscreen = false;
 
     const pendingEnter = coordinator.run(async () => {
@@ -21,13 +21,13 @@ describe("Deck fullscreen coordinator", () => {
       return true;
     });
     const transition = coordinator.transition({
-      target: "q4",
+      target: "library",
       current: () => activeSurface,
-      leave: async (surface) => {
-        events.push(`exit:${surface}:start`);
+      leave: async () => {
+        events.push("exit:deck:start");
         await exitGate.promise;
         hostFullscreen = false;
-        events.push(`exit:${surface}:done`);
+        events.push("exit:deck:done");
       },
       commit: (surface) => {
         activeSurface = surface;
@@ -40,27 +40,57 @@ describe("Deck fullscreen coordinator", () => {
     });
 
     await Promise.resolve();
-    expect(activeSurface).toBe("d2");
+    expect(activeSurface).toBe("deck");
     expect(events).toEqual(["enter:start"]);
 
     enterGate.resolve();
     await pendingEnter;
-    await waitUntil(() => events.includes("exit:d2:start"));
-    expect(activeSurface).toBe("d2");
+    await waitUntil(() => events.includes("exit:deck:start"));
+    expect(activeSurface).toBe("deck");
     expect(events).not.toContain("incoming:status");
 
     exitGate.resolve();
     await transition;
     expect(await incomingStatus).toBe(false);
-    expect(activeSurface).toBe("q4");
+    expect(activeSurface).toBe("library");
     expect(events).toEqual([
       "enter:start",
       "enter:done",
-      "exit:d2:start",
-      "exit:d2:done",
-      "commit:q4",
+      "exit:deck:start",
+      "exit:deck:done",
+      "commit:library",
       "incoming:status",
     ]);
+  });
+
+  it("treats Extensions as a host surface without inventing a fullscreen Deck", async () => {
+    const coordinator = createDeckFullscreenCoordinator();
+    const left: string[] = [];
+    let activeSurface: DeckSurface = "deck";
+
+    await coordinator.transition({
+      target: "extensions",
+      current: () => activeSurface,
+      leave: async () => {
+        left.push("deck");
+      },
+      commit: (surface) => {
+        activeSurface = surface;
+      },
+    });
+    await coordinator.transition({
+      target: "library",
+      current: () => activeSurface,
+      leave: async () => {
+        left.push("deck");
+      },
+      commit: (surface) => {
+        activeSurface = surface;
+      },
+    });
+
+    expect(left).toEqual(["deck"]);
+    expect(activeSurface).toBe("library");
   });
 });
 

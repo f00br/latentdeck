@@ -115,8 +115,7 @@ class H3ResampleSpool:
             raise ResampleSpoolError("one H3 slot exceeds the visual-byte limit")
 
         root = Path(temporary_root)
-        root.mkdir(parents=True, exist_ok=True)
-        if not root.is_dir():
+        if root.is_symlink() or not root.is_dir():
             raise ResampleSpoolError("resample temporary root is not a directory")
         self._root = root.resolve(strict=True)
         self._raw_path = self._root / f"{self._capture_id}.visual.f16.partial"
@@ -136,6 +135,12 @@ class H3ResampleSpool:
     @property
     def latent_slots(self) -> int:
         return self._latent_slots
+
+    @property
+    def can_finish(self) -> bool:
+        """Whether the staged slot count is the next codec-valid H3 boundary."""
+
+        return self._latent_slots >= 2 and (self._latent_slots - 2) % 5 == 0
 
     def append_slot(self, slot: torch.Tensor) -> None:
         """Append one exact finite F16 operator output without retaining it."""
@@ -171,7 +176,7 @@ class H3ResampleSpool:
         """Finalize a complete ``T=2+5n`` visual Safetensors partial."""
 
         raw = self._require_open()
-        if self._latent_slots < 2 or (self._latent_slots - 2) % 5 != 0:
+        if not self.can_finish:
             raise ResampleSpoolError("H3 resample length must be 2 + 5n latent slots")
 
         visual_bytes = self._latent_slots * self._slot_bytes

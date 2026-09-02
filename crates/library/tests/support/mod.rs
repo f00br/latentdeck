@@ -99,6 +99,107 @@ pub fn write_synthetic_lc(path: &Path, cartridge_id: &str) -> Vec<u8> {
     bytes
 }
 
+pub fn write_synthetic_non_h3_lc(path: &Path, cartridge_id: &str) -> Vec<u8> {
+    write_synthetic_non_h3_lc_with_duration(path, cartridge_id, 1, 1)
+}
+
+pub fn write_synthetic_non_h3_lc_with_duration(
+    path: &Path,
+    cartridge_id: &str,
+    duration_numerator: u64,
+    duration_denominator: u64,
+) -> Vec<u8> {
+    let tensor_bytes = vec![0_u8; 7 * 3 * 4];
+    let mut header = format!(
+        r#"{{"latent_state":{{"data_offsets":[0,{}],"dtype":"F32","shape":[1,7,1,3,1]}}}}"#,
+        tensor_bytes.len()
+    )
+    .into_bytes();
+    while !header.len().is_multiple_of(8) {
+        header.push(b' ');
+    }
+    let mut payload = Vec::with_capacity(8 + header.len() + tensor_bytes.len());
+    payload.extend_from_slice(
+        &u64::try_from(header.len())
+            .expect("synthetic header length")
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(&header);
+    payload.extend_from_slice(&tensor_bytes);
+
+    let measured = hash_reader(&mut Cursor::new(&payload)).expect("payload hash");
+    let manifest_value = serde_json::json!({
+        "spec_version": "0.1.0",
+        "cartridge_id": cartridge_id,
+        "codec": {
+            "family": "synthetic_test",
+            "profile": "non_h3_latent",
+            "profile_version": "0.2.0"
+        },
+        "payloads": [{
+            "path": "payloads/synthetic.safetensors",
+            "media_type": "application/vnd.safetensors",
+            "byte_length": measured.byte_length,
+            "sha256": measured.sha256.to_string()
+        }],
+        "tensors": [{
+            "stream": "visual",
+            "name": "latent_state",
+            "payload": "payloads/synthetic.safetensors",
+            "storage_dtype": "F32",
+            "runtime_dtype": "F32",
+            "shape": [1, 7, 1, 3, 1]
+        }],
+        "timing": {
+            "contract": "synthetic_step",
+            "contract_version": "0.2.0",
+            "decoded_video": {
+                "width": 3,
+                "height": 1,
+                "frame_count": 1,
+                "frame_rate": {"numerator": 1, "denominator": 1},
+                "duration": {
+                    "numerator": duration_numerator,
+                    "denominator": duration_denominator
+                }
+            }
+        },
+        "audio": {"policy": "source_absent"},
+        "provenance": {
+            "created_by": {"name": "latentdeck-library-tests", "version": "0.2.0"},
+            "sources": []
+        },
+        "parent_cartridges": [],
+        "operation_history": []
+    });
+    let raw_manifest = serde_json::to_vec(&manifest_value).expect("manifest JSON");
+    let manifest = parse_manifest_json(&raw_manifest, &ValidationLimits::default())
+        .expect("synthetic non-H3 manifest");
+    let manifest_bytes = canonical_json_bytes(&manifest).expect("canonical manifest");
+
+    let mut manifest_reader = Cursor::new(&manifest_bytes);
+    let mut payload_reader = Cursor::new(&payload);
+    let mut entries = [
+        EntryWrite::new(
+            "manifest.json",
+            u64::try_from(manifest_bytes.len()).expect("manifest length"),
+            payload_crc32(&manifest_bytes),
+            &mut manifest_reader,
+        ),
+        EntryWrite::new(
+            "payloads/synthetic.safetensors",
+            u64::try_from(payload.len()).expect("payload length"),
+            payload_crc32(&payload),
+            &mut payload_reader,
+        ),
+    ];
+    let mut archive = Cursor::new(Vec::new());
+    write_canonical(&mut archive, &mut entries).expect("synthetic non-H3 archive");
+    let bytes = archive.into_inner();
+    fs::write(path, &bytes).expect("write synthetic non-H3 cartridge");
+    bytes
+}
+
 pub const ID_A: &str = "550e8400-e29b-41d4-a716-446655440000";
 pub const ID_B: &str = "550e8400-e29b-41d4-a716-446655440001";
 pub const ID_C: &str = "550e8400-e29b-41d4-a716-446655440002";

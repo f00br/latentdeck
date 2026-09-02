@@ -29,7 +29,7 @@ const CENTRAL_ZIP64_EXTRA_BYTES: u16 = 28;
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 const COPY_BUFFER_BYTES_U64: u64 = 64 * 1024;
 
-const REQUIRED_NAMES: [&str; 2] = ["manifest.json", "payloads/h3.safetensors"];
+const MANIFEST_NAME: &str = "manifest.json";
 const OPTIONAL_PREVIEW_NAME: &str = "preview.webp";
 
 /// One source entry for deterministic archive creation.
@@ -182,8 +182,15 @@ fn validate_write_entries(entries: &[EntryWrite<'_>]) -> Result<()> {
 
 fn validate_entry_order<'a>(names: impl Iterator<Item = &'a str>) -> Result<()> {
     let names = names.collect::<Vec<_>>();
-    let valid = names.as_slice() == REQUIRED_NAMES
-        || names.as_slice() == [REQUIRED_NAMES[0], REQUIRED_NAMES[1], OPTIONAL_PREVIEW_NAME];
+    let valid = match names.as_slice() {
+        [manifest, payload] => *manifest == MANIFEST_NAME && is_payload_name(payload),
+        [manifest, payload, preview] => {
+            *manifest == MANIFEST_NAME
+                && is_payload_name(payload)
+                && *preview == OPTIONAL_PREVIEW_NAME
+        }
+        _ => false,
+    };
     if valid {
         Ok(())
     } else {
@@ -196,9 +203,9 @@ fn validate_entry_order<'a>(names: impl Iterator<Item = &'a str>) -> Result<()> 
 
 fn validate_entry_size(name: &str, size: u64) -> Result<()> {
     let maximum = match name {
-        "manifest.json" => u64::try_from(MAX_MANIFEST_BYTES).expect("manifest limit fits u64"),
-        "payloads/h3.safetensors" => MAX_H3_PAYLOAD_BYTES,
+        MANIFEST_NAME => u64::try_from(MAX_MANIFEST_BYTES).expect("manifest limit fits u64"),
         OPTIONAL_PREVIEW_NAME => MAX_PREVIEW_BYTES,
+        _ if is_payload_name(name) => MAX_H3_PAYLOAD_BYTES,
         _ => {
             return Err(CartridgeError::new(
                 ErrorCode::EntryUnexpected,
@@ -215,6 +222,29 @@ fn validate_entry_size(name: &str, size: u64) -> Result<()> {
         .at_entry(name));
     }
     Ok(())
+}
+
+fn is_payload_name(name: &str) -> bool {
+    let Some(payload_id) = name
+        .strip_prefix("payloads/")
+        .and_then(|value| value.strip_suffix(".safetensors"))
+    else {
+        return false;
+    };
+    let length = payload_id.len();
+    (1..=128).contains(&length)
+        && payload_id.is_ascii()
+        && payload_id.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        })
+        && payload_id
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && payload_id
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric)
 }
 
 fn validate_safe_name(name: &str) -> Result<()> {

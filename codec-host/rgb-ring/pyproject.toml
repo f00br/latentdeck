@@ -1,7 +1,7 @@
 [project]
 name = "latentdeck-rgb-ring"
 version = "0.1.0"
-description = "Native worker-side producer for LatentDeck RGB Ring ABI 1."
+description = "Native worker-side producer for LatentDeck RGB Ring ABI 1 and 2."
 requires-python = ">=3.13,<3.14"
 license = "Apache-2.0"
 dependencies = []

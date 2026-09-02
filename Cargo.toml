@@ -7,6 +7,8 @@ members = [
   "crates/codec-pack-installer",
   "crates/control",
   "crates/core",
+  "crates/deck-runtime-contracts",
+  "crates/extension-manager",
   "crates/gpu",
   "crates/gpu-python",
   "crates/library",

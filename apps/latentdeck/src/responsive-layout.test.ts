@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import tauriConfigSource from "../src-tauri/tauri.conf.json?raw";
-import d2Faceplate from "./D2Faceplate.svelte?raw";
-import q4Faceplate from "./Q4Faceplate.svelte?raw";
+import rendererSource from "./DeckFaceplateRenderer.svelte?raw";
+import workspaceSource from "./GenericDeckWorkspace.svelte?raw";
 
 const tauriConfig = JSON.parse(tauriConfigSource) as {
   app: { windows: Array<{ minWidth: number }> };
@@ -19,61 +19,47 @@ describe("LatentDeck minimum-window layout contract", () => {
     expect(tauriConfig.app.windows[0]?.minWidth).toBe(960);
   });
 
-  it("collapses D2 Bank content before the 960px app minimum", () => {
-    const responsive = mediaBlock(d2Faceplate, 1120);
-    expect(responsive).toContain(".d2-bank-strip {");
-    expect(responsive).toContain(
-      "grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);",
-    );
-    expect(responsive).toContain(".d2-bank-strip > * {");
-    expect(responsive).toContain(".d2-bank-strip select {");
-    expect(responsive).toContain(".d2-preset-controls {");
-    expect(responsive).toContain("grid-column: 1 / -1;");
+  it("collapses generic host tools before the 960px app minimum", () => {
+    const responsive = mediaBlock(workspaceSource, 1180);
+    expect(responsive).toContain(".host-tools");
+    expect(responsive).toContain("grid-template-columns: 1fr 1fr;");
+    expect(responsive).toContain(".preset-tools");
+    expect(responsive).toContain(".spout-tools");
+    expect(responsive).toContain(".recording-tools");
   });
 
-  it("keeps D2 decoded output inside a revisioned native viewport", () => {
-    expect(d2Faceplate).toContain('data-native-viewport="d2"');
-    expect(d2Faceplate).toContain("new ResizeObserver(scheduleViewportSync)");
-    expect(d2Faceplate).toContain(
-      'globalThis.addEventListener("scroll", scheduleViewportSync, true)',
+  it("keeps every Deck output inside one revisioned native viewport", () => {
+    expect(rendererSource).toContain("data-native-viewport={model.exactKey}");
+    expect(workspaceSource).toContain("new ResizeObserver(");
+    expect(workspaceSource).toContain(
+      'globalThis.addEventListener("scroll", resize, true)',
     );
-    expect(d2Faceplate).toContain("d2Client.viewportSetBounds(bounds)");
-    expect(d2Faceplate).toContain("hiddenEmbeddedViewportBounds(");
-    expect(d2Faceplate).toContain("!viewportReady ||");
-    expect(d2Faceplate).toMatch(
-      /\.d2-output-monitor\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s,
+    expect(workspaceSource).toContain("genericDeckClient.viewportSetBounds(");
+    expect(workspaceSource).toContain("hiddenEmbeddedViewportBounds(");
+    expect(rendererSource).toMatch(
+      /\.monitor-section\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s,
     );
-    expect(d2Faceplate).not.toMatch(
+    expect(rendererSource).not.toMatch(
       /<canvas|<video|ImageData|createImageBitmap/i,
     );
   });
 
-  it("gives the D2 viewport the only fullscreen faceplate row", () => {
-    expect(d2Faceplate).toContain("class:fullscreen-faceplate={active &&");
-    expect(d2Faceplate).toMatch(
-      /\.fullscreen-faceplate \.d2-output-monitor\s*\{[^}]*grid-template-rows:\s*minmax\(0, 1fr\);/s,
+  it("gives the declarative monitor the only fullscreen faceplate row", () => {
+    expect(rendererSource).toContain(
+      "class:fullscreen={active && outputFullscreen === true && runtimeLoaded}",
     );
-    expect(d2Faceplate).toContain("await tick();");
-    expect(d2Faceplate).toContain("scheduleViewportSync();");
+    expect(rendererSource).toContain(
+      ".fullscreen .faceplate-section:not(.monitor-section)",
+    );
+    expect(rendererSource).toContain(".fullscreen .monitor-section");
+    expect(workspaceSource).toContain("scheduleViewportSync();");
   });
 
-  it("collapses Q4 Bank content before the 960px app minimum", () => {
-    const responsive = mediaBlock(q4Faceplate, 1180);
-    expect(responsive).toContain(".bank-strip {");
-    expect(responsive).toContain(
-      "grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);",
+  it("keeps generic output visible while declarative controls scroll", () => {
+    expect(rendererSource).toMatch(
+      /\.monitor-section\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s,
     );
-    expect(responsive).toContain(".bank-strip > * {");
-    expect(responsive).toContain(".bank-strip select {");
-    expect(responsive).toContain(".preset-controls {");
-    expect(responsive).toContain("grid-column: 1 / -1;");
-  });
-
-  it("keeps Q4 output visible while its controls scroll", () => {
-    expect(q4Faceplate).toMatch(
-      /\.q4-output-monitor\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s,
-    );
-    expect(q4Faceplate).toContain("viewportEpoch !== null");
-    expect(q4Faceplate).toContain("viewportApplied?.visible === true");
+    expect(workspaceSource).toContain("viewportEpoch");
+    expect(workspaceSource).toContain("viewportApplied = bounds");
   });
 });

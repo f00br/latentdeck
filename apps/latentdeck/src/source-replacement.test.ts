@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import d2Faceplate from "./D2Faceplate.svelte?raw";
-import q4Faceplate from "./Q4Faceplate.svelte?raw";
+import rendererSource from "./DeckFaceplateRenderer.svelte?raw";
+import workspaceSource from "./GenericDeckWorkspace.svelte?raw";
 import { setSlotPlaying, type D2Transport } from "./d2-model";
 import { setQ4SlotPlaying, type Q4Transport } from "./q4-model";
 import {
@@ -70,13 +70,13 @@ describe("explicit captured-source replacement", () => {
     });
   });
 
-  it("wires changed drafts to an explicit Load + Play action in both Decks", () => {
-    for (const faceplate of [d2Faceplate, q4Faceplate]) {
-      expect(faceplate).toContain("playDraftAwareSlot");
-      expect(faceplate).toContain("transportForDraftLoad");
-      expect(faceplate).toContain("Load + Play");
-      expect(faceplate).toContain("openDeck(slot)");
-    }
+  it("keeps generic source edits as a next-load draft until exact Load", () => {
+    expect(rendererSource).toContain(
+      "draft.sourceArchiveSha256s[slotIndex] = archiveSha256",
+    );
+    expect(rendererSource).toContain("Load exact Deck draft");
+    expect(workspaceSource).toContain("buildGenericDeckOpenDraft(");
+    expect(workspaceSource).toContain("genericDeckClient.open({");
   });
 
   it("changes only the requested draft slot", () => {
@@ -127,27 +127,11 @@ describe("explicit captured-source replacement", () => {
     expect(transitions).toEqual([true, false, true, false]);
   });
 
-  it("offers an explicit per-slot capture action with a bounded restart notice", () => {
-    expect(d2Faceplate).toContain(
-      "async function useCapturedSource(slot: D2Slot)",
+  it("publishes completed captures back into the generic Library source bank", () => {
+    expect(workspaceSource).toContain("publishCompletedCapture(capture)");
+    expect(workspaceSource).toContain(
+      "onLibraryChanged(await librarySnapshot())",
     );
-    expect(d2Faceplate).toContain('useCapturedSource("A")');
-    expect(d2Faceplate).toContain('useCapturedSource("B")');
-    expect(d2Faceplate).toContain("Use capture in A");
-
-    expect(q4Faceplate).toContain(
-      "async function useCapturedSource(slot: Q4Slot)",
-    );
-    expect(q4Faceplate).toContain("{#each Q4_SLOTS as slot (slot)}");
-    expect(q4Faceplate).toContain("useCapturedSource(slot)");
-    expect(q4Faceplate).toContain("Use capture in {slot}");
-
-    for (const faceplate of [d2Faceplate, q4Faceplate]) {
-      expect(faceplate).toContain("bounded worker restart");
-      expect(faceplate).toContain("causal state restarts");
-      expect(faceplate).toContain("createExclusiveOperationGate");
-      expect(faceplate).toContain("retainDraftSourceOptions");
-      expect(faceplate).toContain("sourceReplaceBusy");
-    }
+    expect(rendererSource).toContain("{#each sourceOptions as option");
   });
 });

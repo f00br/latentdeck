@@ -1,11 +1,11 @@
 [project]
 name = "latentdeck-operator-q4"
-version = "0.1.0"
+version = "0.2.0"
 description = "Trusted built-in LD-Q4 carrier-donor synthesis operator for LatentDeck."
 requires-python = ">=3.13,<3.14"
 license = "Apache-2.0"
 dependencies = [
-    "latentdeck-codec-host==0.1.0",
+    "latentdeck-deck-sdk==0.2.0",
 ]
 
 [project.optional-dependencies]
@@ -20,11 +20,8 @@ test = [
 requires = ["uv-build==0.12.7"]
 build-backend = "uv_build"
 
-[tool.uv-build]
-package-data = [
-    "src/latentdeck_operator_q4/descriptor.json",
-    "src/latentdeck_operator_q4/descriptor.schema.json",
-]
+[tool.uv.build-backend]
+module-root = "package/python"
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers --import-mode=importlib"

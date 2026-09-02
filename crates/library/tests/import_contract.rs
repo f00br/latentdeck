@@ -8,7 +8,7 @@ use latentdeck_library::{
 };
 use tempfile::tempdir;
 
-use support::{ID_A, ID_B, ID_C, write_synthetic_lc};
+use support::{ID_A, ID_B, ID_C, write_synthetic_lc, write_synthetic_non_h3_lc_with_duration};
 
 #[test]
 fn full_validation_import_is_persistent_and_deduplicates_archive_identity() {
@@ -171,4 +171,22 @@ fn invalid_import_errors_do_not_echo_machine_paths() {
     assert!(!rendered.contains("private-name"));
     assert!(!rendered.contains(&temp.path().to_string_lossy().to_string()));
     assert!(error.cartridge_code.is_some());
+}
+
+#[test]
+fn malformed_codec_neutral_geometry_never_enters_the_index() {
+    let temp = tempdir().expect("tempdir");
+    let path = temp.path().join("contradictory-timing.lc");
+    write_synthetic_non_h3_lc_with_duration(&path, ID_C, 2, 1);
+    let mut library = Library::in_memory().expect("library");
+
+    let error = library
+        .import_file(&path)
+        .expect_err("contradictory generic timing must be rejected before insert");
+
+    assert_eq!(error.cartridge_code.as_deref(), Some("timing_mismatch"));
+    let all = library
+        .query_collection(&CollectionId::all_cartridges(), &QueryOptions::default())
+        .expect("empty index remains queryable");
+    assert!(all.is_empty());
 }

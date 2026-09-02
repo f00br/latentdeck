@@ -10,8 +10,16 @@ description = "LatentDeck desktop synthesis instrument"
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 spout-sdk = ["latentdeck-native-output/spout-sdk"]
+private-protocol2-gpu-e2e = ["spout-sdk"]
+
+[[bin]]
+name = "latentdeck-private-protocol2-gpu-e2e"
+path = "src/private_protocol2_gpu_e2e_main.rs"
+required-features = ["private-protocol2-gpu-e2e"]
 
 [build-dependencies]
+latentdeck-extension-manager = { path = "../../../crates/extension-manager" }
+serde_json.workspace = true
 tauri-build.workspace = true
 
 [dependencies]
@@ -19,6 +27,8 @@ atomicwrites.workspace = true
 latentdeck-cartridge = { path = "../../../crates/cartridge" }
 latentdeck-control = { path = "../../../crates/control" }
 latentdeck-core = { path = "../../../crates/core" }
+latentdeck-deck-runtime-contracts = { path = "../../../crates/deck-runtime-contracts" }
+latentdeck-extension-manager = { path = "../../../crates/extension-manager" }
 latentdeck-gpu = { path = "../../../crates/gpu" }
 latentdeck-library = { path = "../../../crates/library" }
 latentdeck-native-output = { path = "../../../crates/native-output" }
@@ -26,12 +36,15 @@ latentdeck-output-mp4 = { path = "../../../crates/output-mp4" }
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tauri.workspace = true
 tauri-plugin-dialog.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
+rmp-serde.workspace = true
 uuid.workspace = true
 wgpu.workspace = true
 

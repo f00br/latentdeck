@@ -162,7 +162,7 @@ class H3Decoder:
     def decode_slot(self, slot: Any) -> tuple[bytes, ...]:
         """Decode one already-processed F16 H3 slot into RGBA8 frames.
 
-        This is the D2/Q4 pre-decode boundary. The caller owns latent math;
+        This is the generic Deck pre-decode boundary. The caller owns latent math;
         this method never converts RGB back into a latent or changes spatial
         geometry.
         """

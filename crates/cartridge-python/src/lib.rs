@@ -8,6 +8,7 @@ use std::{
 };
 
 use latentdeck_cartridge::{
+    access::{IntegrityAccessReceipt, IntegrityTensorAccess},
     authoring::{RawH3AuthoringOptions, inspect_raw_h3, pack_raw_h3_atomic},
     error::{CartridgeError as CoreError, ErrorCode, Result as CoreResult},
     hash::{hash_path, hash_reader},
@@ -20,7 +21,10 @@ use latentdeck_cartridge::{
     },
     preview::inspect_webp,
     profile::h3,
-    reader::{InspectOptions, ValidationOptions, inspect_path, open_validated},
+    reader::{
+        InspectOptions, IntegrityValidatedCartridge, ValidationOptions, inspect_path,
+        open_integrity_validated, open_validated,
+    },
     safetensor::{
         EntryRange, H3SafetensorsPreflight, SafetensorDType, SafetensorTensorDescriptor,
         preflight_h3_safetensors, scan_h3_safetensors_finite,
@@ -31,7 +35,11 @@ use pyo3::{exceptions::PyException, prelude::*, types::PyBytes};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+#[cfg(windows)]
+mod windows_handle;
+
 const BINDING_ABI_VERSION: &str = "0.1";
+const INTEGRITY_HANDLE_ABI_VERSION: &str = "2";
 
 /// One native exception with stable Rust error metadata.
 #[pyclass(extends=PyException, module = "latentdeck_cartridge._native")]
@@ -71,6 +79,502 @@ impl CartridgeError {
     fn __str__(&self) -> String {
         format!("{}: {}", self.code, self.detail)
     }
+}
+
+/// Retained native access to one fully integrity-validated LC handle.
+///
+/// The original path is never exposed to adapter code after construction, and
+/// every read remains bounded to a tensor range validated by Rust.
+#[pyclass(module = "latentdeck_cartridge._native")]
+struct ValidatedCartridgeHandle {
+    backing: ValidatedCartridgeBacking,
+}
+
+enum ValidatedCartridgeBacking {
+    LocallyValidated(Box<IntegrityValidatedCartridge>),
+    Duplicated(Box<DuplicatedIntegrityHandle>),
+}
+
+struct DuplicatedIntegrityHandle {
+    file: File,
+    receipt: IntegrityAccessReceipt,
+    manifest_json: String,
+}
+
+#[pymethods]
+impl ValidatedCartridgeHandle {
+    fn manifest_json(&self) -> PyResult<String> {
+        match &self.backing {
+            ValidatedCartridgeBacking::LocallyValidated(cartridge) => {
+                serde_json::to_string(cartridge.manifest())
+                    .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
+            }
+            ValidatedCartridgeBacking::Duplicated(cartridge) => Ok(cartridge.manifest_json.clone()),
+        }
+    }
+
+    fn validation_json(&self) -> PyResult<String> {
+        let receipt = match &self.backing {
+            ValidatedCartridgeBacking::LocallyValidated(cartridge) => cartridge.receipt(),
+            ValidatedCartridgeBacking::Duplicated(cartridge) => &cartridge.receipt.validation,
+        };
+        serde_json::to_string(receipt)
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
+    }
+
+    fn integrity_access_receipt_json(&self) -> PyResult<String> {
+        let receipt = match &self.backing {
+            ValidatedCartridgeBacking::LocallyValidated(cartridge) => cartridge.access_receipt(),
+            ValidatedCartridgeBacking::Duplicated(cartridge) => &cartridge.receipt,
+        };
+        receipt
+            .canonical_json()
+            .and_then(|encoded| {
+                String::from_utf8(encoded).map_err(|error| {
+                    CoreError::new(
+                        ErrorCode::ManifestJsonInvalid,
+                        "integrity access receipt is not UTF-8",
+                    )
+                    .with_source(error)
+                })
+            })
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
+    }
+
+    fn tensor_names(&self) -> Vec<String> {
+        match &self.backing {
+            ValidatedCartridgeBacking::LocallyValidated(cartridge) => {
+                cartridge.safetensors().tensors.keys().cloned().collect()
+            }
+            ValidatedCartridgeBacking::Duplicated(cartridge) => {
+                cartridge.receipt.tensors.keys().cloned().collect()
+            }
+        }
+    }
+
+    fn tensor_descriptors_json(&self) -> PyResult<String> {
+        let receipt = match &self.backing {
+            ValidatedCartridgeBacking::LocallyValidated(cartridge) => cartridge.access_receipt(),
+            ValidatedCartridgeBacking::Duplicated(cartridge) => &cartridge.receipt,
+        };
+        let descriptors: BTreeMap<_, _> = receipt
+            .tensors
+            .iter()
+            .map(|(name, tensor)| {
+                (
+                    name,
+                    json!({
+                        "dtype": tensor.dtype,
+                        "shape": tensor.shape,
+                        "byte_length": tensor.byte_length,
+                    }),
+                )
+            })
+            .collect();
+        serde_json::to_string(&descriptors)
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
+    }
+
+    #[pyo3(signature = (name, max_tensor_bytes=None))]
+    fn read_tensor(
+        &mut self,
+        py: Python<'_>,
+        name: &str,
+        max_tensor_bytes: Option<u64>,
+    ) -> PyResult<Py<PyBytes>> {
+        let bytes = match &mut self.backing {
+            ValidatedCartridgeBacking::LocallyValidated(cartridge) => {
+                read_locally_validated_tensor(cartridge, name, max_tensor_bytes)
+            }
+            ValidatedCartridgeBacking::Duplicated(cartridge) => {
+                cartridge.read_tensor(name, max_tensor_bytes)
+            }
+        }
+        .map_err(|error| into_py_error(py, &error))?;
+        Ok(PyBytes::new(py, &bytes).unbind())
+    }
+
+    #[pyo3(signature = (name, offset, byte_length, max_read_bytes=None))]
+    fn read_tensor_range(
+        &mut self,
+        py: Python<'_>,
+        name: &str,
+        offset: u64,
+        byte_length: u64,
+        max_read_bytes: Option<u64>,
+    ) -> PyResult<Py<PyBytes>> {
+        let bytes = match &mut self.backing {
+            ValidatedCartridgeBacking::LocallyValidated(cartridge) => {
+                read_locally_validated_tensor_range(
+                    cartridge,
+                    name,
+                    offset,
+                    byte_length,
+                    max_read_bytes,
+                )
+            }
+            ValidatedCartridgeBacking::Duplicated(cartridge) => {
+                cartridge.read_tensor_range(name, offset, byte_length, max_read_bytes)
+            }
+        }
+        .map_err(|error| into_py_error(py, &error))?;
+        Ok(PyBytes::new(py, &bytes).unbind())
+    }
+}
+
+#[pyfunction]
+fn open_integrity_handle(py: Python<'_>, path: &str) -> PyResult<ValidatedCartridgeHandle> {
+    open_integrity_validated(path, &ValidationOptions::default())
+        .map(|cartridge| ValidatedCartridgeHandle {
+            backing: ValidatedCartridgeBacking::LocallyValidated(Box::new(cartridge)),
+        })
+        .map_err(|error| into_py_error(py, &error))
+}
+
+/// Consume one target-process file handle duplicated by authenticated Core.
+///
+/// # Safety contract
+///
+/// `raw_handle` must be a live, owned, read-only Windows file handle intended
+/// for this process. Ownership is consumed exactly once, including on error.
+#[cfg(windows)]
+#[pyfunction]
+fn open_integrity_handle_from_raw(
+    py: Python<'_>,
+    raw_handle: u64,
+    integrity_access_receipt: &str,
+) -> PyResult<ValidatedCartridgeHandle> {
+    let raw_value = usize::try_from(raw_handle).map_err(|error| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "native handle does not fit usize: {error}"
+        ))
+    })?;
+    if raw_value == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "native handle must be nonzero",
+        ));
+    }
+    let file = windows_handle::consume_owned_file(raw_value);
+    DuplicatedIntegrityHandle::open(file, integrity_access_receipt.as_bytes())
+        .map(|cartridge| ValidatedCartridgeHandle {
+            backing: ValidatedCartridgeBacking::Duplicated(Box::new(cartridge)),
+        })
+        .map_err(|error| into_py_error(py, &error))
+}
+
+#[cfg(not(windows))]
+#[pyfunction]
+fn open_integrity_handle_from_raw(
+    _py: Python<'_>,
+    _raw_handle: u64,
+    _integrity_access_receipt: &str,
+) -> PyResult<ValidatedCartridgeHandle> {
+    Err(pyo3::exceptions::PyOSError::new_err(
+        "duplicated LC handles are supported only on Windows",
+    ))
+}
+
+fn read_locally_validated_tensor(
+    cartridge: &mut IntegrityValidatedCartridge,
+    name: &str,
+    max_tensor_bytes: Option<u64>,
+) -> CoreResult<Vec<u8>> {
+    let byte_length = cartridge
+        .safetensors()
+        .tensors
+        .get(name)
+        .ok_or_else(|| unexpected_tensor(name))?
+        .byte_length;
+    admit_tensor_allocation(name, byte_length, max_tensor_bytes)?;
+    let allocation = tensor_allocation(name, byte_length)?;
+    let mut bytes = Vec::with_capacity(allocation);
+    cartridge
+        .tensor_reader(name)?
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            CoreError::new(ErrorCode::IoRead, "cannot read validated tensor")
+                .at_tensor(name)
+                .with_source(error)
+        })?;
+    if bytes.len() != allocation {
+        return Err(truncated_tensor(name));
+    }
+    Ok(bytes)
+}
+
+fn read_locally_validated_tensor_range(
+    cartridge: &mut IntegrityValidatedCartridge,
+    name: &str,
+    offset: u64,
+    byte_length: u64,
+    max_read_bytes: Option<u64>,
+) -> CoreResult<Vec<u8>> {
+    let tensor_bytes = cartridge
+        .safetensors()
+        .tensors
+        .get(name)
+        .ok_or_else(|| unexpected_tensor(name))?
+        .byte_length;
+    validate_tensor_subrange(name, tensor_bytes, offset, byte_length)?;
+    admit_tensor_allocation(name, byte_length, max_read_bytes)?;
+    let allocation = tensor_allocation(name, byte_length)?;
+    let mut reader = cartridge.tensor_reader(name)?;
+    let skipped = std::io::copy(&mut reader.by_ref().take(offset), &mut std::io::sink()).map_err(
+        |error| {
+            CoreError::new(ErrorCode::IoRead, "cannot seek within validated tensor")
+                .at_tensor(name)
+                .with_source(error)
+        },
+    )?;
+    if skipped != offset {
+        return Err(truncated_tensor(name));
+    }
+    let mut bytes = vec![0_u8; allocation];
+    reader.read_exact(&mut bytes).map_err(|error| {
+        CoreError::new(ErrorCode::IoRead, "cannot read validated tensor range")
+            .at_tensor(name)
+            .with_source(error)
+    })?;
+    Ok(bytes)
+}
+
+impl DuplicatedIntegrityHandle {
+    fn open(file: File, encoded_receipt: &[u8]) -> CoreResult<Self> {
+        let archive_length = file
+            .metadata()
+            .map_err(|error| {
+                CoreError::new(ErrorCode::IoRead, "cannot inspect duplicated LC handle")
+                    .with_source(error)
+            })?
+            .len();
+        let receipt = IntegrityAccessReceipt::parse_json(encoded_receipt, archive_length)?;
+        let manifest_bytes = read_positioned_range(
+            &file,
+            receipt.manifest.offset,
+            receipt.manifest.byte_length,
+            "validated manifest",
+        )?;
+        let measured_manifest = hash_reader(&mut std::io::Cursor::new(&manifest_bytes))?;
+        if measured_manifest.sha256 != receipt.manifest.sha256
+            || measured_manifest.byte_length != receipt.manifest.byte_length
+        {
+            return Err(CoreError::new(
+                ErrorCode::PayloadHashMismatch,
+                "duplicated handle manifest does not match its access receipt",
+            )
+            .at_entry("manifest.json"));
+        }
+        let manifest = parse_manifest_json(&manifest_bytes, &ValidationLimits::default())?;
+        if latentdeck_cartridge::writer::canonical_json_bytes(&manifest)? != manifest_bytes {
+            return Err(CoreError::new(
+                ErrorCode::ManifestInvalid,
+                "duplicated handle manifest is not canonical JSON",
+            )
+            .at_entry("manifest.json"));
+        }
+        crosscheck_access_manifest(&receipt, &manifest)?;
+        let manifest_json = String::from_utf8(manifest_bytes).map_err(|error| {
+            CoreError::new(ErrorCode::ManifestJsonInvalid, "manifest JSON is not UTF-8")
+                .at_entry("manifest.json")
+                .with_source(error)
+        })?;
+        Ok(Self {
+            file,
+            receipt,
+            manifest_json,
+        })
+    }
+
+    fn read_tensor(&self, name: &str, max_tensor_bytes: Option<u64>) -> CoreResult<Vec<u8>> {
+        let tensor = self
+            .receipt
+            .tensors
+            .get(name)
+            .ok_or_else(|| unexpected_tensor(name))?;
+        admit_tensor_allocation(name, tensor.byte_length, max_tensor_bytes)?;
+        read_positioned_range(&self.file, tensor.offset, tensor.byte_length, name)
+            .map_err(|error| error.at_tensor(name))
+    }
+
+    fn read_tensor_range(
+        &self,
+        name: &str,
+        offset: u64,
+        byte_length: u64,
+        max_read_bytes: Option<u64>,
+    ) -> CoreResult<Vec<u8>> {
+        let tensor = self
+            .receipt
+            .tensors
+            .get(name)
+            .ok_or_else(|| unexpected_tensor(name))?;
+        validate_tensor_subrange(name, tensor.byte_length, offset, byte_length)?;
+        admit_tensor_allocation(name, byte_length, max_read_bytes)?;
+        let absolute_offset = tensor.offset.checked_add(offset).ok_or_else(|| {
+            CoreError::new(
+                ErrorCode::TensorSizeOverflow,
+                "validated tensor range offset overflowed",
+            )
+            .at_tensor(name)
+        })?;
+        read_positioned_range(&self.file, absolute_offset, byte_length, name)
+            .map_err(|error| error.at_tensor(name))
+    }
+}
+
+fn crosscheck_access_manifest(
+    receipt: &IntegrityAccessReceipt,
+    manifest: &ManifestV0_1,
+) -> CoreResult<()> {
+    let payload = manifest.payloads.first().ok_or_else(|| {
+        CoreError::new(
+            ErrorCode::TensorDescriptorMismatch,
+            "manifest has no payload for the access receipt",
+        )
+        .at_json("/payloads")
+    })?;
+    if manifest.payloads.len() != 1
+        || payload.path != receipt.validation.payload_path
+        || payload.byte_length != receipt.validation.payload_bytes
+        || payload.sha256.0 != receipt.validation.payload_sha256.to_string()
+        || manifest.tensors.len() != receipt.tensors.len()
+    {
+        return Err(CoreError::new(
+            ErrorCode::TensorDescriptorMismatch,
+            "manifest does not match the duplicated handle access receipt",
+        )
+        .at_json("/payloads"));
+    }
+    for descriptor in &manifest.tensors {
+        let tensor = receipt
+            .tensors
+            .get(&descriptor.name.0)
+            .ok_or_else(|| unexpected_tensor(&descriptor.name.0))?;
+        if descriptor.payload != payload.path
+            || descriptor.shape != tensor.shape
+            || !manifest_dtype_matches_access(descriptor.storage_dtype, tensor)
+        {
+            return Err(CoreError::new(
+                ErrorCode::TensorDescriptorMismatch,
+                "manifest tensor does not match its duplicated handle range",
+            )
+            .at_tensor(&descriptor.name.0));
+        }
+    }
+    Ok(())
+}
+
+const fn manifest_dtype_matches_access(dtype: DType, tensor: &IntegrityTensorAccess) -> bool {
+    matches!(
+        (dtype, tensor.dtype),
+        (DType::F16, SafetensorDType::F16) | (DType::F32, SafetensorDType::F32)
+    )
+}
+
+fn admit_tensor_allocation(name: &str, byte_length: u64, maximum: Option<u64>) -> CoreResult<()> {
+    if maximum.is_some_and(|maximum| byte_length > maximum) {
+        return Err(CoreError::new(
+            ErrorCode::RuntimeLimitExceeded,
+            "validated tensor exceeds the adapter admission bound",
+        )
+        .at_tensor(name));
+    }
+    Ok(())
+}
+
+fn validate_tensor_subrange(
+    name: &str,
+    tensor_bytes: u64,
+    offset: u64,
+    byte_length: u64,
+) -> CoreResult<()> {
+    if byte_length == 0
+        || offset
+            .checked_add(byte_length)
+            .is_none_or(|end| end > tensor_bytes)
+    {
+        return Err(CoreError::new(
+            ErrorCode::TensorDescriptorMismatch,
+            "requested range is outside the validated tensor",
+        )
+        .at_tensor(name));
+    }
+    Ok(())
+}
+
+fn tensor_allocation(name: &str, byte_length: u64) -> CoreResult<usize> {
+    usize::try_from(byte_length).map_err(|error| {
+        CoreError::new(
+            ErrorCode::RuntimeLimitExceeded,
+            "validated tensor byte length does not fit memory",
+        )
+        .at_tensor(name)
+        .with_source(error)
+    })
+}
+
+fn read_positioned_range(
+    file: &File,
+    offset: u64,
+    byte_length: u64,
+    name: &str,
+) -> CoreResult<Vec<u8>> {
+    let allocation = tensor_allocation(name, byte_length)?;
+    let mut bytes = vec![0_u8; allocation];
+    read_exact_at(file, &mut bytes, offset).map_err(|error| {
+        CoreError::new(ErrorCode::IoRead, "cannot read duplicated LC byte range").with_source(error)
+    })?;
+    Ok(bytes)
+}
+
+#[cfg(windows)]
+fn read_exact_at(file: &File, mut buffer: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+
+    while !buffer.is_empty() {
+        let read = file.seek_read(buffer, offset)?;
+        if read == 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+        }
+        offset = offset
+            .checked_add(u64::try_from(read).map_err(std::io::Error::other)?)
+            .ok_or_else(|| std::io::Error::other("positioned read offset overflow"))?;
+        buffer = &mut buffer[read..];
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_exact_at(file: &File, mut buffer: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+
+    while !buffer.is_empty() {
+        let read = file.read_at(buffer, offset)?;
+        if read == 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+        }
+        offset = offset
+            .checked_add(u64::try_from(read).map_err(std::io::Error::other)?)
+            .ok_or_else(|| std::io::Error::other("positioned read offset overflow"))?;
+        buffer = &mut buffer[read..];
+    }
+    Ok(())
+}
+
+fn unexpected_tensor(name: &str) -> CoreError {
+    CoreError::new(
+        ErrorCode::TensorUnexpected,
+        "tensor is not part of the validated LC envelope",
+    )
+    .at_tensor(name)
+}
+
+fn truncated_tensor(name: &str) -> CoreError {
+    CoreError::new(
+        ErrorCode::EntrySizeMismatch,
+        "validated tensor ended before its bounded range",
+    )
+    .at_tensor(name)
 }
 
 #[pyfunction]
@@ -1002,6 +1506,9 @@ fn into_py_error(py: Python<'_>, error: &CoreError) -> PyErr {
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<CartridgeError>()?;
+    module.add_class::<ValidatedCartridgeHandle>()?;
+    module.add_function(wrap_pyfunction!(open_integrity_handle, module)?)?;
+    module.add_function(wrap_pyfunction!(open_integrity_handle_from_raw, module)?)?;
     module.add_function(wrap_pyfunction!(inspect_json, module)?)?;
     module.add_function(wrap_pyfunction!(validate_json, module)?)?;
     module.add_function(wrap_pyfunction!(hash_json, module)?)?;
@@ -1011,5 +1518,6 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(pack_json, module)?)?;
     module.add_function(wrap_pyfunction!(pack_raw_h3_json, module)?)?;
     module.add("BINDING_ABI_VERSION", BINDING_ABI_VERSION)?;
+    module.add("INTEGRITY_HANDLE_ABI_VERSION", INTEGRITY_HANDLE_ABI_VERSION)?;
     Ok(())
 }

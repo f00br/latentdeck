@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 latentdeck-gpu = { path = "../gpu" }
 pyo3.workspace = true
+uuid.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]
 windows = { workspace = true, features = [

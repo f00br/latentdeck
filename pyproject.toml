@@ -1,7 +1,7 @@
 [project]
 name = "latentdeck-python-workspace"
 version = "0.1.0"
-description = "Shared Python workspace for LatentDeck codec and SDK packages."
+description = "Shared Python workspace for LatentDeck codecs, SDKs, operators, and Comfy packages."
 requires-python = ">=3.13,<3.14"
 license = "Apache-2.0"
 dependencies = []
@@ -25,15 +25,19 @@ members = [
     "operators/builtin/d2",
     "operators/builtin/q4",
     "operators/examples/channel-roll",
+    "sdk/codec-python",
+    "sdk/deck-python",
     "sdk/python",
 ]
 
 [tool.uv.sources]
 latentdeck-codec-host = { workspace = true }
+latentdeck-codec-sdk = { workspace = true }
 latentdeck-cartridge = { workspace = true }
 latentdeck-comfy-toolkit = { workspace = true }
 latentdeck-operator-d2 = { workspace = true }
 latentdeck-operator-q4 = { workspace = true }
+latentdeck-deck-sdk = { workspace = true }
 latentdeck-example-channel-roll = { workspace = true }
 latentdeck-rgb-ring = { workspace = true }
 torch = { index = "pytorch-cu130" }
@@ -54,6 +58,8 @@ testpaths = [
     "operators/builtin/d2/tests",
     "operators/builtin/q4/tests",
     "operators/examples/channel-roll/tests",
+    "sdk/codec-python/tests",
+    "sdk/deck-python/tests",
     "sdk/python/tests",
 ]
 

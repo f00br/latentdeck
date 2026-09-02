@@ -36,50 +36,6 @@ def command_envelope(sequence: int = 1, message_id: str = MESSAGE_ID) -> dict[st
     }
 
 
-def d2_controls() -> dict[str, object]:
-    return {
-        "algorithm": "LINEAR",
-        "mix": 0.5,
-        "mode": "HYBRIDIZE",
-        "routing": "A",
-        "interaction": 0.0,
-        "preserve": 0.55,
-        "chaos": 0.0,
-        "xs1_channel_a": 0,
-        "xs1_channel_b": 1,
-        "xs1_angle_degrees": 30.0,
-        "xs2_radius": 1,
-        "xs3_high_gain": 0.5,
-        "xs4_epsilon": 0.000001,
-        "xs5_routing": "TOPK",
-        "temperature": 0.12,
-        "top_k": 8,
-        "sinkhorn_iterations": 5,
-    }
-
-
-def d2_load_payload() -> dict[str, object]:
-    return {
-        "deck_id": "main-d2",
-        "operator_id": "org.latentdeck.builtin.ld_d2",
-        "operator_version": "0.1.0",
-        "source_a": {
-            "cartridge_path": "C:/private/a.lc",
-            "cartridge_id": "11111111-1111-4111-8111-111111111111",
-            "expected_archive_sha256": "a" * 64,
-        },
-        "source_b": {
-            "cartridge_path": "C:/private/b.lc",
-            "cartridge_id": "22222222-2222-4222-8222-222222222222",
-            "expected_archive_sha256": "b" * 64,
-        },
-        "controls": d2_controls(),
-        "transport": {"playing_a": True, "playing_b": True, "loop_a": True, "loop_b": True},
-        "seed": 42,
-        "stream_generation": 1,
-    }
-
-
 def test_bootstrap_roundtrip_is_bounded_and_secret_is_binary() -> None:
     bootstrap = Bootstrap(SESSION_ID, rf"\\.\pipe\LatentDeck.Worker.{SESSION_ID}", b"x" * 32)
     encoded = encode_bootstrap(bootstrap)
@@ -137,82 +93,12 @@ def test_command_schema_sequence_and_message_ids_are_strict() -> None:
         validator.validate_command(wrong)
 
 
-def test_d2_commands_have_closed_nested_wire_schemas() -> None:
+@pytest.mark.parametrize("name", ["deck.d2.status", "deck.q4.status"])
+def test_protocol1_rejects_legacy_deck_commands(name: str) -> None:
     envelope = command_envelope()
-    envelope["message"]["body"] = {  # type: ignore[index]
-        "name": "deck.d2.load",
-        "payload": d2_load_payload(),
-    }
-    assert SequenceValidator(SESSION_ID).validate_command(envelope)["name"] == "deck.d2.load"
-
-    unknown = command_envelope()
-    payload = d2_load_payload()
-    controls = payload["controls"]
-    assert isinstance(controls, dict)
-    controls["hidden_downscale"] = True
-    unknown["message"]["body"] = {"name": "deck.d2.load", "payload": payload}  # type: ignore[index]
-    with pytest.raises(ProtocolError, match="closed schema"):
-        SequenceValidator(SESSION_ID).validate_command(unknown)
-
-    nonfinite = command_envelope()
-    payload = d2_load_payload()
-    controls = payload["controls"]
-    assert isinstance(controls, dict)
-    controls["interaction"] = float("nan")
-    nonfinite["message"]["body"] = {"name": "deck.d2.load", "payload": payload}  # type: ignore[index]
-    with pytest.raises(ProtocolError, match="finite bound"):
-        SequenceValidator(SESSION_ID).validate_command(nonfinite)
-
-    step = command_envelope()
-    step["message"]["body"] = {  # type: ignore[index]
-        "name": "deck.d2.process_slot",
-        "payload": {"deck_id": "main-d2", "deck_revision": 1, "stream_generation": 1},
-    }
-    assert SequenceValidator(SESSION_ID).validate_command(step)["name"] == "deck.d2.process_slot"
-
-
-def test_d2_capture_commands_have_closed_bounded_wire_schemas() -> None:
-    capture_id = "33333333-3333-4333-8333-333333333333"
-    start_payload = {
-        "deck_id": "main-d2",
-        "deck_revision": 1,
-        "capture_id": capture_id,
-        "mode": "snapshot",
-        "temporary_root": "C:/trusted/latentdeck/captures",
-        "max_latent_slots": 128,
-        "max_visual_bytes": 16 * 1024 * 1024,
-    }
-    cases = [
-        ("deck.d2.capture.start", start_payload),
-        (
-            "deck.d2.capture.stop",
-            {"deck_id": "main-d2", "deck_revision": 1, "capture_id": capture_id},
-        ),
-        (
-            "deck.d2.capture.status",
-            {"deck_id": "main-d2", "deck_revision": 1, "capture_id": capture_id},
-        ),
-    ]
-    for name, payload in cases:
-        envelope = command_envelope()
-        envelope["message"]["body"] = {"name": name, "payload": payload}  # type: ignore[index]
-        assert SequenceValidator(SESSION_ID).validate_command(envelope)["name"] == name
-
-    invalid_cases = [
-        {**start_payload, "capture_id": "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"},
-        {**start_payload, "mode": "FRAME_DUMP"},
-        {**start_payload, "max_latent_slots": 1},
-        {**start_payload, "max_visual_bytes": 0},
-        {**start_payload, "hidden_rgb_fallback": True},
-    ]
-    for payload in invalid_cases:
-        envelope = command_envelope()
-        envelope["message"]["body"] = {  # type: ignore[index]
-            "name": "deck.d2.capture.start",
-            "payload": payload,
-        }
-        with pytest.raises(ProtocolError):
-            SequenceValidator(SESSION_ID).validate_command(envelope)
+    envelope["message"]["body"] = {"name": name, "payload": {}}  # type: ignore[index]
+    with pytest.raises(ProtocolError, match="command name is unknown"):
+        SequenceValidator(SESSION_ID).validate_command(envelope)
 
 
 def test_writer_serializes_ack_event_and_error_envelopes() -> None:

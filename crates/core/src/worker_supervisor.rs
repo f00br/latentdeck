@@ -2,7 +2,8 @@
 
 use std::{ffi::OsString, fmt, io, path::PathBuf, process::ExitStatus, time::Duration};
 
-use latentdeck_control::{AuthToken, FramingError, ValidationError, WireUuid};
+use latentdeck_control::{AuthToken, FramingError, ValidationError, WireUuid, v2 as protocol2};
+use latentdeck_extension_manager::{ActiveInstalledPackage, PackageManifest};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -18,7 +19,9 @@ mod platform;
 #[path = "worker_supervisor/unsupported.rs"]
 mod platform;
 
-pub use platform::{PendingWorker, WorkerSession, spawn_worker};
+pub use platform::{
+    PendingWorker, PendingWorkerV2, WorkerSession, WorkerSessionV2, spawn_worker, spawn_worker_v2,
+};
 
 /// A direct process launch derived from an integrity-checked codec pack.
 ///
@@ -40,39 +43,40 @@ impl ValidatedWorkerLaunch {
         Self::from_arguments(pack, &pack.manifest.worker.arguments)
     }
 
-    /// Derive the D2 worker launch only when the validated pack declares the
-    /// dedicated trusted entrypoint.
+    /// Derive a Protocol 2 launch from one exact enabled `.ldcodec` version
+    /// that was revalidated against its trust receipt.
     ///
     /// # Errors
     ///
-    /// Returns [`WorkerSupervisorError::WorkerEntrypointMissing`] for a valid
-    /// Player-only pack. Runtime code must surface that state and must not
-    /// silently reuse the Player worker command.
-    pub fn from_codec_pack_d2(pack: &ValidatedCodecPack) -> Result<Self, WorkerSupervisorError> {
-        let arguments = pack
-            .manifest
-            .worker
-            .d2_arguments
-            .as_ref()
-            .ok_or(WorkerSupervisorError::WorkerEntrypointMissing("d2"))?;
-        Ok(Self::from_arguments(pack, arguments))
-    }
-
-    /// Derive the Q4 worker launch only when the validated pack declares the
-    /// dedicated trusted entrypoint. Player and D2 commands are never reused.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`WorkerSupervisorError::WorkerEntrypointMissing`] when Q4 is
-    /// unavailable in an otherwise valid Codec Pack.
-    pub fn from_codec_pack_q4(pack: &ValidatedCodecPack) -> Result<Self, WorkerSupervisorError> {
-        let arguments = pack
-            .manifest
-            .worker
-            .q4_arguments
-            .as_ref()
-            .ok_or(WorkerSupervisorError::WorkerEntrypointMissing("q4"))?;
-        Ok(Self::from_arguments(pack, arguments))
+    /// Rejects a Deck package, a disabled Codec version, or a runtime path
+    /// that disappeared after installed-tree validation. No legacy worker
+    /// entrypoint or protocol fallback is inferred.
+    pub fn from_installed_codec_v2(
+        package: &ActiveInstalledPackage,
+    ) -> Result<Self, WorkerSupervisorError> {
+        if !package.trust_receipt().enabled {
+            return Err(WorkerSupervisorError::ExtensionPackageDisabled);
+        }
+        let PackageManifest::Codec(manifest) = package.manifest() else {
+            return Err(WorkerSupervisorError::ExtensionPackageKind);
+        };
+        let executable = join_portable_path(package.root(), &manifest.worker.executable);
+        let working_directory =
+            join_portable_path(package.root(), &manifest.worker.working_directory);
+        if !executable.is_file() || !working_directory.is_dir() {
+            return Err(WorkerSupervisorError::ExtensionRuntimeUnavailable);
+        }
+        Ok(Self {
+            executable,
+            arguments: manifest
+                .worker
+                .arguments
+                .iter()
+                .map(OsString::from)
+                .collect(),
+            working_directory,
+            connect_timeout: Duration::from_millis(u64::from(manifest.worker.start_timeout_ms)),
+        })
     }
 
     fn from_arguments(pack: &ValidatedCodecPack, arguments: &[String]) -> Self {
@@ -92,8 +96,12 @@ impl ValidatedWorkerLaunch {
 pub enum WorkerSupervisorError {
     #[error("codec workers are supported only on Windows in LatentDeck 0.1")]
     UnsupportedPlatform,
-    #[error("validated codec pack does not declare the {0} worker entrypoint")]
-    WorkerEntrypointMissing(&'static str),
+    #[error("the selected extension package is not a Codec Pack v2")]
+    ExtensionPackageKind,
+    #[error("the selected Codec Pack version is disabled")]
+    ExtensionPackageDisabled,
+    #[error("the validated Codec Pack runtime disappeared before launch")]
+    ExtensionRuntimeUnavailable,
     #[error("secure random generation failed")]
     Random,
     #[error("worker bootstrap could not be encoded")]
@@ -132,6 +140,10 @@ pub enum WorkerSupervisorError {
     Framing(#[from] FramingError),
     #[error("worker session ordering or correlation failed validation")]
     Session(#[from] ValidationError),
+    #[error("worker Protocol 2 frame failed validation")]
+    Protocol2Codec(#[from] protocol2::CodecError),
+    #[error("worker Protocol 2 session ordering or correlation failed validation")]
+    Protocol2Session(#[from] protocol2::ValidationError),
     #[error("worker exited: {0}")]
     WorkerExited(WorkerExit),
     #[error("worker rejected or malformed the shutdown handshake")]
@@ -140,6 +152,12 @@ pub enum WorkerSupervisorError {
     ShutdownTimeout,
     #[error("worker Job Object termination failed")]
     Terminate(#[source] io::Error),
+}
+
+fn join_portable_path(root: &std::path::Path, relative: &str) -> PathBuf {
+    relative
+        .split('/')
+        .fold(root.to_path_buf(), |path, component| path.join(component))
 }
 
 /// Sanitized process result used by Player state transitions and diagnostics.
@@ -176,6 +194,16 @@ struct BootstrapRecord<'a> {
     auth_token: &'a AuthToken,
 }
 
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct BootstrapRecordV2<'a> {
+    bootstrap_version: u16,
+    protocol_version: u16,
+    session_id: WireUuid,
+    pipe_name: &'a str,
+    auth_token: &'a protocol2::WorkerHelloAuthToken,
+}
+
 fn encode_bootstrap(
     session_id: WireUuid,
     pipe_name: &str,
@@ -183,6 +211,30 @@ fn encode_bootstrap(
 ) -> Result<Vec<u8>, WorkerSupervisorError> {
     let payload = rmp_serde::to_vec_named(&BootstrapRecord {
         bootstrap_version: BOOTSTRAP_VERSION,
+        session_id,
+        pipe_name,
+        auth_token,
+    })
+    .map_err(|_| WorkerSupervisorError::BootstrapEncode)?;
+    if payload.is_empty() || payload.len() > MAX_BOOTSTRAP_BYTES {
+        return Err(WorkerSupervisorError::BootstrapTooLarge);
+    }
+    let length =
+        u32::try_from(payload.len()).map_err(|_| WorkerSupervisorError::BootstrapTooLarge)?;
+    let mut framed = Vec::with_capacity(payload.len() + 4);
+    framed.extend_from_slice(&length.to_le_bytes());
+    framed.extend_from_slice(&payload);
+    Ok(framed)
+}
+
+fn encode_bootstrap_v2(
+    session_id: WireUuid,
+    pipe_name: &str,
+    auth_token: &protocol2::WorkerHelloAuthToken,
+) -> Result<Vec<u8>, WorkerSupervisorError> {
+    let payload = rmp_serde::to_vec_named(&BootstrapRecordV2 {
+        bootstrap_version: protocol2::PROTOCOL_VERSION,
+        protocol_version: protocol2::PROTOCOL_VERSION,
         session_id,
         pipe_name,
         auth_token,
@@ -213,6 +265,16 @@ mod tests {
         auth_token: AuthToken,
     }
 
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DecodedBootstrapV2 {
+        bootstrap_version: u16,
+        protocol_version: u16,
+        session_id: WireUuid,
+        pipe_name: String,
+        auth_token: protocol2::WorkerHelloAuthToken,
+    }
+
     #[test]
     fn bootstrap_matches_the_bounded_python_stdin_contract() {
         let session_id = WireUuid::new_v4();
@@ -227,6 +289,25 @@ mod tests {
         let decoded: DecodedBootstrap =
             rmp_serde::from_slice(&encoded[4..]).expect("named MessagePack map");
         assert_eq!(decoded.bootstrap_version, BOOTSTRAP_VERSION);
+        assert_eq!(decoded.session_id, session_id);
+        assert_eq!(decoded.pipe_name, pipe_name);
+        assert!(decoded.auth_token.constant_time_eq(&token));
+    }
+
+    #[test]
+    fn protocol2_bootstrap_matches_the_hex_token_python_contract() {
+        let session_id = WireUuid::new_v4();
+        let pipe_name = format!(r"\\.\pipe\latentdeck-worker-v2-{session_id}");
+        let token = protocol2::WorkerHelloAuthToken::new([0x5a; 32]);
+
+        let encoded = encode_bootstrap_v2(session_id, &pipe_name, &token).expect("P2 bootstrap");
+        assert!(encoded.len() <= MAX_BOOTSTRAP_BYTES + 4);
+        let payload_len = u32::from_le_bytes(encoded[..4].try_into().expect("prefix")) as usize;
+        let decoded: DecodedBootstrapV2 =
+            rmp_serde::from_slice(&encoded[4..]).expect("P2 named MessagePack map");
+        assert_eq!(payload_len, encoded.len() - 4);
+        assert_eq!(decoded.bootstrap_version, protocol2::PROTOCOL_VERSION);
+        assert_eq!(decoded.protocol_version, protocol2::PROTOCOL_VERSION);
         assert_eq!(decoded.session_id, session_id);
         assert_eq!(decoded.pipe_name, pipe_name);
         assert!(decoded.auth_token.constant_time_eq(&token));

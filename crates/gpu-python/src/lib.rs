@@ -1,11 +1,13 @@
 //! Native Python bridge for the worker-side RGB Ring ABI 1 producer.
 
-use std::{error::Error, fmt};
+use std::{collections::HashMap, error::Error, fmt, sync::Mutex};
 
 use latentdeck_gpu::ring::RingError as CoreRingError;
 use pyo3::{exceptions::PyException, prelude::*, pybacked::PyBackedBytes};
+use uuid::Uuid;
 
 const BINDING_ABI_VERSION: &str = "1";
+const PROTOCOL2_BINDING_ABI_VERSION: &str = "2";
 
 #[derive(Debug)]
 #[cfg_attr(
@@ -22,6 +24,27 @@ enum BridgeError {
         value: u64,
     },
     AliasedHandles,
+    AliasedProtocol2Handles,
+    InvalidUuid {
+        field: &'static str,
+        value: String,
+    },
+    UnsupportedRingKind {
+        actual: String,
+    },
+    RingAlreadyConfigured {
+        ring_id: String,
+    },
+    RingNotConfigured {
+        ring_id: String,
+    },
+    SlotContractMismatch {
+        expected_count: u32,
+        expected_bytes: u64,
+        actual_count: u32,
+        actual_bytes: u64,
+    },
+    TransportStatePoisoned,
     GeometryMismatch {
         expected_width: u32,
         expected_height: u32,
@@ -52,6 +75,13 @@ impl BridgeError {
             Self::Core(error) => error.code(),
             Self::InvalidHandle { .. } => "ring_invalid_handle",
             Self::AliasedHandles => "ring_aliased_handles",
+            Self::AliasedProtocol2Handles => "ring_aliased_handles",
+            Self::InvalidUuid { .. } => "ring_invalid_uuid",
+            Self::UnsupportedRingKind { .. } => "ring_unsupported_kind",
+            Self::RingAlreadyConfigured { .. } => "ring_already_configured",
+            Self::RingNotConfigured { .. } => "ring_not_configured",
+            Self::SlotContractMismatch { .. } => "ring_slot_contract_mismatch",
+            Self::TransportStatePoisoned => "ring_transport_state_poisoned",
             Self::GeometryMismatch { .. } => "ring_geometry_mismatch",
             Self::EmptyBatch => "ring_batch_empty",
             Self::BatchTooLarge { .. } => "ring_batch_too_large",
@@ -78,6 +108,33 @@ impl fmt::Display for BridgeError {
             Self::AliasedHandles => formatter.write_str(
                 "mapping_handle and frames_ready_event_handle must be distinct owned handles",
             ),
+            Self::AliasedProtocol2Handles => formatter.write_str(
+                "mapping_handle, ready_event_handle, and consumed_event_handle must be three distinct owned handles",
+            ),
+            Self::InvalidUuid { field, value } => {
+                write!(formatter, "{field} is not a canonical non-nil UUID: {value}")
+            }
+            Self::UnsupportedRingKind { actual } => {
+                write!(formatter, "Protocol 2 ring kind is unsupported: {actual}")
+            }
+            Self::RingAlreadyConfigured { ring_id } => {
+                write!(formatter, "Protocol 2 ring is already configured: {ring_id}")
+            }
+            Self::RingNotConfigured { ring_id } => {
+                write!(formatter, "Protocol 2 ring is not configured: {ring_id}")
+            }
+            Self::SlotContractMismatch {
+                expected_count,
+                expected_bytes,
+                actual_count,
+                actual_bytes,
+            } => write!(
+                formatter,
+                "Protocol 2 ring control/header mismatch: expected {expected_count} slots of {expected_bytes} bytes, mapped header declares {actual_count} slots of {actual_bytes} bytes"
+            ),
+            Self::TransportStatePoisoned => {
+                formatter.write_str("Protocol 2 ring transport state lock is poisoned")
+            }
             Self::GeometryMismatch {
                 expected_width,
                 expected_height,
@@ -148,7 +205,12 @@ mod platform {
     use std::ffi::c_void;
     use std::os::windows::io::{FromRawHandle, OwnedHandle, RawHandle};
 
-    use latentdeck_gpu::{ring::WriteStatus, windows_ring::WindowsRgbRingProducer as CoreProducer};
+    use latentdeck_gpu::{
+        ring::WriteStatus,
+        ring_v2::{WriteV2Status, control_mapping_bytes},
+        windows_ring::WindowsRgbRingProducer as CoreProducer,
+        windows_ring_v2::WindowsRgbRingV2Producer as CoreProducerV2,
+    };
 
     use super::{BridgeError, CoreRingError, StateSnapshot};
 
@@ -306,6 +368,140 @@ mod platform {
         }
     }
 
+    pub(super) struct TransferredHandlesV2 {
+        mapping: OwnedHandle,
+        ready: OwnedHandle,
+        consumed: OwnedHandle,
+    }
+
+    pub(super) struct ProducerEndpointV2 {
+        inner: CoreProducerV2,
+    }
+
+    impl ProducerEndpointV2 {
+        pub(super) fn open(
+            handles: TransferredHandlesV2,
+            expected_slot_count: u32,
+            expected_slot_bytes: u64,
+        ) -> Result<Self, BridgeError> {
+            let mapping_bytes = control_mapping_bytes(expected_slot_count, expected_slot_bytes)?;
+            let inner = CoreProducerV2::open_from_owned_handles_discovered_generation(
+                handles.mapping,
+                handles.ready,
+                handles.consumed,
+                mapping_bytes,
+            )?;
+            let actual = inner.descriptor().layout();
+            if actual.slot_count() != expected_slot_count
+                || actual.slot_bytes() != expected_slot_bytes
+            {
+                return Err(BridgeError::SlotContractMismatch {
+                    expected_count: expected_slot_count,
+                    expected_bytes: expected_slot_bytes,
+                    actual_count: actual.slot_count(),
+                    actual_bytes: actual.slot_bytes(),
+                });
+            }
+            Ok(Self { inner })
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub(super) fn publish(
+            &mut self,
+            session_id: [u8; 16],
+            stream_generation: u64,
+            logical_sequence: u64,
+            batch: u32,
+            width: u32,
+            height: u32,
+            pixels: &[u8],
+        ) -> Result<u64, BridgeError> {
+            let actual_generation = self.inner.descriptor().generation();
+            if stream_generation != actual_generation {
+                return Err(CoreRingError::GenerationMismatch {
+                    expected: stream_generation,
+                    actual: actual_generation,
+                }
+                .into());
+            }
+            match self.inner.try_write_batch(
+                session_id,
+                logical_sequence,
+                batch,
+                width,
+                height,
+                pixels,
+            )? {
+                WriteV2Status::Written(metadata) => Ok(metadata.slot_sequence()),
+                WriteV2Status::Backpressure {
+                    queued: _,
+                    capacity: _,
+                } => {
+                    let state = self.inner.state()?;
+                    Err(BridgeError::Backpressure {
+                        requested: 1,
+                        available: state.available_capacity(),
+                    })
+                }
+            }
+        }
+
+        pub(super) fn set_generation(&mut self, new_generation: u64) -> Result<(), BridgeError> {
+            self.inner
+                .set_generation(new_generation)
+                .map_err(Into::into)
+        }
+    }
+
+    pub(super) fn take_transferred_handles_v2(
+        mapping_handle: u64,
+        ready_event_handle: u64,
+        consumed_event_handle: u64,
+    ) -> Result<TransferredHandlesV2, BridgeError> {
+        let values = [
+            (mapping_handle, "mapping_handle"),
+            (ready_event_handle, "ready_event_handle"),
+            (consumed_event_handle, "consumed_event_handle"),
+        ];
+        let mut checked = [None; 3];
+        let mut first_error = None;
+        for (index, (value, field)) in values.into_iter().enumerate() {
+            match checked_raw_handle(value, field) {
+                Ok(raw) => checked[index] = Some(raw),
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        let aliased = checked[0].is_some()
+            && (checked[0] == checked[1] || checked[0] == checked[2] || checked[1] == checked[2]);
+        if first_error.is_some() || aliased {
+            close_distinct(checked);
+            return Err(first_error.unwrap_or(BridgeError::AliasedProtocol2Handles));
+        }
+        let [Some(mapping), Some(ready), Some(consumed)] = checked else {
+            unreachable!("all target handles were checked above")
+        };
+        Ok(TransferredHandlesV2 {
+            mapping: take_target_handle(mapping),
+            ready: take_target_handle(ready),
+            consumed: take_target_handle(consumed),
+        })
+    }
+
+    fn close_distinct(handles: [Option<RawHandle>; 3]) {
+        let mut closed = [None; 3];
+        let mut closed_count = 0;
+        for raw in handles.into_iter().flatten() {
+            if closed[..closed_count].contains(&Some(raw)) {
+                continue;
+            }
+            drop(take_target_handle(raw));
+            closed[closed_count] = Some(raw);
+            closed_count += 1;
+        }
+    }
+
     fn tight_frame_bytes(width: u32, height: u32) -> Result<usize, BridgeError> {
         usize::try_from(
             u64::from(width)
@@ -393,9 +589,45 @@ mod platform {
             Err(BridgeError::UnsupportedPlatform)
         }
     }
+
+    pub(super) struct TransferredHandlesV2;
+
+    pub(super) struct ProducerEndpointV2;
+
+    impl ProducerEndpointV2 {
+        pub(super) fn open(
+            _handles: TransferredHandlesV2,
+            _expected_slot_count: u32,
+            _expected_slot_bytes: u64,
+        ) -> Result<Self, BridgeError> {
+            Err(BridgeError::UnsupportedPlatform)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub(super) fn publish(
+            &mut self,
+            _session_id: [u8; 16],
+            _stream_generation: u64,
+            _logical_sequence: u64,
+            _batch: u32,
+            _width: u32,
+            _height: u32,
+            _pixels: &[u8],
+        ) -> Result<u64, BridgeError> {
+            Err(BridgeError::UnsupportedPlatform)
+        }
+    }
+
+    pub(super) fn take_transferred_handles_v2(
+        _mapping_handle: u64,
+        _ready_event_handle: u64,
+        _consumed_event_handle: u64,
+    ) -> Result<TransferredHandlesV2, BridgeError> {
+        Err(BridgeError::UnsupportedPlatform)
+    }
 }
 
-use platform::ProducerEndpoint;
+use platform::{ProducerEndpoint, ProducerEndpointV2, take_transferred_handles_v2};
 
 /// Native exception with a stable RGB Ring diagnostic category.
 #[pyclass(extends=PyException, module = "latentdeck_rgb_ring._native")]
@@ -558,6 +790,167 @@ impl WindowsRgbRingProducer {
     }
 }
 
+/// Multi-ring worker-side transport implementing the Protocol 2 runtime seam.
+#[pyclass(module = "latentdeck_rgb_ring._native")]
+struct WindowsRgbRingTransportV2 {
+    rings: Mutex<HashMap<String, ProducerEndpointV2>>,
+}
+
+#[pymethods]
+impl WindowsRgbRingTransportV2 {
+    #[new]
+    fn new() -> Self {
+        Self {
+            rings: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Takes ownership of all three handles before validating the binding.
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    fn configure(
+        &self,
+        py: Python<'_>,
+        ring_id: String,
+        kind: String,
+        mapping_handle: u64,
+        ready_event_handle: u64,
+        consumed_event_handle: u64,
+        slot_count: u32,
+        slot_bytes: u64,
+    ) -> PyResult<()> {
+        let handles =
+            take_transferred_handles_v2(mapping_handle, ready_event_handle, consumed_event_handle)
+                .map_err(|error| into_py_error(py, &error))?;
+        let canonical =
+            canonical_uuid(&ring_id, "ring_id").map_err(|error| into_py_error(py, &error))?;
+        if kind != "decoded_rgba" {
+            return Err(into_py_error(
+                py,
+                &BridgeError::UnsupportedRingKind { actual: kind },
+            ));
+        }
+        let mut rings = self
+            .rings
+            .lock()
+            .map_err(|_| into_py_error(py, &BridgeError::TransportStatePoisoned))?;
+        if rings.contains_key(&canonical) {
+            return Err(into_py_error(
+                py,
+                &BridgeError::RingAlreadyConfigured { ring_id: canonical },
+            ));
+        }
+        let endpoint = ProducerEndpointV2::open(handles, slot_count, slot_bytes)
+            .map_err(|error| into_py_error(py, &error))?;
+        rings.insert(canonical, endpoint);
+        Ok(())
+    }
+
+    /// Closes transferred handles rejected by runtime validation before configure.
+    #[staticmethod]
+    fn discard_transferred_handles(
+        py: Python<'_>,
+        mapping_handle: u64,
+        ready_event_handle: u64,
+        consumed_event_handle: u64,
+    ) -> PyResult<()> {
+        take_transferred_handles_v2(mapping_handle, ready_event_handle, consumed_event_handle)
+            .map(drop)
+            .map_err(|error| into_py_error(py, &error))
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn release(&self, py: Python<'_>, ring_id: String) -> PyResult<()> {
+        let canonical =
+            canonical_uuid(&ring_id, "ring_id").map_err(|error| into_py_error(py, &error))?;
+        self.rings
+            .lock()
+            .map_err(|_| into_py_error(py, &BridgeError::TransportStatePoisoned))?
+            .remove(&canonical)
+            .map(drop)
+            .ok_or_else(|| {
+                into_py_error(py, &BridgeError::RingNotConfigured { ring_id: canonical })
+            })
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    fn publish(
+        &self,
+        py: Python<'_>,
+        ring_id: String,
+        session_id: String,
+        stream_generation: u64,
+        sequence: u64,
+        batch: u32,
+        height: u32,
+        width: u32,
+        pixels: PyBackedBytes,
+    ) -> PyResult<u64> {
+        let ring =
+            canonical_uuid(&ring_id, "ring_id").map_err(|error| into_py_error(py, &error))?;
+        let session =
+            uuid_bytes(&session_id, "session_id").map_err(|error| into_py_error(py, &error))?;
+        self.rings
+            .lock()
+            .map_err(|_| into_py_error(py, &BridgeError::TransportStatePoisoned))?
+            .get_mut(&ring)
+            .ok_or_else(|| into_py_error(py, &BridgeError::RingNotConfigured { ring_id: ring }))?
+            .publish(
+                session,
+                stream_generation,
+                sequence,
+                batch,
+                width,
+                height,
+                &pixels,
+            )
+            .map_err(|error| into_py_error(py, &error))
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn set_generation(&self, py: Python<'_>, ring_id: String, new_generation: u64) -> PyResult<()> {
+        let ring =
+            canonical_uuid(&ring_id, "ring_id").map_err(|error| into_py_error(py, &error))?;
+        self.rings
+            .lock()
+            .map_err(|_| into_py_error(py, &BridgeError::TransportStatePoisoned))?
+            .get_mut(&ring)
+            .ok_or_else(|| into_py_error(py, &BridgeError::RingNotConfigured { ring_id: ring }))?
+            .set_generation(new_generation)
+            .map_err(|error| into_py_error(py, &error))
+    }
+
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        self.rings
+            .lock()
+            .map_err(|_| into_py_error(py, &BridgeError::TransportStatePoisoned))?
+            .clear();
+        Ok(())
+    }
+}
+
+fn canonical_uuid(value: &str, field: &'static str) -> Result<String, BridgeError> {
+    let parsed = Uuid::parse_str(value).map_err(|_| BridgeError::InvalidUuid {
+        field,
+        value: value.to_owned(),
+    })?;
+    if parsed.is_nil() || parsed.to_string() != value {
+        return Err(BridgeError::InvalidUuid {
+            field,
+            value: value.to_owned(),
+        });
+    }
+    Ok(value.to_owned())
+}
+
+fn uuid_bytes(value: &str, field: &'static str) -> Result<[u8; 16], BridgeError> {
+    let canonical = canonical_uuid(value, field)?;
+    let parsed = Uuid::parse_str(&canonical).map_err(|_| BridgeError::InvalidUuid {
+        field,
+        value: canonical,
+    })?;
+    Ok(*parsed.as_bytes())
+}
+
 fn into_py_error(py: Python<'_>, error: &BridgeError) -> PyErr {
     let exception_type = py.get_type::<RingError>();
     match exception_type.call1((error.code(), error.to_string())) {
@@ -570,7 +963,12 @@ fn into_py_error(py: Python<'_>, error: &BridgeError) -> PyErr {
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<RingError>()?;
     module.add_class::<WindowsRgbRingProducer>()?;
+    module.add_class::<WindowsRgbRingTransportV2>()?;
     module.add("BINDING_ABI_VERSION", BINDING_ABI_VERSION)?;
+    module.add(
+        "PROTOCOL2_BINDING_ABI_VERSION",
+        PROTOCOL2_BINDING_ABI_VERSION,
+    )?;
     Ok(())
 }
 
@@ -586,7 +984,9 @@ mod tests {
 
     use latentdeck_gpu::{
         ring::{ReadStatus, RingDescriptor},
+        ring_v2::{ReadV2Status, RingV2Descriptor},
         windows_ring::{FramesReady, WindowsRgbRingOwner},
+        windows_ring_v2::WindowsRgbRingV2Owner,
     };
     use pyo3::{
         Python,
@@ -874,5 +1274,135 @@ mod tests {
         }
         assert!(!handle_is_valid(mapping_handle));
         assert!(!handle_is_valid(event_handle));
+    }
+
+    #[test]
+    fn protocol2_python_transport_publishes_batch_and_releases_three_handles() {
+        let _guard = HANDLE_TEST_LOCK.lock().expect("handle test lock");
+        let descriptor = RingV2Descriptor::new(2, 2, 2, 2, 51).expect("valid ABI2 descriptor");
+        let owner = WindowsRgbRingV2Owner::create(descriptor).expect("ABI2 owner");
+        let mut consumer = owner.open_consumer().expect("ABI2 consumer");
+        let binding = owner
+            .duplicate_into(current_process())
+            .expect("three target handles");
+        let mapping = binding.mapping_handle();
+        let ready = binding.ready_event_handle();
+        let consumed_handle = binding.consumed_event_handle();
+
+        Python::initialize();
+        Python::attach(|py| {
+            let transport_type = py.get_type::<super::WindowsRgbRingTransportV2>();
+            let transport = transport_type.call0().expect("construct ABI2 transport");
+            let ring_id = "10000000-0000-4000-8000-000000000001";
+            let session_id = "10000000-0000-4000-8000-000000000002";
+            transport
+                .call_method1(
+                    "configure",
+                    (
+                        ring_id,
+                        "decoded_rgba",
+                        mapping,
+                        ready,
+                        consumed_handle,
+                        binding.slot_count(),
+                        binding.slot_bytes(),
+                    ),
+                )
+                .expect("configure ABI2 transport");
+            let pixels = PyBytes::new(py, &[0x77; 32]);
+            assert_eq!(
+                transport
+                    .call_method1(
+                        "publish",
+                        (
+                            ring_id, session_id, 51_u64, 7_u64, 2_u32, 2_u32, 2_u32, pixels
+                        ),
+                    )
+                    .expect("publish ABI2 batch")
+                    .extract::<u64>()
+                    .expect("slot sequence"),
+                1
+            );
+            assert_eq!(
+                consumer
+                    .wait_ready(Duration::from_secs(1))
+                    .expect("ready event"),
+                FramesReady::Signaled
+            );
+            let ReadV2Status::Batch(batch) = consumer.try_read().expect("consume ABI2 batch")
+            else {
+                panic!("ready ABI2 slot must contain one batch");
+            };
+            assert_eq!(batch.metadata().logical_sequence(), 7);
+            assert_eq!(batch.pixels(), &[0x77; 32]);
+            transport
+                .call_method1("release", (ring_id,))
+                .expect("release ABI2 ring");
+        });
+
+        assert!(!handle_is_valid(mapping));
+        assert!(!handle_is_valid(ready));
+        assert!(!handle_is_valid(consumed_handle));
+    }
+
+    #[test]
+    fn protocol2_configure_failure_and_discard_close_every_transferred_handle() {
+        let _guard = HANDLE_TEST_LOCK.lock().expect("handle test lock");
+        let descriptor = RingV2Descriptor::new(2, 2, 2, 2, 61).expect("valid ABI2 descriptor");
+        let owner = WindowsRgbRingV2Owner::create(descriptor).expect("ABI2 owner");
+        let mismatch = owner
+            .duplicate_into(current_process())
+            .expect("mismatch handles");
+        let discard = owner
+            .duplicate_into(current_process())
+            .expect("discard handles");
+
+        Python::initialize();
+        Python::attach(|py| {
+            let transport_type = py.get_type::<super::WindowsRgbRingTransportV2>();
+            let transport = transport_type.call0().expect("construct ABI2 transport");
+            let error = transport
+                .call_method1(
+                    "configure",
+                    (
+                        "10000000-0000-4000-8000-000000000003",
+                        "decoded_rgba",
+                        mismatch.mapping_handle(),
+                        mismatch.ready_event_handle(),
+                        mismatch.consumed_event_handle(),
+                        mismatch.slot_count(),
+                        mismatch.slot_bytes() + 1,
+                    ),
+                )
+                .expect_err("mapped header must match control slot bytes exactly");
+            let code = error
+                .value(py)
+                .getattr("code")
+                .expect("stable error code")
+                .extract::<String>()
+                .expect("string error code");
+            assert_eq!(code, "ring_slot_contract_mismatch");
+            transport
+                .call_method1(
+                    "discard_transferred_handles",
+                    (
+                        discard.mapping_handle(),
+                        discard.ready_event_handle(),
+                        discard.consumed_event_handle(),
+                    ),
+                )
+                .expect("discard valid target handles");
+        });
+
+        for value in [
+            mismatch.mapping_handle(),
+            mismatch.ready_event_handle(),
+            mismatch.consumed_event_handle(),
+            discard.mapping_handle(),
+            discard.ready_event_handle(),
+            discard.consumed_event_handle(),
+        ] {
+            assert!(!handle_is_valid(value));
+        }
     }
 }

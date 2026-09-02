@@ -25,7 +25,10 @@ use crate::{
         EntryRange, H3SafetensorsPreflight, SafetensorDType, preflight_h3_safetensors,
         scan_h3_safetensors_finite,
     },
-    writer::{PackRequest, WriteOptions, WriteReceipt, pack_atomic},
+    writer::{
+        IntegrityWriteReceipt, PackRequest, WriteOptions, WriteReceipt, pack_atomic,
+        pack_integrity_atomic,
+    },
 };
 
 const RESAMPLE_PRODUCER: &str = "latentdeck-resample";
@@ -78,6 +81,31 @@ pub struct ResampleWriteReceipt {
     pub spool_removed: bool,
 }
 
+/// Codec-neutral finalization request for one trusted adapter spool.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProfileResampleRequest {
+    pub manifest: ManifestV0_1,
+    pub expected_payload: PayloadExpectation,
+}
+
+/// Atomic codec-neutral LC write plus consumed-spool state.
+#[derive(Debug)]
+pub struct ProfileResampleWriteReceipt {
+    pub output_path: PathBuf,
+    pub validation: crate::reader::IntegrityValidationReceipt,
+    pub spool_removed: bool,
+}
+
+impl From<(IntegrityWriteReceipt, bool)> for ProfileResampleWriteReceipt {
+    fn from((receipt, spool_removed): (IntegrityWriteReceipt, bool)) -> Self {
+        Self {
+            output_path: receipt.output_path,
+            validation: receipt.validation,
+            spool_removed,
+        }
+    }
+}
+
 impl From<(WriteReceipt, bool)> for ResampleWriteReceipt {
     fn from((receipt, spool_removed): (WriteReceipt, bool)) -> Self {
         Self {
@@ -107,6 +135,67 @@ pub fn pack_resample_atomic(
     let manifest = build_resample_manifest(request, payload_path)?;
     let receipt = pack_atomic(
         &PackRequest::new(manifest, payload_path),
+        output.as_ref(),
+        options,
+    )?;
+    let spool_removed = fs::remove_file(payload_path).is_ok();
+    Ok((receipt, spool_removed).into())
+}
+
+/// Finalize one adapter-produced profile payload through the codec-neutral Core.
+///
+/// The host owns the supplied manifest and genealogy. The adapter owns only
+/// the staged Safetensors bytes and their exact expectation. Core remeasures,
+/// packs, reopens, and validates the temporary LC before the atomic no-clobber
+/// commit, then consumes the spool only after success.
+///
+/// # Errors
+///
+/// Returns a stable error for payload swaps, invalid genealogy, generic LC
+/// failures, post-write reopen failures, or a forbidden output target.
+pub fn pack_profile_resample_atomic(
+    request: &ProfileResampleRequest,
+    payload_path: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+    options: &WriteOptions,
+) -> Result<ProfileResampleWriteReceipt> {
+    let payload_path = payload_path.as_ref();
+    let limits = ValidationLimits::default();
+    request.manifest.validate_common(&limits)?;
+    if request.manifest.parent_cartridges.is_empty()
+        || request.manifest.operation_history.is_empty()
+    {
+        return Err(CartridgeError::new(
+            ErrorCode::ManifestInvalid,
+            "resampled cartridge requires explicit parent and operation genealogy",
+        )
+        .at_json("/parent_cartridges"));
+    }
+    let descriptor = request.manifest.payloads.first().ok_or_else(|| {
+        CartridgeError::new(
+            ErrorCode::ManifestInvalid,
+            "resampled cartridge has no payload descriptor",
+        )
+        .at_json("/payloads")
+    })?;
+    let measured = hash_path(payload_path)?;
+    bind_payload_expectation_at(
+        &request.expected_payload,
+        measured.byte_length,
+        measured.sha256,
+        &descriptor.path,
+    )?;
+    if descriptor.byte_length != request.expected_payload.byte_length
+        || descriptor.sha256 != request.expected_payload.sha256
+    {
+        return Err(CartridgeError::new(
+            ErrorCode::PayloadHashMismatch,
+            "host manifest does not bind the finalized adapter payload",
+        )
+        .at_json("/payloads/0"));
+    }
+    let receipt = pack_integrity_atomic(
+        &PackRequest::new(request.manifest.clone(), payload_path),
         output.as_ref(),
         options,
     )?;
@@ -205,13 +294,22 @@ fn bind_payload_expectation(
     actual_bytes: u64,
     actual_sha256: Sha256Hash,
 ) -> Result<()> {
+    bind_payload_expectation_at(expected, actual_bytes, actual_sha256, h3::PAYLOAD_PATH)
+}
+
+fn bind_payload_expectation_at(
+    expected: &PayloadExpectation,
+    actual_bytes: u64,
+    actual_sha256: Sha256Hash,
+    entry: &str,
+) -> Result<()> {
     Sha256Hash::parse(&expected.sha256.0)?;
     if expected.byte_length != actual_bytes || expected.sha256.0 != actual_sha256.to_string() {
         return Err(CartridgeError::new(
             ErrorCode::PayloadHashMismatch,
             "resample spool changed after worker finalization",
         )
-        .at_entry(h3::PAYLOAD_PATH));
+        .at_entry(entry));
     }
     Ok(())
 }

@@ -5,7 +5,7 @@ use latentdeck_library::{
 };
 use tempfile::tempdir;
 
-use support::{ID_A, ID_B, write_synthetic_lc};
+use support::{ID_A, ID_B, ID_C, write_synthetic_lc, write_synthetic_non_h3_lc};
 
 #[test]
 fn resolves_a_present_registered_source_by_immutable_identity() {
@@ -20,6 +20,26 @@ fn resolves_a_present_registered_source_by_immutable_identity() {
     let resolved = library
         .resolve_deck_source(&identity)
         .expect("registered source");
+
+    assert_eq!(resolved.identity(), &identity);
+    assert_eq!(
+        resolved.path(),
+        path.canonicalize().expect("canonical path")
+    );
+}
+
+#[test]
+fn imports_and_resolves_a_codec_neutral_non_h3_source() {
+    let temp = tempdir().expect("tempdir");
+    let path = temp.path().join("synthetic-non-h3.lc");
+    write_synthetic_non_h3_lc(&path, ID_C);
+
+    let mut library = Library::in_memory().expect("library");
+    let imported = library.import_file(&path).expect("generic import");
+    let identity = DeckSourceIdentity::new(ID_C, imported.key).expect("identity");
+    let resolved = library
+        .resolve_deck_source(&identity)
+        .expect("generic registered source");
 
     assert_eq!(resolved.identity(), &identity);
     assert_eq!(

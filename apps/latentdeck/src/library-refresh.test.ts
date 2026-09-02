@@ -1,13 +1,12 @@
 import { describe, expect, it } from "vitest";
 import appSource from "./App.svelte?raw";
-import d2FaceplateSource from "./D2Faceplate.svelte?raw";
+import workspaceSource from "./GenericDeckWorkspace.svelte?raw";
 import {
   createLibraryRefreshController,
   createLatestRequestRunner,
   notifyLibraryInvalidated,
   onLibraryInvalidated,
 } from "./library-refresh";
-import q4FaceplateSource from "./Q4Faceplate.svelte?raw";
 
 describe("latest Library snapshot requests", () => {
   it("marks an older response stale when a newer refresh finishes first", async () => {
@@ -88,14 +87,13 @@ describe("latest Library snapshot requests", () => {
     controller.dispose();
   });
 
-  it("wires Library invalidation and activation refresh into both Deck faceplates", () => {
+  it("wires generic captures and preset loads back into the shared Library", () => {
     expect(appSource).toContain("notifyLibraryInvalidated();");
-    for (const faceplate of [d2FaceplateSource, q4FaceplateSource]) {
-      expect(faceplate).toContain(
-        "createLibraryRefreshController<LibraryView>",
-      );
-      expect(faceplate).toContain("bankRefresh.setActive(active)");
-      expect(faceplate).toContain("bankRefresh.dispose()");
-    }
+    expect(appSource).toContain("onLibraryChanged={acceptDeckLibrary}");
+    expect(workspaceSource).toContain("publishCompletedCapture(capture)");
+    expect(workspaceSource).toContain(
+      "onLibraryChanged(await librarySnapshot())",
+    );
+    expect(workspaceSource).toContain("onLibraryChanged(incoming)");
   });
 });

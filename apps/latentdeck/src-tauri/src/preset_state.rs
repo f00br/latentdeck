@@ -8,7 +8,8 @@ use std::{
 
 use atomicwrites::move_atomic;
 use latentdeck_control::{
-    DeckPresetDocument, MAX_DECK_PRESET_BYTES, parse_deck_preset_json, write_deck_preset_json,
+    D2_DECK_ID, DeckPresetDocument, MAX_DECK_PRESET_BYTES, Q4_DECK_ID, parse_deck_preset_json,
+    write_deck_preset_json,
 };
 use serde::Serialize;
 use tauri::AppHandle;
@@ -30,9 +31,10 @@ pub(crate) fn deck_preset_save(
     app: AppHandle,
     preset: DeckPresetDocument,
 ) -> Result<Option<PresetSaveView>, CommandError> {
-    let suggested_name = match &preset {
-        DeckPresetDocument::D2 { .. } => "latentdeck-d2-preset.json",
-        DeckPresetDocument::Q4 { .. } => "latentdeck-q4-preset.json",
+    let suggested_name = match preset.deck_id.as_str() {
+        D2_DECK_ID => "latentdeck-d2-preset.json",
+        Q4_DECK_ID => "latentdeck-q4-preset.json",
+        _ => "latentdeck-deck-preset.json",
     };
     let selected = app
         .dialog()
@@ -255,7 +257,7 @@ mod tests {
             "latentdeck.virtual.all".to_owned(),
             identity('a', 1),
             identity('b', 2),
-            D2Controls::default(),
+            &D2Controls::default(),
             D2PresetLoops {
                 loop_a: true,
                 loop_b: false,

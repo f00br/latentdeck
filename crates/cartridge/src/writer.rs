@@ -17,11 +17,11 @@ use crate::manifest::ManifestV0_1;
 use crate::preview::inspect_webp;
 use crate::profile::h3;
 use crate::reader::{
-    ValidationOptions, ValidationReceipt, crosscheck_tensor_descriptors, open_validated,
+    IntegrityValidationReceipt, ValidationOptions, ValidationReceipt,
+    crosscheck_integrity_tensor_descriptors, open_integrity_validated, open_validated,
 };
-use crate::safetensor::{EntryRange, preflight_h3_safetensors, scan_h3_safetensors_finite};
+use crate::safetensor::{EntryRange, preflight_safetensors, scan_safetensors_finite};
 
-const H3_PAYLOAD_ENTRY: &str = "payloads/h3.safetensors";
 const PREVIEW_ENTRY: &str = "preview.webp";
 const SOURCE_BUFFER_BYTES: usize = 64 * 1024;
 
@@ -94,6 +94,13 @@ pub struct WriteReceipt {
     pub validation: ValidationReceipt,
 }
 
+/// Result of a committed cartridge validated only at the codec-neutral layer.
+#[derive(Debug, Clone)]
+pub struct IntegrityWriteReceipt {
+    pub output_path: PathBuf,
+    pub validation: IntegrityValidationReceipt,
+}
+
 /// Writes, validates, and atomically commits one deterministic cartridge.
 ///
 /// # Errors
@@ -107,6 +114,7 @@ pub fn pack_atomic(
 ) -> Result<WriteReceipt> {
     let output = output.as_ref();
     validate_output_target(output, options.overwrite)?;
+    h3::validate(&request.manifest, &ValidationLimits::default())?;
     let mut sources = prepare_sources(request)?;
     let parent = output
         .parent()
@@ -115,6 +123,36 @@ pub fn pack_atomic(
     let partial = write_partial(parent, &mut sources)?;
     let validation = validate_and_commit(partial, output, options.overwrite)?;
     Ok(WriteReceipt {
+        output_path: output.to_path_buf(),
+        validation,
+    })
+}
+
+/// Writes and atomically commits one codec-neutral LC envelope.
+///
+/// This is the Core finalization boundary for a trusted codec adapter's staged
+/// Safetensors payload. It applies no codec/profile semantics; the caller must
+/// already hold a cross-checked profile receipt for those staged bytes.
+///
+/// # Errors
+///
+/// Returns a stable error for generic LC/schema/Safetensors/hash failures,
+/// source mutation, failed post-write validation, or a forbidden target.
+pub fn pack_integrity_atomic(
+    request: &PackRequest,
+    output: impl AsRef<Path>,
+    options: &WriteOptions,
+) -> Result<IntegrityWriteReceipt> {
+    let output = output.as_ref();
+    validate_output_target(output, options.overwrite)?;
+    let mut sources = prepare_sources(request)?;
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let partial = write_partial(parent, &mut sources)?;
+    let validation = validate_and_commit_integrity(partial, output, options.overwrite)?;
+    Ok(IntegrityWriteReceipt {
         output_path: output.to_path_buf(),
         validation,
     })
@@ -141,13 +179,13 @@ struct PreparedSources {
     payload_measurement: SourceMeasurement,
     preview_file: Option<File>,
     preview_measurement: Option<SourceMeasurement>,
+    payload_entry: String,
     manifest_bytes: Vec<u8>,
 }
 
 fn prepare_sources(request: &PackRequest) -> Result<PreparedSources> {
     let limits = ValidationLimits::default();
     request.manifest.validate_common(&limits)?;
-    h3::validate(&request.manifest, &limits)?;
     let payload_descriptor = request.manifest.payloads.first().ok_or_else(|| {
         CartridgeError::new(
             ErrorCode::ManifestInvalid,
@@ -156,35 +194,45 @@ fn prepare_sources(request: &PackRequest) -> Result<PreparedSources> {
         .at_json("/payloads")
     })?;
     if request.manifest.payloads.len() != 1
-        || payload_descriptor.path != H3_PAYLOAD_ENTRY
         || payload_descriptor.media_type != "application/vnd.safetensors"
     {
         return Err(CartridgeError::new(
             ErrorCode::ManifestInvalid,
-            "manifest must describe exactly the H3 Safetensors payload",
+            "manifest must describe exactly one Safetensors payload",
         )
         .at_json("/payloads"));
     }
+    let payload_entry = payload_descriptor.path.clone();
 
     let mut payload_file = open_source(&request.payload_path)?;
     let payload_length = payload_file
         .metadata()
         .map_err(|error| {
             CartridgeError::new(ErrorCode::IoRead, "cannot inspect payload source")
-                .at_entry(H3_PAYLOAD_ENTRY)
+                .at_entry(&payload_entry)
                 .with_source(error)
         })?
         .len();
     let payload_range = EntryRange::new(0, payload_length);
-    let payload_preflight = preflight_h3_safetensors(&mut payload_file, payload_range, &limits)?;
-    scan_h3_safetensors_finite(&mut payload_file, payload_range, &payload_preflight)?;
-    crosscheck_tensor_descriptors(&request.manifest.tensors, &payload_preflight)?;
-    let payload_measurement = measure_source(&mut payload_file, H3_PAYLOAD_ENTRY)?;
+    let payload_preflight =
+        preflight_safetensors(&mut payload_file, payload_range, &payload_entry, &limits)?;
+    scan_safetensors_finite(
+        &mut payload_file,
+        payload_range,
+        &payload_entry,
+        &payload_preflight,
+    )?;
+    crosscheck_integrity_tensor_descriptors(
+        &request.manifest.tensors,
+        &payload_entry,
+        &payload_preflight,
+    )?;
+    let payload_measurement = measure_source(&mut payload_file, &payload_entry)?;
     verify_declared_source(
         payload_descriptor.byte_length,
         &payload_descriptor.sha256.0,
         payload_measurement,
-        H3_PAYLOAD_ENTRY,
+        &payload_entry,
         "/payloads/0",
     )?;
     let (preview_file, preview_measurement) = prepare_preview(request, &limits)?;
@@ -193,6 +241,7 @@ fn prepare_sources(request: &PackRequest) -> Result<PreparedSources> {
         payload_measurement,
         preview_file,
         preview_measurement,
+        payload_entry,
         manifest_bytes: canonical_json_bytes(&request.manifest)?,
     })
 }
@@ -268,7 +317,7 @@ fn write_partial(parent: &Path, sources: &mut PreparedSources) -> Result<TempPat
         .seek(SeekFrom::Start(0))
         .map_err(|error| {
             CartridgeError::new(ErrorCode::IoRead, "cannot rewind payload source")
-                .at_entry(H3_PAYLOAD_ENTRY)
+                .at_entry(&sources.payload_entry)
                 .with_source(error)
         })?;
     let mut payload_copy = MeasuringReader::new(&mut sources.payload_file);
@@ -282,7 +331,7 @@ fn write_partial(parent: &Path, sources: &mut PreparedSources) -> Result<TempPat
         &mut manifest_reader,
     ));
     entries.push(EntryWrite::new(
-        H3_PAYLOAD_ENTRY,
+        &sources.payload_entry,
         sources.payload_measurement.byte_length,
         sources.payload_measurement.crc32,
         &mut payload_copy,
@@ -300,7 +349,7 @@ fn write_partial(parent: &Path, sources: &mut PreparedSources) -> Result<TempPat
     verify_copied_source(
         payload_copy.finish(),
         sources.payload_measurement,
-        H3_PAYLOAD_ENTRY,
+        &sources.payload_entry,
     )?;
     if let (Some(expected), Some(copy)) = (sources.preview_measurement, preview_copy) {
         verify_copied_source(copy.finish(), expected, PREVIEW_ENTRY)?;
@@ -341,6 +390,30 @@ fn validate_and_commit(
     })?;
     let validation = validated.receipt().clone();
     drop(validated);
+    persist_partial(partial, output, overwrite)?;
+    Ok(validation)
+}
+
+fn validate_and_commit_integrity(
+    partial: TempPath,
+    output: &Path,
+    overwrite: OverwritePolicy,
+) -> Result<IntegrityValidationReceipt> {
+    let validated =
+        open_integrity_validated(&partial, &ValidationOptions::default()).map_err(|error| {
+            CartridgeError::new(
+                ErrorCode::PostwriteValidationFailed,
+                "partial cartridge failed codec-neutral post-write validation",
+            )
+            .with_source(error)
+        })?;
+    let validation = validated.receipt().clone();
+    drop(validated);
+    persist_partial(partial, output, overwrite)?;
+    Ok(validation)
+}
+
+fn persist_partial(partial: TempPath, output: &Path, overwrite: OverwritePolicy) -> Result<()> {
     let persist_result = match overwrite {
         OverwritePolicy::Forbid => partial.persist_noclobber(output),
         OverwritePolicy::Replace => partial.persist(output),
@@ -353,7 +426,7 @@ fn validate_and_commit(
         };
         CartridgeError::new(code, "cannot commit validated cartridge").with_source(error)
     })?;
-    Ok(validation)
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

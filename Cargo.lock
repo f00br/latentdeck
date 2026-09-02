@@ -2070,13 +2070,17 @@ dependencies = [
  "latentdeck-cartridge",
  "latentdeck-control",
  "latentdeck-core",
+ "latentdeck-deck-runtime-contracts",
+ "latentdeck-extension-manager",
  "latentdeck-gpu",
  "latentdeck-library",
  "latentdeck-native-output",
  "latentdeck-output-mp4",
+ "rmp-serde",
  "semver",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -2121,23 +2125,23 @@ name = "latentdeck-codec-pack-installer"
 version = "0.1.0"
 dependencies = [
  "clap",
- "fs2",
  "hex",
- "latentdeck-core",
+ "latentdeck-extension-manager",
  "semver",
+ "serde",
+ "serde_jcs",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
- "thiserror 2.0.20",
- "uuid",
- "zip",
 ]
 
 [[package]]
 name = "latentdeck-control"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "rmp-serde",
+ "semver",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -2153,6 +2157,8 @@ dependencies = [
  "hex",
  "latentdeck-cartridge",
  "latentdeck-control",
+ "latentdeck-extension-manager",
+ "latentdeck-gpu",
  "rmp-serde",
  "semver",
  "serde",
@@ -2162,7 +2168,38 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "uuid",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "latentdeck-deck-runtime-contracts"
+version = "0.1.0"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "latentdeck-extension-manager"
+version = "0.1.0"
+dependencies = [
+ "atomicwrites",
+ "clap",
+ "fs2",
+ "hex",
+ "semver",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.20",
+ "time",
+ "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -2184,6 +2221,7 @@ version = "0.1.0"
 dependencies = [
  "latentdeck-gpu",
  "pyo3",
+ "uuid",
  "windows 0.62.2",
 ]
 
@@ -2238,8 +2276,11 @@ dependencies = [
  "latentdeck-cartridge",
  "latentdeck-control",
  "latentdeck-core",
+ "latentdeck-extension-manager",
  "latentdeck-gpu",
  "latentdeck-native-output",
+ "rmp-serde",
+ "semver",
  "serde",
  "serde_json",
  "tauri",

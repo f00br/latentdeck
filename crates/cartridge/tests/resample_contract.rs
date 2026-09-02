@@ -5,11 +5,14 @@ use std::{collections::BTreeMap, fs, io::Cursor};
 use latentdeck_cartridge::{
     hash::hash_reader,
     manifest::{
-        AudioDisposition, AudioOmissionReason, CartridgeId, DType, Identifier, ParentCartridge,
-        Sha256Digest, SourceCartridgeRef,
+        AudioDisposition, AudioOmissionReason, CartridgeId, DType, Identifier, OperationRecord,
+        ParentCartridge, Sha256Digest, SourceCartridgeRef,
     },
-    reader::{ValidationOptions, open_validated},
-    resample::{CaptureMode, PayloadExpectation, ResampleManifestRequest, pack_resample_atomic},
+    reader::{ValidationOptions, open_integrity_validated, open_validated},
+    resample::{
+        CaptureMode, PayloadExpectation, ProfileResampleRequest, ResampleManifestRequest,
+        pack_profile_resample_atomic, pack_resample_atomic,
+    },
     writer::WriteOptions,
 };
 use serde_json::json;
@@ -200,6 +203,49 @@ fn rejects_reserved_provenance_control_override() {
     )
     .expect_err("reserved control must fail");
     assert_eq!(error.code(), "manifest_invalid");
+}
+
+#[test]
+fn codec_neutral_finalizer_remeasures_reopens_and_consumes_a_non_h3_spool() {
+    let directory = tempdir().expect("tempdir");
+    let payload = support::synthetic_non_h3_payload();
+    let measured = hash_reader(&mut Cursor::new(&payload)).expect("measure payload");
+    let payload_path = directory.path().join("synthetic.safetensors.partial");
+    let output = directory.path().join("synthetic.lc");
+    fs::write(&payload_path, &payload).expect("write payload");
+    let mut manifest = support::synthetic_non_h3_manifest(&payload);
+    manifest.parent_cartridges.push(ParentCartridge {
+        cartridge_id: CartridgeId("550e8400-e29b-41d4-a716-446655440010".to_owned()),
+        archive_sha256: Sha256Digest("a".repeat(64)),
+        role: Identifier("carrier".to_owned()),
+    });
+    manifest.operation_history.push(OperationRecord {
+        operator_id: Identifier("org.example.synthetic_operator".to_owned()),
+        operator_version: "0.2.0".to_owned(),
+        seed: 7,
+        controls: BTreeMap::from([("capture_mode".to_owned(), json!("snapshot"))]),
+    });
+    let request = ProfileResampleRequest {
+        manifest: manifest.clone(),
+        expected_payload: PayloadExpectation {
+            byte_length: measured.byte_length,
+            sha256: Sha256Digest(measured.sha256.to_string()),
+        },
+    };
+
+    let receipt =
+        pack_profile_resample_atomic(&request, &payload_path, &output, &WriteOptions::default())
+            .expect("finalize generic resample");
+
+    assert!(receipt.spool_removed);
+    assert!(!payload_path.exists());
+    let reopened = open_integrity_validated(&output, &ValidationOptions::default())
+        .expect("reopen finalized generic LC");
+    assert_eq!(reopened.manifest(), &manifest);
+    assert_eq!(
+        receipt.validation.archive_sha256,
+        reopened.receipt().archive_sha256
+    );
 }
 
 fn synthetic_av_resample_payload() -> Vec<u8> {

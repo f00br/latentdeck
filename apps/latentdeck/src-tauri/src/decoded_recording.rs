@@ -47,6 +47,7 @@ impl CompletedFinalization {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DecodedRecordingError {
     Active,
+    #[cfg(test)]
     CaptureActive,
     Recorder(RecorderError),
     State,
@@ -56,6 +57,7 @@ impl DecodedRecordingError {
     pub(crate) const fn code(self) -> &'static str {
         match self {
             Self::Active => "recording.already_active",
+            #[cfg(test)]
             Self::CaptureActive => "recording.capture_conflict",
             Self::Recorder(error) => error.code(),
             Self::State => "recording.state_unavailable",
@@ -67,6 +69,7 @@ impl DecodedRecordingError {
             Self::Active => {
                 "A decoded MP4 recording is already active; stop it before choosing another output."
             }
+            #[cfg(test)]
             Self::CaptureActive => {
                 "Finish or cancel latent Snapshot/Live Capture before recording decoded MP4."
             }
@@ -290,7 +293,8 @@ impl DecodedRecordingController {
     }
 }
 
-pub(crate) fn ensure_latent_capture_idle(capture_state: &str) -> Result<(), DecodedRecordingError> {
+#[cfg(test)]
+fn ensure_latent_capture_idle(capture_state: &str) -> Result<(), DecodedRecordingError> {
     if matches!(
         capture_state,
         "awaiting_reset" | "capturing" | "stop_armed" | "finalizing"

@@ -640,6 +640,12 @@ pub enum RingError {
     /// Width and height must both be non-zero.
     #[error("RGB ring dimensions must be non-zero, got {width}x{height}")]
     InvalidDimensions { width: u32, height: u32 },
+    /// Protocol 2 rings contain between two and 24 independently queued slots.
+    #[error("RGB ring slot count must be in [2, 24], got {actual}")]
+    InvalidSlotCount { actual: u32 },
+    /// A decoded ABI batch contains between one and 24 frames.
+    #[error("RGB ring maximum batch must be in [1, 24], got {actual}")]
+    InvalidBatchCount { actual: u32 },
     /// A size calculation exceeded the ABI integer range.
     #[error("RGB ring layout arithmetic overflow")]
     LayoutOverflow,
@@ -649,6 +655,15 @@ pub enum RingError {
     /// Lifecycle generation zero is reserved and invalid.
     #[error("RGB ring generation must be non-zero")]
     InvalidGeneration,
+    /// Protocol 2 lifecycle state is not a recognized stable state.
+    #[error("RGB ring lifecycle state is invalid: {actual}")]
+    InvalidLifecycleState { actual: u64 },
+    /// Protocol 2 session identifiers must not be the nil UUID.
+    #[error("RGB ring session identifier must not be nil")]
+    InvalidSessionId,
+    /// Protocol 2 logical command sequences start at one.
+    #[error("RGB ring logical sequence must be non-zero")]
+    InvalidLogicalSequence,
     /// File creation, open, mapping, or initial header flush failed.
     #[error("RGB ring I/O failed: {0}")]
     Io(#[source] io::Error),
@@ -690,6 +705,9 @@ pub enum RingError {
     /// A tightly packed input frame has the wrong byte count.
     #[error("RGBA8 frame has {actual} bytes, expected {expected}")]
     FrameLengthMismatch { expected: usize, actual: usize },
+    /// A contiguous decoded batch has the wrong byte count.
+    #[error("RGBA8 batch has {actual} bytes, expected {expected}")]
+    BatchLengthMismatch { expected: usize, actual: usize },
     /// Shared producer/consumer counters are not a valid bounded queue state.
     #[error("RGB ring sequence counters are corrupt: produced {produced}, consumed {consumed}")]
     CorruptSequences { produced: u64, consumed: u64 },
@@ -707,9 +725,14 @@ impl RingError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::InvalidDimensions { .. } => "ring_invalid_dimensions",
+            Self::InvalidSlotCount { .. } => "ring_invalid_slot_count",
+            Self::InvalidBatchCount { .. } => "ring_invalid_batch_count",
             Self::LayoutOverflow => "ring_layout_overflow",
             Self::MappingTooLarge { .. } => "ring_mapping_too_large",
             Self::InvalidGeneration => "ring_invalid_generation",
+            Self::InvalidLifecycleState { .. } => "ring_invalid_state",
+            Self::InvalidSessionId => "ring_invalid_session_id",
+            Self::InvalidLogicalSequence => "ring_invalid_logical_sequence",
             Self::Io(_) => "ring_io",
             #[cfg(target_os = "windows")]
             Self::Windows(_) => "ring_windows",
@@ -725,6 +748,7 @@ impl RingError {
             Self::ConsumerAlreadyClaimed => "ring_consumer_claimed",
             Self::ProducerAlreadyClaimed => "ring_producer_claimed",
             Self::FrameLengthMismatch { .. } => "ring_frame_length",
+            Self::BatchLengthMismatch { .. } => "ring_batch_length",
             Self::CorruptSequences { .. } => "ring_corrupt_sequences",
             Self::SequenceExhausted => "ring_sequence_exhausted",
             Self::CorruptSlot { .. } => "ring_corrupt_slot",
@@ -1276,7 +1300,7 @@ fn get_u64(bytes: &[u8], offset: usize) -> u64 {
 /// resized while either endpoint is alive. All atomic offsets are compile-time
 /// multiples of eight, slot strides are multiples of 128, and a file mapping's
 /// base address is page aligned.
-mod mapped {
+pub(crate) mod mapped {
     #![allow(
         unsafe_code,
         clippy::cast_ptr_alignment,

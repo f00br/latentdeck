@@ -11,7 +11,8 @@ struct Cli {
     /// Explicit current-user Local `AppData` known-folder path from the wrapper.
     #[arg(long, value_name = "PATH")]
     local_app_data: PathBuf,
-    /// Explicit all-users `ProgramData` known-folder path from the wrapper.
+    /// Legacy Setup argument retained for command-line compatibility. Protocol
+    /// 2 packages install only below the current-user Local `AppData` root.
     #[arg(long, value_name = "PATH")]
     program_data: PathBuf,
     #[command(subcommand)]
@@ -24,12 +25,16 @@ enum Command {
     Install {
         #[arg(long)]
         archive: PathBuf,
+    },
+    /// Explicitly repair one exact H3 Codec Pack from a build-authorized archive.
+    Repair {
         #[arg(long)]
-        expected_sha256: String,
+        archive: PathBuf,
+    },
+    /// Verify one exact installed H3 Codec Pack version.
+    Verify {
         #[arg(long)]
-        expected_length: u64,
-        #[arg(long)]
-        expected_version: String,
+        version: String,
     },
     /// Uninstall one exact H3 Codec Pack version.
     Uninstall {
@@ -73,23 +78,37 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<String, LifecycleError> {
     let roots = LifecycleRoots::from_known_folders(cli.local_app_data, cli.program_data);
     match cli.command {
-        Command::Install {
-            archive,
-            expected_sha256,
-            expected_length,
-            expected_version,
-        } => {
+        Command::Install { archive } => {
             let receipt = latentdeck_codec_pack_installer::install(
                 &roots,
                 &InstallRequest {
                     archive_path: archive,
-                    expected_sha256,
-                    expected_length,
-                    expected_version: expected_version.clone(),
                 },
             )?;
             Ok(format!(
-                "installed org.latentdeck.h3 {expected_version} at {}",
+                "installed org.latentdeck.h3 {} at {}",
+                receipt.pack_version,
+                receipt.destination.display()
+            ))
+        }
+        Command::Repair { archive } => {
+            let receipt = latentdeck_codec_pack_installer::repair(
+                &roots,
+                &InstallRequest {
+                    archive_path: archive,
+                },
+            )?;
+            Ok(format!(
+                "repaired org.latentdeck.h3 {} at {}",
+                receipt.pack_version,
+                receipt.destination.display()
+            ))
+        }
+        Command::Verify { version } => {
+            let receipt = latentdeck_codec_pack_installer::verify(&roots, &version)?;
+            Ok(format!(
+                "verified org.latentdeck.h3 {} at {}",
+                receipt.pack_version,
                 receipt.destination.display()
             ))
         }
@@ -129,7 +148,7 @@ mod tests {
     #[test]
     fn explicit_known_folder_roots_are_required() {
         assert!(
-            Cli::try_parse_from(["codec-pack-installer", "uninstall", "--version", "0.1.1"])
+            Cli::try_parse_from(["codec-pack-installer", "uninstall", "--version", "0.2.0"])
                 .is_err()
         );
         let parsed = Cli::try_parse_from([
@@ -140,7 +159,7 @@ mod tests {
             r"C:\ExplicitProgramData",
             "uninstall",
             "--version",
-            "0.1.1",
+            "0.2.0",
         ])
         .expect("explicit roots parse");
         assert_eq!(parsed.local_app_data, PathBuf::from(r"C:\ExplicitLocal"));
@@ -148,5 +167,57 @@ mod tests {
             parsed.program_data,
             PathBuf::from(r"C:\ExplicitProgramData")
         );
+    }
+
+    #[test]
+    fn install_cli_cannot_supply_reserved_namespace_authorization() {
+        assert!(
+            Cli::try_parse_from([
+                "codec-pack-installer",
+                "--local-app-data",
+                r"C:\ExplicitLocal",
+                "--program-data",
+                r"C:\ExplicitProgramData",
+                "install",
+                "--archive",
+                r"C:\payload.ldcodec",
+                "--expected-sha256",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "--expected-length",
+                "1234",
+                "--expected-version",
+                "0.2.0",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn repair_and_verify_are_explicit_subcommands() {
+        let repair = Cli::try_parse_from([
+            "codec-pack-installer",
+            "--local-app-data",
+            r"C:\ExplicitLocal",
+            "--program-data",
+            r"C:\ExplicitProgramData",
+            "repair",
+            "--archive",
+            r"C:\payload.ldcodec",
+        ])
+        .expect("explicit repair parses");
+        assert!(matches!(repair.command, super::Command::Repair { .. }));
+
+        let verify = Cli::try_parse_from([
+            "codec-pack-installer",
+            "--local-app-data",
+            r"C:\ExplicitLocal",
+            "--program-data",
+            r"C:\ExplicitProgramData",
+            "verify",
+            "--version",
+            "0.2.0",
+        ])
+        .expect("explicit verify parses");
+        assert!(matches!(verify.command, super::Command::Verify { .. }));
     }
 }

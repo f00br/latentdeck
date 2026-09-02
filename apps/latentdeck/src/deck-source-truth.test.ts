@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import d2Faceplate from "./D2Faceplate.svelte?raw";
-import q4Faceplate from "./Q4Faceplate.svelte?raw";
+import rendererSource from "./DeckFaceplateRenderer.svelte?raw";
+import workspaceSource from "./GenericDeckWorkspace.svelte?raw";
 import {
   currentlyPlayingReadout,
   createDeckSourceTruthState,
@@ -177,64 +177,18 @@ describe("Deck runtime source truth", () => {
     expect(deckSourceResolutionRetryDelay(-1)).toBeNull();
   });
 
-  it("wires both faceplates to CURRENTLY PLAYING and NEXT LOAD DRAFT semantics", () => {
-    for (const faceplate of [d2Faceplate, q4Faceplate]) {
-      expect(faceplate).toContain("reconcileDeckSourceTruth(");
-      expect(faceplate).toContain("markDeckSourceDraftEdited(");
-      expect(faceplate).toContain("CURRENTLY PLAYING");
-      expect(faceplate).toContain("NEXT LOAD DRAFT");
-      expect(faceplate).toContain("NEXT LOAD DRAFT ONLY");
-      expect(faceplate).toContain("draft-source-readout");
-      expect(faceplate).toContain("currentlyPlayingReadout(");
-      expect(faceplate).toContain("library_resolve_preset_sources");
-      expect(faceplate).toMatch(
-        /The\s+currently playing stream is\s+unchanged/,
-      );
-    }
-  });
-
-  it("makes Q4 slot readouts react directly to runtime source changes", () => {
-    expect(q4Faceplate).toContain("loadedSourceBySlot(status.sources, slot)");
-    expect(q4Faceplate).toMatch(
-      /function loadedSourceBySlot\(\s*sources: Q4LoadedSources \| null,/,
+  it("keeps exact generic draft identities separate from runtime session identities", () => {
+    expect(rendererSource).toContain("draft.sourceArchiveSha256s");
+    expect(rendererSource).toContain("onDraftChange(cloneDraft(draft))");
+    expect(workspaceSource).toContain("session?.runtime.status.playheads");
+    expect(workspaceSource).toContain(
+      "candidate.archiveSha256 === cartridge.archiveSha256",
     );
-    expect(q4Faceplate).not.toContain("loadedSourceBySlot(slot)");
-    expect(q4Faceplate).toContain("sourceHashBySlot[slot]");
-    expect(q4Faceplate).toContain("sourceViewBySlot[slot]");
-    expect(q4Faceplate).not.toContain("sourceHash(slot)");
-    expect(q4Faceplate).not.toContain("sourceBySlot(slot)");
-    expect(q4Faceplate).not.toContain(
-      "isIncompatibleCandidate(slot, cartridge)",
+    expect(workspaceSource).toContain(
+      "candidate.cartridgeId === cartridge.cartridgeId",
     );
-    expect(q4Faceplate).toContain("compatibilityReady,");
-    expect(q4Faceplate).toContain("compatibilityReasons,");
-  });
-
-  it("makes D2 draft-B options react explicitly to draft-A compatibility", () => {
-    expect(d2Faceplate).toMatch(
-      /function isIncompatibleCandidate\(\s*cartridge: CartridgeView,\s*referenceArchiveSha256: string,\s*ready: boolean,\s*reasonsByHash:/,
-    );
-    expect(d2Faceplate).not.toContain("isIncompatibleCandidate(cartridge)");
-    expect(d2Faceplate).not.toContain("compatibilityLabel(cartridge)");
-    expect(d2Faceplate).toMatch(
-      /isIncompatibleCandidate\(\s*cartridge,\s*sourceAHash,\s*compatibilityReady,\s*compatibilityReasons,/,
-    );
-    expect(d2Faceplate).toMatch(
-      /compatibilityLabel\(\s*cartridge,\s*sourceAHash,\s*compatibilityReasons,/,
-    );
-  });
-
-  it("keeps the Q4 currently-playing identity free of next-load draft state", () => {
-    const runtimeLabel = q4Faceplate.match(
-      /class="loaded-source-label"[\s\S]*?<\/p>/,
-    )?.[0];
-
-    expect(runtimeLabel).toBeDefined();
-    expect(runtimeLabel).toContain("describeCurrentlyPlayingSource(");
-    expect(runtimeLabel).not.toContain("NEXT LOAD DRAFT DIFFERS");
-    expect(q4Faceplate).toContain('class="next-load-notice"');
-    expect(q4Faceplate).toContain('class="draft-source-readout"');
-    expect(q4Faceplate).toContain("NEXT LOAD DRAFT ONLY");
+    expect(workspaceSource).toContain("library_resolve_preset_sources");
+    expect(workspaceSource).not.toMatch(/loadedSourceBySlot|sourceHashBySlot/);
   });
 });
 

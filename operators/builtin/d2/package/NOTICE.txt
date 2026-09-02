@@ -1,0 +1,5 @@
+LatentDeck LD-D2 bundled operator
+
+Copyright 2026 LatentDeck contributors.
+Licensed under the Apache License, Version 2.0.
+The publisher identity in deck-pack.json is self-declared package metadata.

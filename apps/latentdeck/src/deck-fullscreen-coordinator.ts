@@ -1,10 +1,9 @@
-export type DeckSurface = "library" | "d2" | "q4";
-export type FullscreenDeckSurface = Exclude<DeckSurface, "library">;
+export type DeckSurface = "library" | "deck" | "extensions";
 
 export interface DeckSurfaceTransition {
   target: DeckSurface;
   current(): DeckSurface;
-  leave(surface: FullscreenDeckSurface): Promise<void>;
+  leave(): Promise<void>;
   commit(surface: DeckSurface): void;
 }
 
@@ -16,9 +15,9 @@ export interface DeckFullscreenCoordinator {
 /**
  * Own one FIFO for every host-fullscreen read, write, and Deck-surface switch.
  *
- * D2 and Q4 share one top-level HWND. Keeping their commands on this queue
- * prevents a new faceplate from observing fullscreen before the outgoing
- * faceplate's idempotent exit has completed.
+ * Every declarative Deck shares one top-level HWND. Keeping all host output
+ * commands on this queue prevents a newly selected exact package from
+ * observing fullscreen before the outgoing session has exited.
  */
 export function createDeckFullscreenCoordinator(): DeckFullscreenCoordinator {
   let tail: Promise<void> = Promise.resolve();
@@ -38,7 +37,7 @@ export function createDeckFullscreenCoordinator(): DeckFullscreenCoordinator {
       run(async () => {
         const outgoing = request.current();
         if (outgoing === request.target) return;
-        if (outgoing !== "library") await request.leave(outgoing);
+        if (outgoing === "deck") await request.leave();
         request.commit(request.target);
       }),
   };

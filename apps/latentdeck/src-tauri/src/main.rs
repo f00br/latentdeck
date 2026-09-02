@@ -1,44 +1,53 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::{fs, path::PathBuf, time::SystemTime};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+    time::SystemTime,
+};
 
 use latentdeck_core::{
     diagnostics::{LogLevel, initialize_global_json_log, record_global},
-    realtime_diagnostics::RealtimeDiagnosticError,
+    realtime_diagnostics::{RealtimeDiagnosticError, SanitizedToken},
 };
+use latentdeck_extension_manager::ExtensionRoots;
 use latentdeck_library::Library;
 use latentdeck_native_output::HostFullscreenController;
 use tauri::{AppHandle, Manager as _, RunEvent, State};
 use tauri_plugin_dialog::DialogExt as _;
 
+mod bundled_decks;
+mod capture_finalizer_v2;
 #[cfg(test)]
 mod codec_pack_test_support;
-mod d2_capture_host;
-mod d2_runtime;
-mod d2_state;
 mod decoded_recording;
 mod diagnostic_state;
 mod embedded_viewport;
+mod extension_commands;
+mod generic_deck_runtime;
+mod generic_deck_state;
 mod library_state;
 mod preset_state;
-mod q4_capture_host;
-mod q4_runtime;
-mod q4_state;
 mod runtime_diagnostics;
-mod runtime_replacement;
-
-use d2_state::{
-    D2AppState, ExitRequest, deck_d2_backend_rediscover, deck_d2_backend_status_get,
-    deck_d2_capture_live_start, deck_d2_capture_live_stop, deck_d2_capture_snapshot,
-    deck_d2_capture_status_get, deck_d2_controls_set, deck_d2_fullscreen_set,
-    deck_d2_fullscreen_status_get, deck_d2_open, deck_d2_recording_start,
-    deck_d2_recording_status_get, deck_d2_recording_stop, deck_d2_restart, deck_d2_seed_set,
-    deck_d2_select_decoder, deck_d2_spout_configure, deck_d2_spout_status_get, deck_d2_status_get,
-    deck_d2_transport_set, deck_d2_viewport_session_begin, deck_d2_viewport_set_bounds,
+use diagnostic_state::{DiagnosticSaveResult, deck_snapshot, write_deck_bundle};
+use extension_commands::{
+    ExtensionManagerState, extensions_deck_catalog, extensions_disable, extensions_enable,
+    extensions_inspect, extensions_install, extensions_remove, extensions_repair,
+    extensions_snapshot, extensions_verify,
 };
-use diagnostic_state::{
-    DeckDiagnosticLifecycle, DeckSnapshotError, DiagnosticSaveResult, deck_snapshot,
-    write_deck_bundle,
+use generic_deck_state::{
+    GenericDeckAppState, deck_generic_capture_start, deck_generic_capture_status_get,
+    deck_generic_capture_stop, deck_generic_close, deck_generic_controls_set,
+    deck_generic_diagnostics_get, deck_generic_external_asset_clear,
+    deck_generic_external_asset_select, deck_generic_foreground_clear, deck_generic_foreground_set,
+    deck_generic_fullscreen_set, deck_generic_fullscreen_status_get, deck_generic_open,
+    deck_generic_preset_load, deck_generic_preset_save, deck_generic_process_once,
+    deck_generic_recording_start, deck_generic_recording_status_get, deck_generic_recording_stop,
+    deck_generic_reset, deck_generic_roles_set, deck_generic_runtime_options,
+    deck_generic_seed_set, deck_generic_sessions_get, deck_generic_spout_configure,
+    deck_generic_spout_status_get, deck_generic_status_get, deck_generic_transport_set,
+    deck_generic_viewport_session_begin, deck_generic_viewport_set_bounds,
 };
 use library_state::{
     AppState, database_path, library_activate_collection_snapshot, library_add_membership,
@@ -49,15 +58,12 @@ use library_state::{
     library_set_tags, library_signal_compatibility, library_snapshot,
 };
 use preset_state::{deck_preset_load, deck_preset_save};
-use q4_state::{
-    Q4AppState, deck_q4_backend_rediscover, deck_q4_backend_status_get, deck_q4_capture_live_start,
-    deck_q4_capture_live_stop, deck_q4_capture_snapshot, deck_q4_capture_status_get,
-    deck_q4_controls_set, deck_q4_fullscreen_set, deck_q4_fullscreen_status_get, deck_q4_open,
-    deck_q4_recording_start, deck_q4_recording_status_get, deck_q4_recording_stop, deck_q4_restart,
-    deck_q4_roles_set, deck_q4_seed_set, deck_q4_select_decoder, deck_q4_spout_configure,
-    deck_q4_spout_status_get, deck_q4_status_get, deck_q4_transport_set,
-    deck_q4_viewport_session_begin, deck_q4_viewport_set_bounds,
-};
+
+#[derive(Default)]
+struct ExitLifecycle {
+    shutdown_started: AtomicBool,
+    ready: AtomicBool,
+}
 
 #[tauri::command]
 const fn product_version() -> &'static str {
@@ -68,9 +74,7 @@ const fn product_version() -> &'static str {
 #[allow(clippy::needless_pass_by_value)]
 async fn deck_save_diagnostics(
     app: AppHandle,
-    d2: State<'_, D2AppState>,
-    q4: State<'_, Q4AppState>,
-    lifecycle: State<'_, DeckDiagnosticLifecycle>,
+    generic: State<'_, GenericDeckAppState>,
 ) -> Result<DiagnosticSaveResult, library_state::CommandError> {
     let suggested_name = format!("latentdeck-diagnostics-{}.zip", current_unix_ms()? / 1_000);
     let selected = app
@@ -89,15 +93,14 @@ async fn deck_save_diagnostics(
         )
     })?)?;
 
-    let (d2, q4) = tokio::join!(d2.runtime_diagnostics(), q4.runtime_diagnostics());
-    let d2 = d2.map_err(|error| library_state::CommandError::new(error.code, error.message))?;
-    let q4 = q4.map_err(|error| library_state::CommandError::new(error.code, error.message))?;
+    let (diagnostics, last_error) = generic.foreground_diagnostics().await?;
     let captured_at_unix_ms = current_unix_ms()?;
-    let last_error = lifecycle
-        .last_error()
+    let last_error = last_error
+        .map(SanitizedToken::parse)
+        .transpose()
         .map_err(|error| diagnostic_command_error(&error))?;
-    let snapshot = deck_snapshot(captured_at_unix_ms, d2, q4, last_error)
-        .map_err(deck_snapshot_command_error)?;
+    let snapshot = deck_snapshot(captured_at_unix_ms, diagnostics, last_error)
+        .map_err(|error| diagnostic_command_error(&error))?;
     let deck_log_root = app
         .path()
         .app_local_data_dir()
@@ -168,16 +171,6 @@ fn validate_diagnostic_destination(
     Ok(path)
 }
 
-fn deck_snapshot_command_error(error: DeckSnapshotError) -> library_state::CommandError {
-    match error {
-        DeckSnapshotError::IdentityConflict => library_state::CommandError::new(
-            "diagnostics.session_identity_conflict",
-            "Active D2 and Q4 sessions use different GPU or codec identities and cannot be merged safely.",
-        ),
-        DeckSnapshotError::Contract(error) => diagnostic_command_error(&error),
-    }
-}
-
 fn diagnostic_command_error(error: &RealtimeDiagnosticError) -> library_state::CommandError {
     match error {
         RealtimeDiagnosticError::OutputExists => library_state::CommandError::new(
@@ -207,17 +200,32 @@ fn diagnostic_command_error(error: &RealtimeDiagnosticError) -> library_state::C
 // lifecycle hook in one auditable place.
 #[allow(clippy::too_many_lines)]
 fn main() {
+    let local_app_data = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .expect("LOCALAPPDATA is required for the LatentDeck extension roots");
+    let extension_roots = ExtensionRoots::from_local_app_data(local_app_data);
+    let generic_app_data = extension_roots.base_root.clone();
+    let bundled_deck_report = bundled_decks::provision_bundled_decks(&extension_roots)
+        .expect("LatentDeck bundled Deck provisioning root is unavailable");
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(DeckDiagnosticLifecycle::default())
+        .manage(ExitLifecycle::default())
         .manage(HostFullscreenController::new())
-        .manage(D2AppState::discover())
-        .manage(Q4AppState::discover())
-        .setup(|app| {
+        .manage(ExtensionManagerState::new(extension_roots))
+        .manage(GenericDeckAppState::new(generic_app_data))
+        .setup(move |app| {
             let app_data_dir = app.path().app_local_data_dir()?;
             fs::create_dir_all(&app_data_dir)?;
             if initialize_global_json_log(&app_data_dir.join("logs"), "latentdeck").is_ok() {
                 record_global(LogLevel::Info, "app.started", None);
+                for issue in &bundled_deck_report.issues {
+                    let event = match issue.package.package_id.as_str() {
+                        "org.latentdeck.deck.d2" => "extensions.bundled_d2_issue",
+                        "org.latentdeck.deck.q4" => "extensions.bundled_q4_issue",
+                        _ => "extensions.bundled_deck_issue",
+                    };
+                    record_global(LogLevel::Warn, event, Some(issue.code.as_str()));
+                }
             }
             let library = Library::open(database_path(&app_data_dir))?;
             app.manage(AppState::new(library));
@@ -225,51 +233,45 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             product_version,
-            deck_d2_backend_status_get,
-            deck_d2_backend_rediscover,
-            deck_d2_select_decoder,
-            deck_d2_open,
-            deck_d2_controls_set,
-            deck_d2_transport_set,
-            deck_d2_seed_set,
-            deck_d2_restart,
-            deck_d2_capture_snapshot,
-            deck_d2_capture_live_start,
-            deck_d2_capture_live_stop,
-            deck_d2_capture_status_get,
-            deck_d2_recording_start,
-            deck_d2_recording_stop,
-            deck_d2_recording_status_get,
-            deck_d2_status_get,
-            deck_d2_fullscreen_status_get,
-            deck_d2_fullscreen_set,
-            deck_d2_spout_status_get,
-            deck_d2_spout_configure,
-            deck_d2_viewport_session_begin,
-            deck_d2_viewport_set_bounds,
-            deck_q4_backend_status_get,
-            deck_q4_backend_rediscover,
-            deck_q4_select_decoder,
-            deck_q4_open,
-            deck_q4_controls_set,
-            deck_q4_roles_set,
-            deck_q4_transport_set,
-            deck_q4_seed_set,
-            deck_q4_restart,
-            deck_q4_capture_snapshot,
-            deck_q4_capture_live_start,
-            deck_q4_capture_live_stop,
-            deck_q4_capture_status_get,
-            deck_q4_recording_start,
-            deck_q4_recording_stop,
-            deck_q4_recording_status_get,
-            deck_q4_status_get,
-            deck_q4_fullscreen_status_get,
-            deck_q4_fullscreen_set,
-            deck_q4_spout_status_get,
-            deck_q4_spout_configure,
-            deck_q4_viewport_session_begin,
-            deck_q4_viewport_set_bounds,
+            deck_generic_runtime_options,
+            deck_generic_external_asset_select,
+            deck_generic_external_asset_clear,
+            deck_generic_open,
+            deck_generic_sessions_get,
+            deck_generic_status_get,
+            deck_generic_process_once,
+            deck_generic_controls_set,
+            deck_generic_roles_set,
+            deck_generic_transport_set,
+            deck_generic_seed_set,
+            deck_generic_reset,
+            deck_generic_foreground_set,
+            deck_generic_foreground_clear,
+            deck_generic_close,
+            deck_generic_viewport_session_begin,
+            deck_generic_viewport_set_bounds,
+            deck_generic_fullscreen_status_get,
+            deck_generic_fullscreen_set,
+            deck_generic_spout_status_get,
+            deck_generic_spout_configure,
+            deck_generic_capture_start,
+            deck_generic_capture_stop,
+            deck_generic_capture_status_get,
+            deck_generic_recording_start,
+            deck_generic_recording_stop,
+            deck_generic_recording_status_get,
+            deck_generic_diagnostics_get,
+            deck_generic_preset_save,
+            deck_generic_preset_load,
+            extensions_deck_catalog,
+            extensions_snapshot,
+            extensions_inspect,
+            extensions_install,
+            extensions_verify,
+            extensions_enable,
+            extensions_disable,
+            extensions_remove,
+            extensions_repair,
             library_snapshot,
             library_activate_collection_snapshot,
             library_resolve_preset_sources,
@@ -298,21 +300,24 @@ fn main() {
     app.run(|app_handle, event| {
         if let RunEvent::ExitRequested { api, code, .. } = event {
             record_global(LogLevel::Info, "app.exit_requested", None);
-            let state = app_handle.state::<D2AppState>();
-            match state.request_exit() {
-                ExitRequest::BeginShutdown => {
-                    api.prevent_exit();
+            let lifecycle = app_handle.state::<ExitLifecycle>();
+            if !lifecycle.ready.load(Ordering::Acquire) {
+                api.prevent_exit();
+                if !lifecycle.shutdown_started.swap(true, Ordering::AcqRel) {
                     let app_handle = app_handle.clone();
                     tauri::async_runtime::spawn(async move {
-                        let _ = app_handle.state::<D2AppState>().shutdown_runtime().await;
-                        let _ = app_handle.state::<Q4AppState>().shutdown_runtime().await;
-                        app_handle.state::<D2AppState>().mark_exit_ready();
+                        app_handle
+                            .state::<GenericDeckAppState>()
+                            .shutdown_all()
+                            .await;
+                        app_handle
+                            .state::<ExitLifecycle>()
+                            .ready
+                            .store(true, Ordering::Release);
                         record_global(LogLevel::Info, "app.exit_ready", None);
                         app_handle.exit(code.unwrap_or_default());
                     });
                 }
-                ExitRequest::WaitForShutdown => api.prevent_exit(),
-                ExitRequest::AllowExit => {}
             }
         }
     });

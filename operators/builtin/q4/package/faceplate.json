@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "title": "LatentDeck Q4",
+  "sections": [
+    {
+      "section_id": "sources",
+      "title": "Sources",
+      "widgets": [
+        {"id": "source_a", "kind": "source_picker", "label": "Source A", "slot_index": 0},
+        {"id": "source_b", "kind": "source_picker", "label": "Source B", "slot_index": 1},
+        {"id": "source_c", "kind": "source_picker", "label": "Source C", "slot_index": 2},
+        {"id": "source_d", "kind": "source_picker", "label": "Source D", "slot_index": 3}
+      ]
+    },
+    {
+      "section_id": "roles",
+      "title": "Roles",
+      "widgets": [
+        {
+          "id": "role_binding",
+          "kind": "role_editor",
+          "label": "Carrier and donors",
+          "role_ids": ["carrier", "donor_b", "donor_c", "donor_d"]
+        }
+      ]
+    },
+    {
+      "section_id": "synthesis",
+      "title": "Latent synthesis",
+      "widgets": [
+        {
+          "id": "algorithm",
+          "kind": "select",
+          "label": "Algorithm",
+          "control_id": "algorithm",
+          "options": [
+            {"value": "linear", "label": "LINEAR"},
+            {"value": "xs5", "label": "XS5"}
+          ]
+        },
+        {"id": "interaction", "kind": "slider", "label": "Interaction", "control_id": "interaction", "minimum": 0.0, "maximum": 1.0, "step": 0.01},
+        {
+          "id": "mode",
+          "kind": "select",
+          "label": "Mode",
+          "control_id": "mode",
+          "options": [
+            {"value": "hybridize", "label": "Hybridize"},
+            {"value": "interact", "label": "Interact"}
+          ]
+        },
+        {"id": "preserve", "kind": "slider", "label": "Preserve", "control_id": "preserve", "minimum": 0.0, "maximum": 1.0, "step": 0.01},
+        {
+          "id": "influence_mode",
+          "kind": "select",
+          "label": "Influence",
+          "control_id": "influence_mode",
+          "options": [
+            {"value": "manual", "label": "Manual"},
+            {"value": "triangle", "label": "Triangle"}
+          ]
+        },
+        {"id": "donor_weight_b", "kind": "number", "label": "Donor B weight", "control_id": "donor_weight_b", "minimum": 0.0, "maximum": 1.0, "step": 0.01},
+        {"id": "donor_weight_c", "kind": "number", "label": "Donor C weight", "control_id": "donor_weight_c", "minimum": 0.0, "maximum": 1.0, "step": 0.01},
+        {"id": "donor_weight_d", "kind": "number", "label": "Donor D weight", "control_id": "donor_weight_d", "minimum": 0.0, "maximum": 1.0, "step": 0.01},
+        {
+          "id": "triangle",
+          "kind": "barycentric3",
+          "label": "Donor influence field",
+          "x_control_id": "triangle_x",
+          "y_control_id": "triangle_y",
+          "vertex_role_ids": ["donor_b", "donor_c", "donor_d"]
+        },
+        {
+          "id": "xs5_routing",
+          "kind": "select",
+          "label": "XS5 routing",
+          "control_id": "xs5_routing",
+          "options": [
+            {"value": "topk", "label": "TOPK"},
+            {"value": "sinkhorn", "label": "SINKHORN"}
+          ]
+        },
+        {"id": "temperature", "kind": "number", "label": "Temperature", "control_id": "temperature", "minimum": 0.02, "maximum": 1.0, "step": 0.01},
+        {"id": "top_k", "kind": "number", "label": "Top K", "control_id": "top_k", "minimum": 1, "maximum": 64, "step": 1},
+        {"id": "sinkhorn_iterations", "kind": "number", "label": "Sinkhorn iterations", "control_id": "sinkhorn_iterations", "minimum": 2, "maximum": 12, "step": 1},
+        {"id": "chaos", "kind": "slider", "label": "Chaos", "control_id": "chaos", "minimum": 0.0, "maximum": 1.0, "step": 0.01}
+      ]
+    },
+    {
+      "section_id": "transport",
+      "title": "Transport",
+      "widgets": [
+        {"id": "transport", "kind": "transport", "label": "Independent playheads", "slot_indices": [0, 1, 2, 3]},
+        {"id": "seed", "kind": "seed", "label": "Seed"}
+      ]
+    },
+    {
+      "section_id": "output",
+      "title": "Output",
+      "widgets": [
+        {"id": "capture", "kind": "capture", "label": "Latent capture", "modes": ["snapshot", "live_capture"]},
+        {"id": "monitor", "kind": "monitor", "label": "Monitor"}
+      ]
+    }
+  ]
+}

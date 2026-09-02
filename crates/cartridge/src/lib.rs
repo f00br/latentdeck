@@ -1,5 +1,6 @@
 //! Stable, codec-neutral `Latent Cartridge` contracts.
 
+pub mod access;
 pub mod archive;
 pub mod authoring;
 pub mod error;
@@ -11,6 +12,7 @@ pub mod profile;
 pub mod reader;
 pub mod resample;
 pub mod safetensor;
+pub mod signal;
 pub mod writer;
 
 /// The implemented `Latent Cartridge` specification version.

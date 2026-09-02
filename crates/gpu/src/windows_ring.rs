@@ -450,7 +450,7 @@ fn require_new_generation(
 }
 
 /// All Win32 calls, raw views, and handle ownership conversion live here.
-mod win32 {
+pub(crate) mod win32 {
     #![allow(
         unsafe_code,
         clippy::as_conversions,

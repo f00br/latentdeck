@@ -21,20 +21,21 @@
     type ReindexSummary,
   } from "./library-model";
   import { notifyLibraryInvalidated } from "./library-refresh";
-  import D2Faceplate from "./D2Faceplate.svelte";
-  import Q4Faceplate from "./Q4Faceplate.svelte";
-  import { d2Client } from "./d2-client";
+  import ExtensionsManager from "./ExtensionsManager.svelte";
+  import GenericDeckWorkspace from "./GenericDeckWorkspace.svelte";
   import {
     createDeckFullscreenCoordinator,
     type DeckSurface,
-    type FullscreenDeckSurface,
   } from "./deck-fullscreen-coordinator";
   import {
     describeDiagnosticSaveResult,
     type DiagnosticSaveResult,
   } from "./diagnostic-model";
   import { product } from "./product";
-  import { q4Client } from "./q4-client";
+  import { loadDeckUiCatalog } from "./deck-catalog-client";
+  import { type DeckUiCatalog, type DeckUiModel } from "./deck-ui-model";
+
+  const EMPTY_DECK_CATALOG: DeckUiCatalog = { decks: [], issues: [] };
 
   let view: LibraryView = EMPTY_LIBRARY_VIEW;
   let search = "";
@@ -48,30 +49,76 @@
   let tagDrafts: Record<string, string> = {};
   let membershipTargets: Record<string, string> = {};
   let activeSurface: DeckSurface = "library";
+  let deckCatalog: DeckUiCatalog = EMPTY_DECK_CATALOG;
+  let activeDeckKey = "";
+  let deckCatalogError = "";
   let diagnosticBusy = false;
   let diagnosticFailed = false;
   let diagnosticStatus = "Path-free support bundle";
   const fullscreenCoordinator = createDeckFullscreenCoordinator();
+  let leaveActiveDeck: () => Promise<void> = async () => undefined;
 
   let activeCollection: CollectionView | undefined;
   let persistedCollections: CollectionView[] = [];
   let memberReorderEnabled = false;
+  let decks: readonly DeckUiModel[] = [];
+  let activeDeck: DeckUiModel | undefined;
   $: activeCollection = view.collections.find(
     (collection) => collection.id === view.deckSession.activeCollectionId,
   );
   $: persistedCollections = realCollections(view.collections);
   $: memberReorderEnabled = canReorderActiveMembers(view, search);
+  $: decks = deckCatalog.decks;
+  $: activeDeck = decks.find((deck) => deck.exactKey === activeDeckKey);
 
   onMount(() => {
     void initialLoad();
+    void refreshDeckCatalog();
   });
+
+  async function refreshDeckCatalog(): Promise<void> {
+    try {
+      const incoming = await loadDeckUiCatalog();
+      deckCatalog = incoming;
+      deckCatalogError =
+        incoming.issues.length === 0
+          ? ""
+          : `${incoming.issues.length} exact Deck UI contract(s) were isolated.`;
+      if (
+        activeDeckKey !== "" &&
+        !incoming.decks.some((deck) => deck.exactKey === activeDeckKey)
+      ) {
+        activeDeckKey = "";
+        if (activeSurface === "deck") activeSurface = "extensions";
+      }
+    } catch (error) {
+      deckCatalogError = describeCommandError(error);
+    }
+  }
+
+  async function selectDeck(exactKey: string): Promise<void> {
+    if (!decks.some((deck) => deck.exactKey === exactKey)) return;
+    if (activeSurface === "deck" && activeDeckKey !== exactKey) {
+      try {
+        await fullscreenCoordinator.run(async () => {
+          await leaveActiveDeck();
+          activeDeckKey = exactKey;
+        });
+      } catch (error) {
+        errorMessage = describeCommandError(error);
+      }
+      return;
+    }
+    activeDeckKey = exactKey;
+    await selectSurface("deck");
+  }
 
   async function selectSurface(surface: DeckSurface): Promise<void> {
     try {
       await fullscreenCoordinator.transition({
         target: surface,
         current: () => activeSurface,
-        leave: leaveFullscreenDeck,
+        leave: leaveActiveDeck,
         commit: (nextSurface) => {
           activeSurface = nextSurface;
         },
@@ -86,14 +133,13 @@
     }
   }
 
-  async function leaveFullscreenDeck(
-    surface: FullscreenDeckSurface,
-  ): Promise<void> {
-    if (surface === "d2") {
-      await d2Client.fullscreenSet(false);
-    } else {
-      await q4Client.fullscreenSet(false);
-    }
+  function registerDeckLeave(leave: () => Promise<void>): void {
+    leaveActiveDeck = leave;
+  }
+
+  function acceptDeckLibrary(next: LibraryView): void {
+    view = next;
+    notifyLibraryInvalidated();
   }
 
   async function initialLoad(): Promise<void> {
@@ -399,9 +445,9 @@
   <title
     >{product.name} — {activeSurface === "library"
       ? "Library"
-      : activeSurface === "d2"
-        ? "LD-D2"
-        : "LD-Q4"}</title
+      : activeSurface === "deck"
+        ? (activeDeck?.displayName ?? "Deck")
+        : "Extensions"}</title
   >
 </svelte:head>
 
@@ -449,27 +495,37 @@
       <strong>Library</strong>
       <small>Cartridges · Collections</small>
     </button>
+    {#each decks as deck, index (deck.exactKey)}
+      <button
+        type="button"
+        class:active={activeSurface === "deck" &&
+          activeDeckKey === deck.exactKey}
+        aria-current={activeSurface === "deck" &&
+        activeDeckKey === deck.exactKey
+          ? "page"
+          : undefined}
+        onclick={() => void selectDeck(deck.exactKey)}
+      >
+        <span>{String(index + 2).padStart(2, "0")}</span>
+        <strong>{deck.displayName}</strong>
+        <small>{deck.deckId} · {deck.deckVersion}</small>
+      </button>
+    {/each}
     <button
       type="button"
-      class:active={activeSurface === "d2"}
-      aria-current={activeSurface === "d2" ? "page" : undefined}
-      onclick={() => void selectSurface("d2")}
+      class:active={activeSurface === "extensions"}
+      aria-current={activeSurface === "extensions" ? "page" : undefined}
+      onclick={() => void selectSurface("extensions")}
     >
-      <span>02</span>
-      <strong>LD-D2</strong>
-      <small>Dual-source synthesis</small>
-    </button>
-    <button
-      type="button"
-      class:active={activeSurface === "q4"}
-      aria-current={activeSurface === "q4" ? "page" : undefined}
-      onclick={() => void selectSurface("q4")}
-    >
-      <span>03</span>
-      <strong>LD-Q4</strong>
-      <small>Carrier · Three donors</small>
+      <span>{String(decks.length + 2).padStart(2, "0")}</span>
+      <strong>Extensions</strong>
+      <small>Decks · Codec Packs</small>
     </button>
   </nav>
+
+  {#if deckCatalogError !== ""}
+    <div class="message error" role="status">{deckCatalogError}</div>
+  {/if}
 
   <section class="command-rail" aria-label="Library commands">
     <button
@@ -885,16 +941,26 @@
   </div>
   <section
     class="deck-surface"
-    class:active={activeSurface === "d2"}
-    aria-hidden={activeSurface !== "d2"}
+    class:active={activeSurface === "deck"}
+    aria-hidden={activeSurface !== "deck"}
   >
-    <D2Faceplate active={activeSurface === "d2"} {fullscreenCoordinator} />
+    {#if activeDeck !== undefined}
+      <GenericDeckWorkspace
+        model={activeDeck}
+        models={decks}
+        library={view}
+        active={activeSurface === "deck"}
+        onSelectDeck={selectDeck}
+        onLibraryChanged={acceptDeckLibrary}
+        registerLeave={registerDeckLeave}
+      />
+    {/if}
   </section>
   <section
     class="deck-surface"
-    class:active={activeSurface === "q4"}
-    aria-hidden={activeSurface !== "q4"}
+    class:active={activeSurface === "extensions"}
+    aria-hidden={activeSurface !== "extensions"}
   >
-    <Q4Faceplate active={activeSurface === "q4"} {fullscreenCoordinator} />
+    <ExtensionsManager onPackagesChanged={() => void refreshDeckCatalog()} />
   </section>
 </main>

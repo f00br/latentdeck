@@ -4,8 +4,8 @@ use latentdeck_cartridge::{
     error::ErrorCode,
     limits::{MAX_H3_PAYLOAD_BYTES, MAX_SAFETENSORS_HEADER_BYTES, ValidationLimits},
     safetensor::{
-        EntryRange, SafetensorDType, preflight_h3_safetensors, scan_h3_safetensors_finite,
-        validate_h3_safetensors,
+        EntryRange, SafetensorDType, preflight_h3_safetensors, preflight_safetensors,
+        scan_h3_safetensors_finite, scan_safetensors_finite, validate_h3_safetensors,
     },
 };
 
@@ -104,6 +104,42 @@ fn preflights_finite_f16_video_inside_a_bounded_entry() {
     assert_eq!(result.video.shape, [1, 24, 2, 1, 1]);
     assert_eq!(result.video.data_offsets, [0, video.len() as u64]);
     assert!(result.audio.is_none());
+}
+
+#[test]
+fn codec_neutral_preflight_accepts_profile_owned_tensor_names_and_geometry() {
+    let data = finite_f32(7 * 3);
+    let header = format!(
+        r#"{{"latent_state":{{"dtype":"F32","shape":[1,7,1,3,1],"data_offsets":[0,{}]}}}}"#,
+        data.len()
+    );
+    let encoded = payload(&header, &data);
+    let entry = EntryRange::new(0, encoded.len() as u64);
+
+    let receipt = preflight_safetensors(
+        &mut Cursor::new(&encoded),
+        entry,
+        "payloads/synthetic.safetensors",
+        &ValidationLimits::default(),
+    )
+    .expect("codec-neutral tensor envelope");
+    assert_eq!(receipt.tensors.len(), 1);
+    assert_eq!(receipt.tensors["latent_state"].shape, [1, 7, 1, 3, 1]);
+    scan_safetensors_finite(
+        &mut Cursor::new(&encoded),
+        entry,
+        "payloads/synthetic.safetensors",
+        &receipt,
+    )
+    .expect("finite profile-owned tensor");
+
+    let error = preflight_h3_safetensors(
+        &mut Cursor::new(&encoded),
+        entry,
+        &ValidationLimits::default(),
+    )
+    .expect_err("H3 semantics remain a separate validation layer");
+    assert_eq!(error.code, ErrorCode::TensorMissing);
 }
 
 #[test]

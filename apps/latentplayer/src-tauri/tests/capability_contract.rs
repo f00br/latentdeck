@@ -48,3 +48,48 @@ fn fullscreen_commands_resolve_the_authoritative_main_window() {
         assert!(!body.contains("window: WebviewWindow"));
     }
 }
+
+#[test]
+fn production_startup_is_protocol2_only_without_hidden_protocol1_fallback() {
+    let composition_root = include_str!("../src/main.rs");
+    let start = composition_root
+        .find("async fn start_runtime(")
+        .expect("production startup exists");
+    let tail = &composition_root[start..];
+    let end = tail
+        .find("\n}\n")
+        .map(|index| index + 3)
+        .expect("production startup closes");
+    let body = &tail[..end];
+
+    assert!(body.contains("PlaybackRuntime::start_protocol2"));
+    assert!(!body.contains("start_protocol1_h3"));
+    assert!(!body.contains("fallback"));
+}
+
+#[test]
+fn player_boot_does_not_auto_select_a_newest_codec_pack() {
+    let composition_root = include_str!("../src/main.rs");
+    let start = composition_root
+        .find("fn discover() -> Self")
+        .expect("application discovery exists");
+    let tail = &composition_root[start..];
+    let end = tail
+        .find("\n    }\n}")
+        .map(|index| index + 7)
+        .expect("application discovery closes");
+    let body = &tail[..end];
+
+    assert!(body.contains("PlayerCoordinator::without_codec()"));
+    assert!(!body.contains("discover_visible"));
+    assert!(!body.contains("newest"));
+}
+
+#[test]
+fn player_loop_is_a_host_controlled_generation_reset() {
+    let runtime = include_str!("../src/playback_runtime_v2.rs");
+
+    assert!(runtime.contains("if self.loop_enabled"));
+    assert!(runtime.contains("self.reset().await?"));
+    assert!(runtime.contains("adopt_ring_generation(new_generation)"));
+}

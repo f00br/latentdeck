@@ -5,6 +5,10 @@ description = "Isolated Python codec-host process for LatentDeck."
 requires-python = ">=3.13,<3.14"
 license = "Apache-2.0"
 dependencies = [
+    "latentdeck-cartridge==0.1.0",
+    "latentdeck-codec-sdk==0.2.0",
+    "latentdeck-deck-sdk==0.2.0",
+    "latentdeck-rgb-ring==0.1.0",
     "msgpack==1.2.2",
 ]
 

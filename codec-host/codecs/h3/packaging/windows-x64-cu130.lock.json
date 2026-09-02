@@ -122,20 +122,26 @@
   ],
   "local_projects": [
     {
+      "name": "latentdeck-cartridge",
+      "version": "0.1.0",
+      "source_url": "https://latentdeck.org/",
+      "license_expression": "Apache-2.0"
+    },
+    {
       "name": "latentdeck-codec-host",
       "version": "0.1.0",
       "source_url": "https://latentdeck.org/",
       "license_expression": "Apache-2.0"
     },
     {
-      "name": "latentdeck-operator-d2",
-      "version": "0.1.0",
+      "name": "latentdeck-codec-sdk",
+      "version": "0.2.0",
       "source_url": "https://latentdeck.org/",
       "license_expression": "Apache-2.0"
     },
     {
-      "name": "latentdeck-operator-q4",
-      "version": "0.1.0",
+      "name": "latentdeck-deck-sdk",
+      "version": "0.2.0",
       "source_url": "https://latentdeck.org/",
       "license_expression": "Apache-2.0"
     },
@@ -147,7 +153,7 @@
     },
     {
       "name": "latentdeck-codec-h3",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "source_url": "https://latentdeck.org/",
       "license_expression": "Apache-2.0"
     }

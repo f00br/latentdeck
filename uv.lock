@@ -7,8 +7,10 @@ members = [
     "latentdeck-cartridge",
     "latentdeck-codec-h3",
     "latentdeck-codec-host",
+    "latentdeck-codec-sdk",
     "latentdeck-comfy-cartridge",
     "latentdeck-comfy-toolkit",
+    "latentdeck-deck-sdk",
     "latentdeck-example-channel-roll",
     "latentdeck-operator-d2",
     "latentdeck-operator-q4",
@@ -140,20 +142,18 @@ source = { editable = "sdk/python" }
 
 [[package]]
 name = "latentdeck-codec-h3"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "codec-host/codecs/h3" }
 dependencies = [
+    { name = "latentdeck-cartridge" },
     { name = "latentdeck-codec-host" },
-    { name = "latentdeck-operator-d2" },
-    { name = "latentdeck-operator-q4" },
+    { name = "latentdeck-codec-sdk" },
     { name = "latentdeck-rgb-ring" },
     { name = "safetensors" },
 ]
 
 [package.optional-dependencies]
 cu130 = [
-    { name = "latentdeck-operator-d2", extra = ["cu130"] },
-    { name = "latentdeck-operator-q4", extra = ["cu130"] },
     { name = "numpy" },
     { name = "torch" },
     { name = "tqdm" },
@@ -161,11 +161,9 @@ cu130 = [
 
 [package.metadata]
 requires-dist = [
+    { name = "latentdeck-cartridge", editable = "sdk/python" },
     { name = "latentdeck-codec-host", editable = "codec-host/python" },
-    { name = "latentdeck-operator-d2", editable = "operators/builtin/d2" },
-    { name = "latentdeck-operator-d2", extras = ["cu130"], marker = "extra == 'cu130'", editable = "operators/builtin/d2" },
-    { name = "latentdeck-operator-q4", editable = "operators/builtin/q4" },
-    { name = "latentdeck-operator-q4", extras = ["cu130"], marker = "extra == 'cu130'", editable = "operators/builtin/q4" },
+    { name = "latentdeck-codec-sdk", editable = "sdk/codec-python" },
     { name = "latentdeck-rgb-ring", editable = "codec-host/rgb-ring" },
     { name = "numpy", marker = "extra == 'cu130'", specifier = "==2.5.2" },
     { name = "safetensors", specifier = "==0.8.0" },
@@ -178,6 +176,27 @@ provides-extras = ["cu130"]
 name = "latentdeck-codec-host"
 version = "0.1.0"
 source = { editable = "codec-host/python" }
+dependencies = [
+    { name = "latentdeck-cartridge" },
+    { name = "latentdeck-codec-sdk" },
+    { name = "latentdeck-deck-sdk" },
+    { name = "latentdeck-rgb-ring" },
+    { name = "msgpack" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "latentdeck-cartridge", editable = "sdk/python" },
+    { name = "latentdeck-codec-sdk", editable = "sdk/codec-python" },
+    { name = "latentdeck-deck-sdk", editable = "sdk/deck-python" },
+    { name = "latentdeck-rgb-ring", editable = "codec-host/rgb-ring" },
+    { name = "msgpack", specifier = "==1.2.2" },
+]
+
+[[package]]
+name = "latentdeck-codec-sdk"
+version = "0.2.0"
+source = { editable = "sdk/codec-python" }
 dependencies = [
     { name = "msgpack" },
 ]
@@ -206,6 +225,7 @@ version = "0.1.0"
 source = { editable = "comfy/toolkit" }
 dependencies = [
     { name = "latentdeck-cartridge" },
+    { name = "latentdeck-deck-sdk" },
     { name = "latentdeck-operator-d2" },
     { name = "latentdeck-operator-q4" },
     { name = "safetensors" },
@@ -222,6 +242,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "latentdeck-cartridge", editable = "sdk/python" },
+    { name = "latentdeck-deck-sdk", editable = "sdk/deck-python" },
     { name = "latentdeck-operator-d2", editable = "operators/builtin/d2" },
     { name = "latentdeck-operator-q4", editable = "operators/builtin/q4" },
     { name = "pytest", marker = "extra == 'test'", specifier = "==9.1.1" },
@@ -229,6 +250,11 @@ requires-dist = [
     { name = "torch", marker = "extra == 'cu130'", specifier = "==2.13.0", index = "https://download.pytorch.org/whl/cu130" },
 ]
 provides-extras = ["cu130", "test"]
+
+[[package]]
+name = "latentdeck-deck-sdk"
+version = "0.2.0"
+source = { editable = "sdk/deck-python" }
 
 [[package]]
 name = "latentdeck-example-channel-roll"
@@ -256,10 +282,10 @@ provides-extras = ["cu130", "test"]
 
 [[package]]
 name = "latentdeck-operator-d2"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "operators/builtin/d2" }
 dependencies = [
-    { name = "latentdeck-codec-host" },
+    { name = "latentdeck-deck-sdk" },
 ]
 
 [package.optional-dependencies]
@@ -272,7 +298,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "latentdeck-codec-host", editable = "codec-host/python" },
+    { name = "latentdeck-deck-sdk", editable = "sdk/deck-python" },
     { name = "pytest", marker = "extra == 'test'", specifier = "==9.1.1" },
     { name = "torch", marker = "extra == 'cu130'", specifier = "==2.13.0", index = "https://download.pytorch.org/whl/cu130" },
 ]
@@ -280,10 +306,10 @@ provides-extras = ["cu130", "test"]
 
 [[package]]
 name = "latentdeck-operator-q4"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "operators/builtin/q4" }
 dependencies = [
-    { name = "latentdeck-codec-host" },
+    { name = "latentdeck-deck-sdk" },
 ]
 
 [package.optional-dependencies]
@@ -296,7 +322,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "latentdeck-codec-host", editable = "codec-host/python" },
+    { name = "latentdeck-deck-sdk", editable = "sdk/deck-python" },
     { name = "pytest", marker = "extra == 'test'", specifier = "==9.1.1" },
     { name = "torch", marker = "extra == 'cu130'", specifier = "==2.13.0", index = "https://download.pytorch.org/whl/cu130" },
 ]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import uuid
 from pathlib import Path
 
@@ -144,6 +145,80 @@ def test_read_h3_returns_validated_tensor_bytes_without_archive_extraction(tmp_p
     assert sorted(path.name for path in tmp_path.iterdir()) == ["result.lc", "source.safetensors"]
 
 
+def test_retained_integrity_handle_exposes_only_bounded_validated_tensors(
+    tmp_path: Path,
+) -> None:
+    output_path, _, manifest = _pack_synthetic(tmp_path)
+
+    handle = cartridge.open_validated_handle(output_path)
+
+    assert cartridge.INTEGRITY_HANDLE_ABI_VERSION == "2"
+    assert json.loads(handle.manifest_json()) == manifest
+    assert json.loads(handle.validation_json())["validation_level"] == "full"
+    assert handle.tensor_names() == ["video"]
+    assert json.loads(handle.tensor_descriptors_json()) == {
+        "video": {
+            "byte_length": 24 * 2 * 2,
+            "dtype": "F16",
+            "shape": [1, 24, 2, 1, 1],
+        }
+    }
+    assert handle.read_tensor("video", 24 * 2 * 2) == bytes(24 * 2 * 2)
+    assert handle.read_tensor_range("video", 4, 12, 12) == bytes(12)
+    with pytest.raises(cartridge.CartridgeError) as range_limit:
+        handle.read_tensor_range("video", (24 * 2 * 2) - 4, 8)
+    assert range_limit.value.code == "tensor_descriptor_mismatch"
+    with pytest.raises(cartridge.CartridgeError) as caught:
+        handle.read_tensor("video", 1)
+    assert caught.value.code == "runtime_limit_exceeded"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows DuplicateHandle contract")
+def test_duplicated_native_handle_uses_receipt_without_reopening_the_lc_path(
+    tmp_path: Path,
+) -> None:
+    import ctypes
+    import msvcrt
+
+    output_path, _, manifest = _pack_synthetic(tmp_path)
+    validated = cartridge.open_validated_handle(output_path)
+    receipt = validated.integrity_access_receipt_json()
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel32.DuplicateHandle.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_uint32,
+        ctypes.c_int,
+        ctypes.c_uint32,
+    ]
+    kernel32.DuplicateHandle.restype = ctypes.c_int
+    current_process = kernel32.GetCurrentProcess()
+    duplicated = ctypes.c_void_p()
+    with output_path.open("rb") as source:
+        source_handle = ctypes.c_void_p(msvcrt.get_osfhandle(source.fileno()))
+        succeeded = kernel32.DuplicateHandle(
+            current_process,
+            source_handle,
+            current_process,
+            ctypes.byref(duplicated),
+            0,
+            0,
+            0x00000002,
+        )
+        assert succeeded, ctypes.get_last_error()
+
+    transferred = cartridge.open_validated_handle_from_raw(int(duplicated.value), receipt)
+    assert json.loads(transferred.manifest_json()) == manifest
+    assert transferred.tensor_names() == ["video"]
+    assert json.loads(transferred.tensor_descriptors_json())["video"]["dtype"] == "F16"
+    assert transferred.read_tensor("video") == bytes(24 * 2 * 2)
+    assert transferred.read_tensor_range("video", 8, 16) == bytes(16)
+
+
 def test_public_error_carries_stable_code_detail_and_locations(tmp_path: Path) -> None:
     missing = tmp_path / "missing.lc"
 
@@ -281,10 +356,7 @@ def test_raw_h3_native_options_reject_duplicate_provenance_keys(tmp_path: Path) 
     payload_path = tmp_path / "source.safetensors"
     output_path = tmp_path / "duplicate-options.lc"
     payload_path.write_bytes(_synthetic_video_payload())
-    duplicate_options = (
-        '{"created_at":"2026-08-30T08:00:00Z",'
-        '"created_at":"2026-08-30T09:00:00Z"}'
-    )
+    duplicate_options = '{"created_at":"2026-08-30T08:00:00Z","created_at":"2026-08-30T09:00:00Z"}'
 
     with pytest.raises(cartridge.CartridgeError) as caught:
         _native.pack_raw_h3_json(
@@ -389,9 +461,7 @@ def test_latentdeck_pack_console_surface_builds_manifest_automatically(
     output_path = tmp_path / "console.lc"
     payload_path.write_bytes(_synthetic_video_payload())
 
-    status = pack_main(
-        [str(payload_path), "--profile", "h3", "-o", str(output_path)]
-    )
+    status = pack_main([str(payload_path), "--profile", "h3", "-o", str(output_path)])
 
     assert status == 0
     assert json.loads(capsys.readouterr().out)["command"] == "pack"

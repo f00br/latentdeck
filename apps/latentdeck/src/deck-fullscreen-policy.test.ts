@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import d2Faceplate from "./D2Faceplate.svelte?raw";
-import q4Faceplate from "./Q4Faceplate.svelte?raw";
+import genericWorkspace from "./GenericDeckWorkspace.svelte?raw";
 import {
   canSetDeckFullscreen,
   shouldExitFullscreenForHiddenDeck,
@@ -68,31 +67,25 @@ describe("Deck host fullscreen recovery policy", () => {
     ).toBe(false);
   });
 
-  it("keeps status refresh separate from fullscreen transitions and activation-driven", () => {
-    for (const faceplate of [d2Faceplate, q4Faceplate]) {
-      const refreshStatus = functionSlice(
-        faceplate,
-        "async function refreshFullscreenStatus()",
-        "async function toggleFullscreen()",
-      );
+  it("keeps generic status polling separate from explicit fullscreen transitions", () => {
+    const poll = functionSlice(
+      genericWorkspace,
+      "async function pollForegroundState()",
+      "async function captureAction(",
+    );
+    const toggle = functionSlice(
+      genericWorkspace,
+      "async function toggleFullscreen()",
+      "async function run(",
+    );
 
-      expect(faceplate).toContain("let fullscreenStatusPending = false;");
-      expect(faceplate).toContain(
-        "$: if (viewportMounted) void syncViewportAfterSurfaceChange(active);",
-      );
-      expect(refreshStatus).toContain(
-        "if (fullscreenBusy || fullscreenStatusPending) return;",
-      );
-      expect(refreshStatus).toContain("fullscreenStatusPending = true;");
-      expect(refreshStatus).toContain("fullscreenStatusPending = false;");
-      expect(refreshStatus).not.toContain("fullscreenBusy = true;");
-      expect(refreshStatus).not.toContain("fullscreenBusy = false;");
-    }
-    const q4SpoutPoll = q4Faceplate.match(
-      /spoutPoll = setInterval\(\(\) => \{([\s\S]*?)\}, 250\);/,
-    )?.[1];
-    expect(q4SpoutPoll).toBeDefined();
-    expect(q4SpoutPoll).not.toContain("refreshFullscreenStatus()");
+    expect(genericWorkspace).toContain(
+      "$: if (active && selectedSession?.sessionId !== viewportSessionId)",
+    );
+    expect(poll).toContain("fullscreenStatusGet(sessionId)");
+    expect(poll).not.toContain("fullscreenSet(");
+    expect(toggle).toContain("genericDeckClient.fullscreenSet(");
+    expect(genericWorkspace).toContain("await hideViewport();");
   });
 });
 

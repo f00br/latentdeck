@@ -8,15 +8,16 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+from latentdeck_deck_sdk import DeckOperatorContext, RoleBinding
 from latentdeck_operator_d2 import (
     MAX_SPATIAL_TOKENS,
     OPERATOR_ID,
     OPERATOR_VERSION,
     Algorithm,
-    D2Context,
     D2ContractError,
     D2Controls,
-    process_slot,
+    Routing,
+    process_sources,
 )
 
 MAX_TEMPORAL_SLOTS = 512
@@ -86,11 +87,11 @@ def process_xs_sequence(
     controls: Mapping[str, object] | None = None,
     seed: int = 0,
 ) -> XsSequenceResult:
-    """Process a complete H3 sequence with the public LD-D2 slot implementation.
+    """Process a complete H3 sequence through the authoritative Deck SDK boundary.
 
     The adapter owns only sequence iteration and provenance aggregation. All
-    XS1--XS5 math and its slot-level validation remain in
-    :func:`latentdeck_operator_d2.process_slot`.
+    XS1--XS5 math and slot-level validation remain in
+    :func:`latentdeck_operator_d2.process_sources`.
     """
 
     slot_a = _validate_sequence("A", a)
@@ -107,19 +108,49 @@ def process_xs_sequence(
     if "algorithm" in raw_controls:
         raise D2ContractError("control.conflict", "algorithm is selected by the adapter")
     parsed_controls = D2Controls.from_mapping({"algorithm": selected.value, **raw_controls})
+    role_slots = (
+        (RoleBinding("carrier", 1), RoleBinding("donor", 2))
+        if parsed_controls.routing is Routing.A
+        else (RoleBinding("carrier", 2), RoleBinding("donor", 1))
+    )
 
     output_slots: list[torch.Tensor] = []
     for slot_index in range(slot_a.shape[2]):
-        current_a = slot_a[:, :, slot_index : slot_index + 1]
-        current_b = slot_b[:, :, slot_index : slot_index + 1]
-        context = D2Context(
-            playhead_a=slot_index,
-            playhead_b=slot_index,
-            seed=seed,
-            previous_a=(None if slot_index == 0 else slot_a[:, :, slot_index - 1 : slot_index]),
-            previous_b=(None if slot_index == 0 else slot_b[:, :, slot_index - 1 : slot_index]),
+        current_a = slot_a[:, :, slot_index : slot_index + 1].contiguous()
+        current_b = slot_b[:, :, slot_index : slot_index + 1].contiguous()
+        previous_a = (
+            None
+            if slot_index == 0
+            else slot_a[:, :, slot_index - 1 : slot_index].contiguous()
         )
-        output_slots.append(process_slot(current_a, current_b, parsed_controls, context).output)
+        previous_b = (
+            None
+            if slot_index == 0
+            else slot_b[:, :, slot_index - 1 : slot_index].contiguous()
+        )
+        context = DeckOperatorContext(
+            codec_family="minimax_h3",
+            profile="h3_av_latent",
+            profile_version="0.1.0",
+            timing_contract="minimax_h3_causal",
+            timing_contract_version="0.1.0",
+            frame_rate_numerator=24,
+            frame_rate_denominator=1,
+            generation=1,
+            sequence=slot_index + 1,
+            seed=seed,
+            playheads=(slot_index, slot_index),
+            physical_slots=(1, 2),
+            roles=role_slots,
+            previous_sources=(previous_a, previous_b),
+        )
+        output_slots.append(
+            process_sources(
+                (current_a, current_b),
+                parsed_controls.as_dict(),
+                context,
+            ).output
+        )
 
     output = torch.cat(output_slots, dim=2).contiguous()
     provenance: dict[str, Any] = {

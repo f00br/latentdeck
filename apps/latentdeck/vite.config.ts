@@ -5,6 +5,9 @@ import packageJson from "./package.json" with { type: "json" };
 
 export default defineConfig({
   clearScreen: false,
+  resolve: {
+    conditions: ["browser"],
+  },
   define: {
     __APP_VERSION__: JSON.stringify(packageJson.version),
   },

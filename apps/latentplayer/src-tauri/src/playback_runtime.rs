@@ -4,6 +4,11 @@
 //! handles, decoder state, or native presentation resources. This module keeps
 //! those responsibilities behind bounded typed commands.
 
+#![allow(
+    dead_code,
+    reason = "Protocol 1 remains compiled as an explicit compatibility bridge while production uses Protocol 2"
+)]
+
 use std::{
     fmt,
     path::PathBuf,
@@ -376,7 +381,7 @@ mod windows {
         /// Returns a stable, path-free error after terminating any worker that
         /// did start successfully.
         #[allow(clippy::too_many_lines)] // Closed startup ownership and cleanup sequence.
-        pub async fn start(
+        pub async fn start_protocol1_h3(
             app: AppHandle,
             parent: WebviewWindow,
             player: Arc<Mutex<PlayerCoordinator>>,
@@ -2865,6 +2870,10 @@ mod windows {
 }
 
 #[cfg(target_os = "windows")]
+#[allow(
+    unused_imports,
+    reason = "P1 remains an explicit compatibility bridge, not the production default"
+)]
 pub use windows::PlaybackRuntime;
 
 #[cfg(not(target_os = "windows"))]
@@ -2872,7 +2881,7 @@ pub struct PlaybackRuntime;
 
 #[cfg(not(target_os = "windows"))]
 impl PlaybackRuntime {
-    pub async fn start(
+    pub async fn start_protocol1_h3(
         _app: AppHandle,
         _parent: WebviewWindow,
         _player: Arc<Mutex<PlayerCoordinator>>,

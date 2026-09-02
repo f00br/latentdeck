@@ -10,9 +10,11 @@ from . import _native
 
 __version__ = "0.1.0"
 BINDING_ABI_VERSION = _native.BINDING_ABI_VERSION
+INTEGRITY_HANDLE_ABI_VERSION = _native.INTEGRITY_HANDLE_ABI_VERSION
 NATIVE_MODULE_NAME = "latentdeck_cartridge._native"
 
 CartridgeError = _native.CartridgeError
+ValidatedCartridgeHandle = _native.ValidatedCartridgeHandle
 type StrPath = str | os.PathLike[str]
 type ResultDict = dict[str, object]
 
@@ -46,6 +48,24 @@ def validate(path: StrPath) -> ResultDict:
     return _result(_native.validate_json(_path_text(path)))
 
 
+def open_validated_handle(path: StrPath) -> ValidatedCartridgeHandle:
+    """Retain codec-neutral, bounded access to one fully validated LC file."""
+
+    return _native.open_integrity_handle(_path_text(path))
+
+
+def open_validated_handle_from_raw(
+    raw_handle: int, integrity_access_receipt: str
+) -> ValidatedCartridgeHandle:
+    """Consume one Core-duplicated read-only LC handle and its exact receipt."""
+
+    if isinstance(raw_handle, bool) or not isinstance(raw_handle, int) or raw_handle <= 0:
+        raise ValueError("raw_handle must be a positive integer")
+    if not isinstance(integrity_access_receipt, str) or not integrity_access_receipt:
+        raise ValueError("integrity_access_receipt must be non-empty text")
+    return _native.open_integrity_handle_from_raw(raw_handle, integrity_access_receipt)
+
+
 def hash(path: StrPath) -> ResultDict:
     """Stream the complete file SHA-256 without loading it into memory."""
 
@@ -66,9 +86,7 @@ def read_h3(
 ) -> ResultDict:
     """Read validated H3 tensors with optional pre-allocation admission bounds."""
 
-    encoded, video, audio = _native.read_h3(
-        _path_text(path), max_visual_values, max_tensor_bytes
-    )
+    encoded, video, audio = _native.read_h3(_path_text(path), max_visual_values, max_tensor_bytes)
     result = _result(encoded)
     tensors = result.get("tensors")
     if not isinstance(tensors, dict) or not isinstance(tensors.get("video"), dict):
@@ -179,10 +197,14 @@ def pack_raw_h3(
 __all__ = [
     "BINDING_ABI_VERSION",
     "CartridgeError",
+    "INTEGRITY_HANDLE_ABI_VERSION",
     "NATIVE_MODULE_NAME",
+    "ValidatedCartridgeHandle",
     "hash",
     "inspect",
     "inspect_raw_h3",
+    "open_validated_handle",
+    "open_validated_handle_from_raw",
     "pack",
     "pack_raw_h3",
     "read_h3",

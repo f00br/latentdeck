@@ -4,12 +4,14 @@ import type { CartridgeView, CollectionView } from "./library-model";
 import {
   buildD2Preset,
   buildQ4Preset,
+  D2_DECK_ID,
   d2ControlsFromPreset,
   mergePresetSourceOptions,
   presetCollectionExists,
   resolvePresetLoopDraft,
   q4ControlsFromPreset,
   q4RolesFromPreset,
+  Q4_DECK_ID,
   resolvePresetSources,
   stagePresetLibraryLoad,
   transitionPresetLoopDraft,
@@ -94,11 +96,22 @@ describe("Deck preset model", () => {
       44,
     );
 
-    expect(preset.deck_type).toBe("LD-D2");
-    expect(preset.controls.xs5_routing).toBe(controls.xs5Routing);
-    expect(preset.slots.a).toEqual({
-      cartridge_id: a.cartridgeId,
-      archive_sha256: a.archiveSha256,
+    expect(preset).toMatchObject({
+      schema_version: "2.0.0",
+      deck_id: D2_DECK_ID,
+      deck_version: "0.2.0",
+      roles: { carrier: 1, donor: 2 },
+    });
+    expect(preset.controls.xs5_routing).toEqual({
+      type: "enum",
+      value: controls.xs5Routing,
+    });
+    expect(preset.slots[0]).toEqual({
+      physical_slot: 1,
+      source: {
+        cartridge_id: a.cartridgeId,
+        archive_sha256: a.archiveSha256,
+      },
     });
     expect(d2ControlsFromPreset(preset)).toEqual(controls);
   });
@@ -122,7 +135,14 @@ describe("Deck preset model", () => {
       9,
     );
 
-    expect(preset.slots.d).toEqual(preset.slots.a);
+    expect(preset.deck_id).toBe(Q4_DECK_ID);
+    expect(preset.slots[3]?.source).toEqual(preset.slots[0]?.source);
+    expect(preset.roles).toEqual({
+      carrier: 3,
+      donor_b: 2,
+      donor_c: 1,
+      donor_d: 4,
+    });
     expect(q4ControlsFromPreset(preset)).toEqual(controls);
     expect(q4RolesFromPreset(preset)).toEqual(roles);
   });

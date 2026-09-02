@@ -7,7 +7,8 @@ use std::{
 
 use latentdeck_cartridge::{
     manifest::AudioDisposition,
-    reader::{ValidationOptions, open_validated},
+    reader::{ValidationOptions, open_integrity_validated},
+    signal::validate_codec_neutral_signal_geometry,
     writer::canonical_json_bytes,
 };
 use rusqlite::{OptionalExtension as _, params};
@@ -535,7 +536,9 @@ fn prepare_file(path: &Path) -> Result<PreparedImport> {
         ));
     }
 
-    let validated = open_validated(&canonical, &ValidationOptions::default())
+    let validated = open_integrity_validated(&canonical, &ValidationOptions::default())
+        .map_err(|error| LibraryError::cartridge(&error))?;
+    validate_codec_neutral_signal_geometry(validated.manifest())
         .map_err(|error| LibraryError::cartridge(&error))?;
     let metadata = fs::metadata(&canonical).map_err(filesystem_error)?;
     if metadata.len() != validated.receipt().archive_bytes {

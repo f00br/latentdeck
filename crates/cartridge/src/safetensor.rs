@@ -5,7 +5,7 @@ use std::{
 };
 
 use serde::{
-    Deserialize, Deserializer,
+    Deserialize, Deserializer, Serialize,
     de::{self, MapAccess, Visitor},
 };
 
@@ -43,14 +43,16 @@ impl EntryRange {
 }
 
 /// Storage dtypes accepted by the H3 LC 0.1 profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
 pub enum SafetensorDType {
     F16,
     F32,
 }
 
 impl SafetensorDType {
-    const fn byte_width(self) -> u64 {
+    #[must_use]
+    pub const fn byte_width(self) -> u64 {
         match self {
             Self::F16 => 2,
             Self::F32 => 4,
@@ -59,13 +61,179 @@ impl SafetensorDType {
 }
 
 /// Validated tensor metadata. Offsets are relative to the Safetensors data area.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SafetensorTensorDescriptor {
     pub name: String,
     pub dtype: SafetensorDType,
     pub shape: Vec<u64>,
     pub data_offsets: [u64; 2],
     pub byte_length: u64,
+}
+
+/// Codec-neutral structural receipt for the single LC Safetensors payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SafetensorsPreflight {
+    pub payload_bytes: u64,
+    pub header_bytes: u64,
+    pub data_offset: u64,
+    pub data_bytes: u64,
+    pub tensors: BTreeMap<String, SafetensorTensorDescriptor>,
+}
+
+/// Inspect an LC Safetensors payload without applying codec-profile semantics.
+///
+/// The LC envelope still enforces bounded F16/F32 tensors, exact contiguous
+/// offsets, and a complete data-area cover. Tensor names and geometry remain
+/// profile-owned and are deliberately not interpreted here.
+///
+/// # Errors
+///
+/// Returns a stable structural error for malformed, oversized, sparse,
+/// overlapping, or unsupported Safetensors metadata.
+pub fn preflight_safetensors<R: Read + Seek>(
+    reader: &mut R,
+    entry: EntryRange,
+    entry_name: &str,
+    limits: &ValidationLimits,
+) -> Result<SafetensorsPreflight> {
+    if entry.length > limits.max_h3_payload_bytes() {
+        return Err(CartridgeError::new(
+            ErrorCode::EntryTooLarge,
+            "Safetensors payload exceeds the LC 0.1 ceiling",
+        )
+        .at_entry(entry_name));
+    }
+    if entry.length < HEADER_LENGTH_BYTES as u64 {
+        return Err(invalid_safetensors_at(
+            entry_name,
+            "Safetensors payload is shorter than its header-length prefix",
+        ));
+    }
+
+    let entry_end = entry
+        .offset
+        .checked_add(entry.length)
+        .ok_or_else(|| size_overflow_at(entry_name, "Safetensors entry range overflows u64"))?;
+    let stream_end = reader.seek(SeekFrom::End(0)).map_err(|error| {
+        CartridgeError::new(ErrorCode::IoRead, "failed to inspect Safetensors payload")
+            .at_entry(entry_name)
+            .with_source(error)
+    })?;
+    if entry_end > stream_end {
+        return Err(invalid_safetensors_at(
+            entry_name,
+            "Safetensors entry range extends beyond the readable stream",
+        ));
+    }
+
+    seek_to_entry(reader, entry.offset, entry_name)?;
+    let mut encoded_header_length = [0_u8; HEADER_LENGTH_BYTES];
+    read_exact_payload_entry(reader, &mut encoded_header_length, entry_name)?;
+    let header_bytes = u64::from_le_bytes(encoded_header_length);
+    if header_bytes > MAX_SAFETENSORS_HEADER_BYTES {
+        return Err(CartridgeError::new(
+            ErrorCode::SafetensorsHeaderTooLarge,
+            "Safetensors header exceeds the LC 0.1 ceiling",
+        )
+        .at_entry(entry_name));
+    }
+    if header_bytes == 0 || header_bytes % 8 != 0 {
+        return Err(invalid_safetensors_at(
+            entry_name,
+            "Safetensors header length must be non-zero and 8-byte aligned",
+        ));
+    }
+
+    let data_offset = (HEADER_LENGTH_BYTES as u64)
+        .checked_add(header_bytes)
+        .ok_or_else(|| size_overflow_at(entry_name, "Safetensors data offset overflows u64"))?;
+    if data_offset > entry.length {
+        return Err(invalid_safetensors_at(
+            entry_name,
+            "Safetensors header extends beyond the entry range",
+        ));
+    }
+    let header_length = usize::try_from(header_bytes).map_err(|error| {
+        size_overflow_at(entry_name, "Safetensors header does not fit usize").with_source(error)
+    })?;
+    let mut header = vec![0_u8; header_length];
+    read_exact_payload_entry(reader, &mut header, entry_name)?;
+    if header.first() != Some(&b'{') {
+        return Err(invalid_safetensors_at(
+            entry_name,
+            "Safetensors header must begin with a JSON object",
+        ));
+    }
+
+    let raw = parse_header(&header).map_err(|error| error.at_entry(entry_name))?;
+    if raw.tensors.is_empty() || raw.tensors.len() > limits.max_tensors() {
+        return Err(CartridgeError::new(
+            ErrorCode::TensorUnexpected,
+            "Safetensors tensor count is outside the LC 0.1 limits",
+        )
+        .at_entry(entry_name));
+    }
+    let tensors = raw
+        .tensors
+        .into_iter()
+        .map(|(name, descriptor)| {
+            validate_common(&name, descriptor, limits).map(|value| (name, value))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let data_bytes = entry.length - data_offset;
+    validate_generic_offsets(tensors.values(), data_bytes, entry_name)?;
+
+    Ok(SafetensorsPreflight {
+        payload_bytes: entry.length,
+        header_bytes,
+        data_offset,
+        data_bytes,
+        tensors,
+    })
+}
+
+/// Stream-scan every tensor described by a codec-neutral preflight receipt.
+///
+/// # Errors
+///
+/// Rejects receipt mismatches, truncated data, and every F16/F32 NaN or infinity.
+pub fn scan_safetensors_finite<R: Read + Seek>(
+    reader: &mut R,
+    entry: EntryRange,
+    entry_name: &str,
+    preflight: &SafetensorsPreflight,
+) -> Result<()> {
+    if preflight.payload_bytes != entry.length
+        || preflight.data_offset
+            != (HEADER_LENGTH_BYTES as u64)
+                .checked_add(preflight.header_bytes)
+                .ok_or_else(|| {
+                    size_overflow_at(entry_name, "Safetensors data offset overflows u64")
+                })?
+        || preflight
+            .data_offset
+            .checked_add(preflight.data_bytes)
+            .ok_or_else(|| size_overflow_at(entry_name, "Safetensors data range overflows u64"))?
+            != entry.length
+    {
+        return Err(CartridgeError::new(
+            ErrorCode::TensorDescriptorMismatch,
+            "Safetensors preflight receipt does not match the entry range",
+        )
+        .at_entry(entry_name));
+    }
+    validate_generic_offsets(preflight.tensors.values(), preflight.data_bytes, entry_name)?;
+    let data_absolute_offset =
+        entry
+            .offset
+            .checked_add(preflight.data_offset)
+            .ok_or_else(|| {
+                size_overflow_at(entry_name, "Safetensors absolute data offset overflows u64")
+            })?;
+    for tensor in preflight.tensors.values() {
+        scan_tensor_at(reader, data_absolute_offset, tensor, entry_name)?;
+    }
+    Ok(())
 }
 
 /// Bounded structural receipt; full validation returns it after the finite-value scan.
@@ -527,33 +695,80 @@ fn validate_offsets(
     Ok(())
 }
 
+fn validate_generic_offsets<'a>(
+    tensors: impl Iterator<Item = &'a SafetensorTensorDescriptor>,
+    data_bytes: u64,
+    entry_name: &str,
+) -> Result<()> {
+    let mut tensors = tensors.collect::<Vec<_>>();
+    tensors.sort_by_key(|tensor| tensor.data_offsets[0]);
+    let mut expected_start = 0_u64;
+    for tensor in tensors {
+        let [start, end] = tensor.data_offsets;
+        if end > data_bytes {
+            return Err(invalid_safetensors_at(
+                entry_name,
+                "tensor data offset is outside the entry",
+            )
+            .at_tensor(&tensor.name));
+        }
+        if start != expected_start {
+            let detail = if start < expected_start {
+                "Safetensors tensor ranges overlap"
+            } else {
+                "Safetensors tensor ranges contain a gap"
+            };
+            return Err(invalid_safetensors_at(entry_name, detail).at_tensor(&tensor.name));
+        }
+        expected_start = end;
+    }
+    if expected_start != data_bytes {
+        return Err(invalid_safetensors_at(
+            entry_name,
+            "Safetensors tensor ranges do not cover the complete data area",
+        ));
+    }
+    Ok(())
+}
+
 fn scan_tensor<R: Read + Seek>(
     reader: &mut R,
     data_absolute_offset: u64,
     tensor: &SafetensorTensorDescriptor,
 ) -> Result<()> {
+    scan_tensor_at(reader, data_absolute_offset, tensor, H3_ENTRY_NAME)
+}
+
+fn scan_tensor_at<R: Read + Seek>(
+    reader: &mut R,
+    data_absolute_offset: u64,
+    tensor: &SafetensorTensorDescriptor,
+    entry_name: &str,
+) -> Result<()> {
     let tensor_offset = data_absolute_offset
         .checked_add(tensor.data_offsets[0])
-        .ok_or_else(|| size_overflow("tensor absolute offset overflows u64"))?;
-    seek_to(reader, tensor_offset)?;
+        .ok_or_else(|| size_overflow_at(entry_name, "tensor absolute offset overflows u64"))?;
+    seek_to_entry(reader, tensor_offset, entry_name)?;
 
     let width = usize::try_from(tensor.dtype.byte_width()).map_err(|error| {
-        size_overflow("tensor dtype width does not fit usize").with_source(error)
+        size_overflow_at(entry_name, "tensor dtype width does not fit usize").with_source(error)
     })?;
     let mut buffer = vec![0_u8; SCAN_BUFFER_BYTES];
     let mut remaining = tensor.byte_length;
     let mut element_index = 0_u64;
     while remaining != 0 {
-        let requested = usize::try_from(remaining.min(buffer.len() as u64))
-            .map_err(|error| size_overflow("scan chunk does not fit usize").with_source(error))?;
+        let requested = usize::try_from(remaining.min(buffer.len() as u64)).map_err(|error| {
+            size_overflow_at(entry_name, "scan chunk does not fit usize").with_source(error)
+        })?;
         let requested = requested - (requested % width);
         if requested == 0 {
-            return Err(
-                invalid_safetensors("tensor byte length is not dtype-aligned")
-                    .at_tensor(&tensor.name),
-            );
+            return Err(invalid_safetensors_at(
+                entry_name,
+                "tensor byte length is not dtype-aligned",
+            )
+            .at_tensor(&tensor.name));
         }
-        read_exact_payload(reader, &mut buffer[..requested])?;
+        read_exact_payload_entry(reader, &mut buffer[..requested], entry_name)?;
         for element in buffer[..requested].chunks_exact(width) {
             let non_finite = match tensor.dtype {
                 SafetensorDType::F16 => {
@@ -570,6 +785,7 @@ fn scan_tensor<R: Read + Seek>(
                     ErrorCode::TensorNonFinite,
                     format!("tensor contains NaN or infinity at element {element_index}"),
                 )
+                .at_entry(entry_name)
                 .at_tensor(&tensor.name));
             }
             element_index += 1;
@@ -577,6 +793,33 @@ fn scan_tensor<R: Read + Seek>(
         remaining -= requested as u64;
     }
     Ok(())
+}
+
+fn seek_to_entry<R: Seek>(reader: &mut R, offset: u64, entry_name: &str) -> Result<()> {
+    reader
+        .seek(SeekFrom::Start(offset))
+        .map(|_| ())
+        .map_err(|error| {
+            CartridgeError::new(ErrorCode::IoRead, "failed to seek in Safetensors payload")
+                .at_entry(entry_name)
+                .with_source(error)
+        })
+}
+
+fn read_exact_payload_entry<R: Read>(
+    reader: &mut R,
+    bytes: &mut [u8],
+    entry_name: &str,
+) -> Result<()> {
+    reader.read_exact(bytes).map_err(|error| {
+        if error.kind() == io::ErrorKind::UnexpectedEof {
+            invalid_safetensors_at(entry_name, "Safetensors entry is truncated").with_source(error)
+        } else {
+            CartridgeError::new(ErrorCode::IoRead, "failed to read Safetensors payload")
+                .at_entry(entry_name)
+                .with_source(error)
+        }
+    })
 }
 
 fn seek_to<R: Seek>(reader: &mut R, offset: u64) -> Result<()> {
@@ -606,6 +849,14 @@ fn invalid_safetensors(detail: impl Into<String>) -> CartridgeError {
     CartridgeError::new(ErrorCode::SafetensorsInvalid, detail).at_entry(H3_ENTRY_NAME)
 }
 
+fn invalid_safetensors_at(entry_name: &str, detail: impl Into<String>) -> CartridgeError {
+    CartridgeError::new(ErrorCode::SafetensorsInvalid, detail).at_entry(entry_name)
+}
+
 fn size_overflow(detail: impl Into<String>) -> CartridgeError {
     CartridgeError::new(ErrorCode::TensorSizeOverflow, detail).at_entry(H3_ENTRY_NAME)
+}
+
+fn size_overflow_at(entry_name: &str, detail: impl Into<String>) -> CartridgeError {
+    CartridgeError::new(ErrorCode::TensorSizeOverflow, detail).at_entry(entry_name)
 }

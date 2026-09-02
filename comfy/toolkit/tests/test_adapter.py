@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 import torch
-from latentdeck_operator_d2 import D2Context, D2ContractError, process_slot
+from latentdeck_deck_sdk import DeckOperatorContext, RoleBinding
+from latentdeck_operator_d2 import D2ContractError, process_sources
 
 from latentdeck_comfy_toolkit import process_xs_sequence
 
@@ -41,16 +42,34 @@ def test_sequence_adapter_reuses_the_reviewed_d2_slot_contract() -> None:
     expected_slots = []
     for slot_index in range(a.shape[2]):
         expected_slots.append(
-            process_slot(
-                a[:, :, slot_index : slot_index + 1],
-                b[:, :, slot_index : slot_index + 1],
+            process_sources(
+                (
+                    a[:, :, slot_index : slot_index + 1].contiguous(),
+                    b[:, :, slot_index : slot_index + 1].contiguous(),
+                ),
                 {"algorithm": "XS2", **controls},
-                D2Context(
-                    playhead_a=slot_index,
-                    playhead_b=slot_index,
+                DeckOperatorContext(
+                    codec_family="minimax_h3",
+                    profile="h3_av_latent",
+                    profile_version="0.1.0",
+                    timing_contract="minimax_h3_causal",
+                    timing_contract_version="0.1.0",
+                    frame_rate_numerator=24,
+                    frame_rate_denominator=1,
+                    generation=1,
+                    sequence=slot_index + 1,
                     seed=91,
-                    previous_a=(None if slot_index == 0 else a[:, :, slot_index - 1 : slot_index]),
-                    previous_b=(None if slot_index == 0 else b[:, :, slot_index - 1 : slot_index]),
+                    playheads=(slot_index, slot_index),
+                    physical_slots=(1, 2),
+                    roles=(RoleBinding("carrier", 1), RoleBinding("donor", 2)),
+                    previous_sources=(
+                        None
+                        if slot_index == 0
+                        else a[:, :, slot_index - 1 : slot_index].contiguous(),
+                        None
+                        if slot_index == 0
+                        else b[:, :, slot_index - 1 : slot_index].contiguous(),
+                    ),
                 ),
             ).output
         )

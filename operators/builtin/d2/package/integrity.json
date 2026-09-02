@@ -1,0 +1,35 @@
+{
+  "manifest_version": "1.0.0",
+  "files": [
+    {
+      "path": "NOTICE.txt",
+      "byte_length": 199,
+      "sha256": "b1401d48a77fc62db78d281aa5dd79163af5a25f72d7eb9208356e2706b57355"
+    },
+    {
+      "path": "faceplate.json",
+      "byte_length": 4180,
+      "sha256": "73702c43b918b41759177d270aff971e9ff52c860fdbca6e2fee4158f94c6b8b"
+    },
+    {
+      "path": "operator.json",
+      "byte_length": 2907,
+      "sha256": "1521afa52c1cf3c047c131bd6960f96d09bd866d2ae989c9bdf5b8be3045b807"
+    },
+    {
+      "path": "python/latentdeck_operator_d2/__init__.py",
+      "byte_length": 582,
+      "sha256": "4bf98830016bbde99826bb85c38344069c77de92c32e8860fde4641b4db62e94"
+    },
+    {
+      "path": "python/latentdeck_operator_d2/contract.py",
+      "byte_length": 7159,
+      "sha256": "403ede87a9643a0e66f474cde54fa68777731c2d15d7bd0a77ee10d28d3b4b53"
+    },
+    {
+      "path": "python/latentdeck_operator_d2/operator.py",
+      "byte_length": 13800,
+      "sha256": "de16d24c9cd24a66f963255be146489585b04b7a09a72feadd85854774f8c3bb"
+    }
+  ]
+}

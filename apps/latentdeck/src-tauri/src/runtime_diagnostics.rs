@@ -5,14 +5,18 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use latentdeck_control::MetricsSnapshot;
+use latentdeck_control::v2::{
+    Ack, DeviceKind, ExternalAssetBinding, MetricsSnapshot as Protocol2MetricsSnapshot, ProfileKey,
+};
 use latentdeck_core::realtime_diagnostics::{
     DiagnosticCodecIdentity, DiagnosticGpuIdentity, MAX_STABLE_ERRORS,
-    PresentationDiagnosticCounters, RealtimeDiagnosticError, RealtimeSessionMetrics,
-    SanitizedToken, Sha256Token, StableErrorRecord, StableErrorSource, TimingDistribution,
-    WorkerDiagnosticCounters,
+    PresentationDiagnosticCounters, Protocol2CodecIdentity, Protocol2ComputeDevice,
+    Protocol2DeckSessionIdentity, Protocol2ExternalAssetIdentity, RealtimeDiagnosticError,
+    RealtimeSessionMetrics, SanitizedToken, Sha256Token, StableErrorRecord, StableErrorSource,
+    TimingDistribution, WorkerDiagnosticCounters,
 };
 use latentdeck_native_output::{NativeDeviceIdentity, NativeSpoutStatus, PresentOutcome};
+use uuid::Uuid;
 
 const MAX_TIMING_SAMPLES: usize = 4_096;
 
@@ -29,6 +33,7 @@ pub(crate) struct PresentationDiagnosticState {
     last_presented_at: Option<Instant>,
     frame_intervals: TimingSamples,
     spout: SpoutDiagnosticHistory,
+    capture_failed: bool,
 }
 
 impl PresentationDiagnosticState {
@@ -38,6 +43,7 @@ impl PresentationDiagnosticState {
             last_presented_at: None,
             frame_intervals: TimingSamples::new(MAX_TIMING_SAMPLES),
             spout: SpoutDiagnosticHistory::from_status(status),
+            capture_failed: false,
         }
     }
 
@@ -73,6 +79,19 @@ impl PresentationDiagnosticState {
         }
     }
 
+    /// Record presentation evidence without allowing a diagnostic counter
+    /// failure to stop or otherwise mutate the realtime actor. The failure is
+    /// retained and makes the next diagnostic snapshot fail closed.
+    pub(crate) fn observe_runtime_outcome(
+        &mut self,
+        outcome: PresentOutcome,
+        observed_at: Instant,
+    ) {
+        if self.observe_local_outcome(outcome, observed_at).is_err() {
+            self.capture_failed = true;
+        }
+    }
+
     pub(crate) fn observe_spout(&mut self, status: &NativeSpoutStatus) {
         self.spout.observe(status);
     }
@@ -81,6 +100,9 @@ impl PresentationDiagnosticState {
         &mut self,
         spout: &NativeSpoutStatus,
     ) -> Result<PresentationDiagnosticSnapshot, RealtimeDiagnosticError> {
+        if self.capture_failed {
+            return Err(RealtimeDiagnosticError::InvalidCounter);
+        }
         self.spout.observe(spout);
         Ok(PresentationDiagnosticSnapshot {
             frames_presented: self.frames_presented,
@@ -88,6 +110,117 @@ impl PresentationDiagnosticState {
             measured_fps: self.frame_intervals.measured_fps()?,
             frame_intervals: self.frame_intervals.distribution()?,
             stable_errors: self.spout.snapshot()?,
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct PreparedProtocol2DeckDiagnosticIdentity {
+    codec: DiagnosticCodecIdentity,
+    deck_session_id: Uuid,
+    deck_package: SanitizedToken,
+    deck_package_version: SanitizedToken,
+    operator: SanitizedToken,
+    operator_version: SanitizedToken,
+    target_fps: f64,
+}
+
+#[derive(Clone)]
+pub(crate) struct Protocol2DeckDiagnosticIdentity {
+    pub(crate) codec: DiagnosticCodecIdentity,
+    pub(crate) session: Protocol2DeckSessionIdentity,
+    pub(crate) operator: SanitizedToken,
+    pub(crate) target_fps: f64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Protocol2DeckDiagnosticSelection<'a> {
+    pub(crate) profile: &'a ProfileKey,
+    pub(crate) codec_pack: &'a str,
+    pub(crate) codec_pack_version: &'a str,
+    pub(crate) adapter: &'a str,
+    pub(crate) adapter_version: &'a str,
+    pub(crate) compute_device: DeviceKind,
+    pub(crate) device_ordinal: u8,
+    pub(crate) external_assets: &'a [ExternalAssetBinding],
+    pub(crate) deck_session_id: Uuid,
+    pub(crate) deck_package: &'a str,
+    pub(crate) deck_package_version: &'a str,
+    pub(crate) operator: &'a str,
+    pub(crate) operator_version: &'a str,
+    pub(crate) frame_rate_numerator: u32,
+    pub(crate) frame_rate_denominator: u32,
+}
+
+impl PreparedProtocol2DeckDiagnosticIdentity {
+    pub(crate) fn new(
+        selection: Protocol2DeckDiagnosticSelection<'_>,
+    ) -> Result<Self, RealtimeDiagnosticError> {
+        if selection.deck_session_id.is_nil()
+            || selection.frame_rate_numerator == 0
+            || selection.frame_rate_denominator == 0
+        {
+            return Err(RealtimeDiagnosticError::InvalidToken);
+        }
+        let target_fps =
+            f64::from(selection.frame_rate_numerator) / f64::from(selection.frame_rate_denominator);
+        if !target_fps.is_finite() || target_fps <= f64::EPSILON {
+            return Err(RealtimeDiagnosticError::InvalidMeasurement);
+        }
+        let assets = selection
+            .external_assets
+            .iter()
+            .map(|asset| {
+                Protocol2ExternalAssetIdentity::new(
+                    diagnostic_token(&asset.asset_id)?,
+                    Sha256Token::parse(&asset.sha256)?,
+                    asset.byte_length,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let protocol2 = Protocol2CodecIdentity::new(
+            diagnostic_token(&selection.profile.profile_version)?,
+            diagnostic_token(selection.adapter)?,
+            diagnostic_token(selection.adapter_version)?,
+            match selection.compute_device {
+                DeviceKind::Cpu => Protocol2ComputeDevice::Cpu,
+                DeviceKind::Cuda => Protocol2ComputeDevice::Cuda,
+            },
+            selection.device_ordinal,
+            assets,
+        )?;
+        Ok(Self {
+            codec: DiagnosticCodecIdentity::new_protocol2(
+                diagnostic_token(&selection.profile.codec_family)?,
+                diagnostic_token(&selection.profile.profile)?,
+                diagnostic_token(selection.codec_pack)?,
+                diagnostic_token(selection.codec_pack_version)?,
+                protocol2,
+            ),
+            deck_session_id: selection.deck_session_id,
+            deck_package: diagnostic_token(selection.deck_package)?,
+            deck_package_version: diagnostic_token(selection.deck_package_version)?,
+            operator_version: diagnostic_token(selection.operator_version)?,
+            operator: diagnostic_token(selection.operator)?,
+            target_fps,
+        })
+    }
+
+    pub(crate) fn complete(
+        &self,
+        worker_session_id: Uuid,
+    ) -> Result<Protocol2DeckDiagnosticIdentity, RealtimeDiagnosticError> {
+        Ok(Protocol2DeckDiagnosticIdentity {
+            codec: self.codec.clone(),
+            session: Protocol2DeckSessionIdentity::new(
+                worker_session_id,
+                self.deck_session_id,
+                self.deck_package.clone(),
+                self.deck_package_version.clone(),
+                self.operator_version.clone(),
+            )?,
+            operator: self.operator.clone(),
+            target_fps: self.target_fps,
         })
     }
 }
@@ -108,31 +241,22 @@ pub(crate) fn diagnostic_gpu_identity(
     Ok(DiagnosticGpuIdentity::new(adapter, driver))
 }
 
-pub(crate) fn diagnostic_codec_identity(
-    codec_family: &str,
-    profile: &str,
-    codec_pack: &str,
-    codec_pack_version: &str,
-    decoder: &str,
-    decoder_sha256: &str,
-) -> Result<DiagnosticCodecIdentity, RealtimeDiagnosticError> {
-    Ok(DiagnosticCodecIdentity::new(
-        diagnostic_token(codec_family)?,
-        diagnostic_token(profile)?,
-        diagnostic_token(codec_pack)?,
-        diagnostic_token(codec_pack_version)?,
-        diagnostic_token(decoder)?,
-        Some(Sha256Token::parse(decoder_sha256)?),
-    ))
+pub(crate) fn protocol2_metrics_from_ack(
+    ack: Ack,
+) -> Result<Protocol2MetricsSnapshot, RealtimeDiagnosticError> {
+    match ack {
+        Ack::MetricsGet(metrics) => Ok(metrics),
+        _ => Err(RealtimeDiagnosticError::ProtocolMismatch),
+    }
 }
 
-pub(crate) fn realtime_metrics(
+pub(crate) fn realtime_metrics_v2(
     duration_ms: u64,
     target_fps: f64,
-    worker: &MetricsSnapshot,
+    worker: &Protocol2MetricsSnapshot,
     presentation: PresentationDiagnosticSnapshot,
 ) -> Result<RealtimeSessionMetrics, RealtimeDiagnosticError> {
-    let worker = WorkerDiagnosticCounters::from_metrics_snapshot(worker)?;
+    let worker = WorkerDiagnosticCounters::from_protocol2_metrics_snapshot(worker)?;
     let counters = PresentationDiagnosticCounters::new(
         presentation.frames_presented,
         None,
@@ -377,36 +501,118 @@ mod tests {
     }
 
     #[test]
-    fn worker_and_presentation_metrics_do_not_invent_drops_or_control_latency() {
-        let mut state = PresentationDiagnosticState::new(&spout_status(None, 7));
-        let snapshot = state
-            .snapshot(&spout_status(None, 7))
-            .expect("presentation");
-        let metrics = realtime_metrics(
-            1_000,
-            24.0,
-            &MetricsSnapshot {
-                worker_uptime_ns: 10,
-                decode_batches_total: 1,
-                decoded_frames_total: 4,
-                ring_backpressure_total: 2,
-                presentation_skipped_total: 3,
-                last_decode_duration_ns: 4,
-                ring_write_sequence: 5,
-                ring_read_sequence: 4,
-                ring_occupancy: 1,
-                gpu_allocated_bytes: None,
-                gpu_reserved_bytes: None,
-            },
-            snapshot,
-        )
-        .expect("metrics");
-        let value = serde_json::to_value(metrics).expect("serialize");
+    fn protocol2_metrics_requires_the_exact_metrics_ack() {
+        let expected = Protocol2MetricsSnapshot {
+            worker_uptime_ns: 1,
+            commands_total: 2,
+            commands_failed_total: 0,
+            player_steps_total: 0,
+            deck_process_total: 3,
+            capture_slots_total: 4,
+            decoded_frames_total: 5,
+        };
+        assert_eq!(
+            protocol2_metrics_from_ack(Ack::MetricsGet(expected.clone()))
+                .expect("metrics acknowledgement"),
+            expected
+        );
+        assert!(matches!(
+            protocol2_metrics_from_ack(Ack::SessionShutdown(latentdeck_control::v2::ShutdownAck {
+                reason: latentdeck_control::v2::ShutdownReason::ProtocolFault,
+            },)),
+            Err(RealtimeDiagnosticError::ProtocolMismatch)
+        ));
+    }
 
-        assert!(value["presentation"].get("frames_dropped").is_none());
-        assert_eq!(value["control_latency_ms"]["sample_count"], 0);
-        assert_eq!(value["worker"]["presentation_skipped_total"], 3);
-        assert_eq!(value["presentation"]["spout_frames_sent"], 7);
+    #[test]
+    fn prepared_protocol2_identity_keeps_exact_selection_without_paths() {
+        let profile = ProfileKey {
+            codec_family: "synthetic_codec".to_owned(),
+            profile: "latent_signal".to_owned(),
+            profile_version: "3.2.1".to_owned(),
+        };
+        let assets = vec![
+            ExternalAssetBinding {
+                asset_id: "asset-z".to_owned(),
+                path: "C:\\private\\must-not-serialize-z.bin".to_owned(),
+                sha256: "b".repeat(64),
+                byte_length: 22,
+            },
+            ExternalAssetBinding {
+                asset_id: "asset-a".to_owned(),
+                path: "W:\\secret\\must-not-serialize-a.bin".to_owned(),
+                sha256: "a".repeat(64),
+                byte_length: 11,
+            },
+        ];
+        let deck_session_id = Uuid::parse_str("30000000-0000-4000-8000-000000000001").unwrap();
+        let worker_session_id = Uuid::parse_str("30000000-0000-4000-8000-000000000002").unwrap();
+        let prepared =
+            PreparedProtocol2DeckDiagnosticIdentity::new(Protocol2DeckDiagnosticSelection {
+                profile: &profile,
+                codec_pack: "org.example.codec",
+                codec_pack_version: "2.8.0",
+                adapter: "org.example.adapter",
+                adapter_version: "0.2.0",
+                compute_device: DeviceKind::Cpu,
+                device_ordinal: 0,
+                external_assets: &assets,
+                deck_session_id,
+                deck_package: "org.example.deck",
+                deck_package_version: "0.2.0",
+                operator: "org.example.operator",
+                operator_version: "0.2.0",
+                frame_rate_numerator: 24,
+                frame_rate_denominator: 1,
+            })
+            .expect("prepared identity");
+        let identity = prepared
+            .complete(worker_session_id)
+            .expect("active identity");
+        let codec = serde_json::to_value(identity.codec).expect("codec identity");
+        let session = serde_json::to_value(identity.session).expect("session identity");
+        let encoded = format!("{codec}{session}");
+
+        assert_eq!(codec["codec_family"], "synthetic_codec");
+        assert_eq!(codec["codec_pack"], "org.example.codec");
+        assert_eq!(codec["protocol2"]["profile_version"], "3.2.1");
+        assert_eq!(codec["protocol2"]["adapter"], "org.example.adapter");
+        assert_eq!(codec["protocol2"]["compute_device"], "cpu");
+        assert_eq!(
+            codec["protocol2"]["external_assets"][0]["asset_id"],
+            "asset-a"
+        );
+        assert_eq!(session["worker_session_id"], worker_session_id.to_string());
+        assert_eq!(session["deck_session_id"], deck_session_id.to_string());
+        assert_eq!(session["deck_package"], "org.example.deck");
+        assert_eq!(identity.operator.as_str(), "org.example.operator");
+        assert!((identity.target_fps - 24.0).abs() < f64::EPSILON);
+        assert!(!encoded.contains("private"));
+        assert!(!encoded.contains("secret"));
+        assert!(!encoded.contains("C:\\"));
+        assert!(!encoded.contains("W:\\"));
+
+        let unsafe_selection = Protocol2DeckDiagnosticSelection {
+            adapter: "C:\\private\\adapter.py",
+            ..Protocol2DeckDiagnosticSelection {
+                profile: &profile,
+                codec_pack: "org.example.codec",
+                codec_pack_version: "2.8.0",
+                adapter: "org.example.adapter",
+                adapter_version: "0.2.0",
+                compute_device: DeviceKind::Cpu,
+                device_ordinal: 0,
+                external_assets: &assets,
+                deck_session_id,
+                deck_package: "org.example.deck",
+                deck_package_version: "0.2.0",
+                operator: "org.example.operator",
+                operator_version: "0.2.0",
+                frame_rate_numerator: 24,
+                frame_rate_denominator: 1,
+            }
+        };
+        assert!(PreparedProtocol2DeckDiagnosticIdentity::new(unsafe_selection).is_err());
     }
 
     fn spout_status(

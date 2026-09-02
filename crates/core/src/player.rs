@@ -2,7 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use latentdeck_cartridge::reader::{ValidatedCartridge, ValidationOptions, open_validated};
+use latentdeck_cartridge::{
+    manifest::AudioDisposition,
+    reader::{IntegrityValidatedCartridge, ValidationOptions, open_integrity_validated},
+};
 use semver::Version;
 use serde::Serialize;
 use thiserror::Error;
@@ -114,8 +117,15 @@ pub struct PlayerLaunchInputs<'a> {
     pub cartridge: &'a CartridgeSummary,
 }
 
+/// Codec-neutral retained source identity used to construct a Protocol 2
+/// session from a fresh integrity-validated read-only handle.
+pub struct PlayerProtocol2SourceInputs<'a> {
+    pub cartridge_path: &'a Path,
+    pub cartridge: &'a CartridgeSummary,
+}
+
 struct LoadedCartridge {
-    _validated: ValidatedCartridge,
+    _validated: IntegrityValidatedCartridge,
     path: PathBuf,
     summary: CartridgeSummary,
 }
@@ -128,6 +138,7 @@ pub struct PlayerCoordinator {
     packs: Vec<ValidatedCodecPack>,
     selected_pack: Option<usize>,
     codec_fault: Option<CodecSummary>,
+    protocol2_codec: Option<CodecSummary>,
     decoder_asset: Option<ValidatedExternalAsset>,
     cartridge: Option<LoadedCartridge>,
     position_frame: u64,
@@ -189,6 +200,7 @@ impl PlayerCoordinator {
             packs,
             selected_pack,
             codec_fault: None,
+            protocol2_codec: None,
             decoder_asset: None,
             cartridge: None,
             position_frame: 0,
@@ -255,12 +267,13 @@ impl PlayerCoordinator {
     ) -> Result<PlayerView, PlayerCoordinatorError> {
         let path = path.as_ref();
         self.phase = PlayerPhase::Loading;
-        let validated = open_validated(path, &ValidationOptions::default()).map_err(|error| {
-            self.phase = PlayerPhase::Error;
-            PlayerCoordinatorError::new(error.code(), error.detail)
-        })?;
-        let profile = validated.h3_profile();
+        let validated =
+            open_integrity_validated(path, &ValidationOptions::default()).map_err(|error| {
+                self.phase = PlayerPhase::Error;
+                PlayerCoordinatorError::new(error.code(), error.detail)
+            })?;
         let manifest = validated.manifest();
+        let video = &manifest.timing.decoded_video;
         let file_name = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -270,12 +283,12 @@ impl PlayerCoordinator {
             cartridge_id: manifest.cartridge_id.0.clone(),
             archive_sha256: validated.receipt().archive_sha256.to_string(),
             file_name,
-            width: profile.visual.decoded_width,
-            height: profile.visual.decoded_height,
-            frame_count: profile.visual.decoded_frame_count,
-            frame_rate_numerator: profile.compatibility_key.frame_rate.numerator,
-            frame_rate_denominator: profile.compatibility_key.frame_rate.denominator,
-            audio_present: profile.audio.is_some(),
+            width: video.width,
+            height: video.height,
+            frame_count: video.frame_count,
+            frame_rate_numerator: video.frame_rate.numerator,
+            frame_rate_denominator: video.frame_rate.denominator,
+            audio_present: !matches!(manifest.audio, AudioDisposition::SourceAbsent),
         };
         self.cartridge = Some(LoadedCartridge {
             _validated: validated,
@@ -314,6 +327,102 @@ impl PlayerCoordinator {
             cartridge_path: &cartridge.path,
             cartridge: &cartridge.summary,
         })
+    }
+
+    /// Return only the exact cartridge path and path-free UI summary needed
+    /// for a fresh Protocol 2 integrity validation. Codec selection and asset
+    /// trust remain owned by the common Extensions Manager.
+    ///
+    /// # Errors
+    ///
+    /// Returns while no cartridge is loaded.
+    pub fn protocol2_source_inputs(
+        &self,
+    ) -> Result<PlayerProtocol2SourceInputs<'_>, PlayerCoordinatorError> {
+        let cartridge = self.cartridge.as_ref().ok_or_else(|| {
+            PlayerCoordinatorError::new("slot.cartridge_missing", "No cartridge is loaded")
+        })?;
+        Ok(PlayerProtocol2SourceInputs {
+            cartridge_path: &cartridge.path,
+            cartridge: &cartridge.summary,
+        })
+    }
+
+    /// Replace the visible codec summary with one exact Protocol 2 package
+    /// selection. The package usage lease is intentionally acquired later by
+    /// runtime startup and never inferred here.
+    ///
+    /// # Errors
+    ///
+    /// Returns only if the monotonic UI revision is exhausted.
+    pub fn set_protocol2_codec_summary(
+        &mut self,
+        summary: CodecSummary,
+    ) -> Result<PlayerView, PlayerCoordinatorError> {
+        self.protocol2_codec = Some(summary);
+        self.codec_fault = None;
+        self.error = None;
+        self.bump_revision()?;
+        Ok(self.view())
+    }
+
+    /// Record a Protocol 2 transport transition after exact package,
+    /// cartridge, and profile negotiation succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns when no cartridge is loaded, the requested transition is not
+    /// valid from the current phase, or the monotonic revision is exhausted.
+    pub fn set_playing_protocol2(
+        &mut self,
+        playing: bool,
+    ) -> Result<PlayerView, PlayerCoordinatorError> {
+        if self.cartridge.is_none() {
+            return Err(PlayerCoordinatorError::new(
+                "state.invalid_transition",
+                "Load a cartridge before controlling playback.",
+            ));
+        }
+        if playing {
+            if !matches!(self.phase, PlayerPhase::Ready | PlayerPhase::Paused) {
+                return Err(PlayerCoordinatorError::new(
+                    "state.invalid_transition",
+                    "Player is not ready to start.",
+                ));
+            }
+            self.phase = PlayerPhase::Playing;
+        } else if self.phase == PlayerPhase::Playing {
+            self.phase = PlayerPhase::Paused;
+        } else if self.phase != PlayerPhase::Paused {
+            return Err(PlayerCoordinatorError::new(
+                "state.invalid_transition",
+                "Player is not currently playing.",
+            ));
+        }
+        self.error = None;
+        self.bump_revision()?;
+        Ok(self.view())
+    }
+
+    /// Apply the post-reset P2 transport state without consulting legacy H3
+    /// launch inputs.
+    ///
+    /// # Errors
+    ///
+    /// Returns when no cartridge is loaded or the monotonic revision is
+    /// exhausted.
+    pub fn reset_to_start_protocol2(&mut self) -> Result<PlayerView, PlayerCoordinatorError> {
+        if self.cartridge.is_none() {
+            return Err(PlayerCoordinatorError::new(
+                "state.invalid_transition",
+                "No cartridge is loaded.",
+            ));
+        }
+        self.position_frame = 0;
+        self.phase = PlayerPhase::Paused;
+        self.error = None;
+        self.bump_revision()?;
+        Ok(self.view())
     }
 
     /// Update the transport loop policy without changing decoder state.
@@ -463,6 +572,9 @@ impl PlayerCoordinator {
     }
 
     fn codec_summary(&self) -> CodecSummary {
+        if let Some(summary) = &self.protocol2_codec {
+            return summary.clone();
+        }
         if let Some(fault) = &self.codec_fault {
             return fault.clone();
         }

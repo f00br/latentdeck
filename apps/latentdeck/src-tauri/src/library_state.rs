@@ -1,10 +1,12 @@
 use std::{
-    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use latentdeck_cartridge::{limits::ValidationLimits, manifest::parse_manifest_json, profile::h3};
+use latentdeck_cartridge::{
+    limits::ValidationLimits, manifest::parse_manifest_json,
+    signal::validate_codec_neutral_signal_geometry,
+};
 use latentdeck_core::{
     diagnostics::{LogLevel, record_global},
     signal_geometry::{
@@ -81,40 +83,12 @@ pub(crate) struct DeckSessionView {
 #[derive(Debug)]
 struct DeckSessionState {
     active_collection_id: CollectionId,
-    loaded_slots: BTreeMap<(DeckKind, String), CartridgeKey>,
-    runtime_sessions: BTreeMap<DeckKind, DeckRuntimeSession>,
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum DeckKind {
-    D2,
-    Q4,
-}
-
-impl DeckKind {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::D2 => "d2",
-            Self::Q4 => "q4",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct DeckRuntimeSession {
-    generation: u64,
-    open: bool,
-}
-
-#[derive(Debug)]
-struct DeckSessionClosed;
 
 impl Default for DeckSessionState {
     fn default() -> Self {
         Self {
             active_collection_id: CollectionId::all_cartridges(),
-            loaded_slots: BTreeMap::new(),
-            runtime_sessions: BTreeMap::new(),
         }
     }
 }
@@ -127,60 +101,8 @@ impl DeckSessionState {
     fn view(&self) -> DeckSessionView {
         DeckSessionView {
             active_collection_id: self.active_collection_id.as_str().to_owned(),
-            loaded_slots: self
-                .loaded_slots
-                .iter()
-                .map(|((deck, slot), key)| SlotAssignmentView {
-                    deck_type: deck.as_str(),
-                    slot: slot.clone(),
-                    archive_sha256: key.as_str().to_owned(),
-                })
-                .collect(),
+            loaded_slots: Vec::new(),
         }
-    }
-
-    fn begin_deck(&mut self, deck: DeckKind) -> u64 {
-        self.loaded_slots
-            .retain(|(loaded_deck, _), _| *loaded_deck != deck);
-        let session = self.runtime_sessions.entry(deck).or_default();
-        session.generation = session.generation.wrapping_add(1).max(1);
-        session.open = true;
-        session.generation
-    }
-
-    fn publish_deck_slots<const N: usize>(
-        &mut self,
-        deck: DeckKind,
-        generation: u64,
-        slots: [(&str, CartridgeKey); N],
-    ) -> Result<(), DeckSessionClosed> {
-        let current = self
-            .runtime_sessions
-            .get(&deck)
-            .filter(|session| session.open && session.generation == generation)
-            .ok_or(DeckSessionClosed)?;
-        debug_assert_eq!(current.generation, generation);
-        self.loaded_slots
-            .retain(|(loaded_deck, _), _| *loaded_deck != deck);
-        self.loaded_slots.extend(
-            slots
-                .into_iter()
-                .map(|(slot, key)| ((deck, slot.to_owned()), key)),
-        );
-        Ok(())
-    }
-
-    fn close_deck(&mut self, deck: DeckKind, generation: u64) -> bool {
-        let Some(session) = self.runtime_sessions.get_mut(&deck) else {
-            return false;
-        };
-        if session.generation != generation || !session.open {
-            return false;
-        }
-        session.open = false;
-        self.loaded_slots
-            .retain(|(loaded_deck, _), _| *loaded_deck != deck);
-        true
     }
 }
 
@@ -297,13 +219,29 @@ fn signal_geometry_from_manifest(manifest_json: &str) -> Result<SignalGeometry, 
             "Indexed cartridge metadata failed validation; reimport the cartridge.",
         )
     })?;
-    let profile = h3::validate(&manifest, &limits).map_err(|error| {
+    let visual = validate_codec_neutral_signal_geometry(&manifest).map_err(|error| {
         CommandError::new(
             error.code(),
-            "Indexed cartridge profile failed validation; reimport the cartridge.",
+            "Indexed cartridge signal geometry is invalid; reimport the cartridge.",
         )
     })?;
-    Ok(SignalGeometry::from_h3(&profile))
+    Ok(SignalGeometry {
+        codec_family: manifest.codec.family.0.clone(),
+        profile: manifest.codec.profile.0.clone(),
+        profile_version: manifest.codec.profile_version.0.clone(),
+        runtime_dtype: visual.runtime_dtype,
+        batch: visual.batch,
+        latent_channels: visual.latent_channels,
+        latent_slots: visual.latent_slots,
+        latent_height: visual.latent_height,
+        latent_width: visual.latent_width,
+        decoded_frame_count: visual.decoded_frame_count,
+        decoded_height: visual.decoded_height,
+        decoded_width: visual.decoded_width,
+        timing_contract: manifest.timing.contract.0.clone(),
+        timing_contract_version: manifest.timing.contract_version.0.clone(),
+        frame_rate: visual.frame_rate,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -607,16 +545,6 @@ pub(crate) struct AppState {
     controller: Arc<Mutex<LibraryController>>,
 }
 
-/// Generation-scoped writer for one running Deck. A terminal worker failure or
-/// explicit shutdown can only clear the slots that belong to its own runtime;
-/// a late cleanup from an older runtime cannot erase a replacement session.
-#[derive(Clone)]
-pub(crate) struct DeckSessionLease {
-    controller: Arc<Mutex<LibraryController>>,
-    deck: DeckKind,
-    generation: u64,
-}
-
 #[derive(Clone)]
 pub(crate) struct LibraryImporter {
     controller: Arc<Mutex<LibraryController>>,
@@ -647,59 +575,6 @@ impl AppState {
     pub(crate) fn importer(&self) -> LibraryImporter {
         LibraryImporter {
             controller: Arc::clone(&self.controller),
-        }
-    }
-
-    /// Begin a replacement runtime session. Existing slots for this Deck are
-    /// removed immediately because every open attempt first shuts down the
-    /// previous runtime; other concurrently running Deck types are untouched.
-    pub(crate) fn begin_deck_session(
-        &self,
-        deck: DeckKind,
-    ) -> Result<DeckSessionLease, CommandError> {
-        let generation = lock_controller(&self.controller)?
-            .deck_session
-            .begin_deck(deck);
-        Ok(DeckSessionLease {
-            controller: Arc::clone(&self.controller),
-            deck,
-            generation,
-        })
-    }
-}
-
-impl DeckSessionLease {
-    /// Publish identities only after the worker has started and answered its
-    /// first status request. A lease already closed by actor recovery rejects
-    /// the publication, preventing a false loaded state.
-    pub(crate) fn publish<const N: usize>(
-        &self,
-        slots: [(&str, CartridgeKey); N],
-    ) -> Result<(), CommandError> {
-        lock_controller(&self.controller)?
-            .deck_session
-            .publish_deck_slots(self.deck, self.generation, slots)
-            .map_err(|_| {
-                CommandError::new(
-                    "deck.runtime_unavailable",
-                    "The Deck stopped before its loaded slots could be retained.",
-                )
-            })
-    }
-
-    /// Close this runtime's view. Stale generations are deliberately ignored.
-    pub(crate) fn close(&self) {
-        match lock_controller(&self.controller) {
-            Ok(mut controller) => {
-                controller
-                    .deck_session
-                    .close_deck(self.deck, self.generation);
-            }
-            Err(error) => record_global(
-                LogLevel::Error,
-                "library.deck_session_close_failed",
-                Some(&error.code),
-            ),
         }
     }
 }
@@ -980,16 +855,12 @@ mod tests {
 
     use latentdeck_cartridge::{
         hash::hash_reader,
-        writer::{PackRequest, WriteOptions, pack_atomic},
+        writer::{PackRequest, WriteOptions, pack_atomic, pack_integrity_atomic},
     };
     use serde_json::json;
     use tempfile::tempdir;
 
     use super::*;
-
-    fn fake_key(byte: char) -> CartridgeKey {
-        CartridgeKey::new_unchecked(std::iter::repeat_n(byte, 64).collect::<String>())
-    }
 
     fn write_synthetic_lc(
         root: &Path,
@@ -1093,6 +964,96 @@ mod tests {
         output_path
     }
 
+    fn write_synthetic_non_h3_lc(root: &Path, name: &str, cartridge_id: &str) -> PathBuf {
+        write_synthetic_non_h3_lc_with_duration(root, name, cartridge_id, 1, 1)
+    }
+
+    fn write_synthetic_non_h3_lc_with_duration(
+        root: &Path,
+        name: &str,
+        cartridge_id: &str,
+        duration_numerator: u64,
+        duration_denominator: u64,
+    ) -> PathBuf {
+        let tensor_bytes = vec![0_u8; 7 * 3 * 4];
+        let mut header = format!(
+            r#"{{"latent_state":{{"data_offsets":[0,{}],"dtype":"F32","shape":[1,7,1,3,1]}}}}"#,
+            tensor_bytes.len()
+        )
+        .into_bytes();
+        while !header.len().is_multiple_of(8) {
+            header.push(b' ');
+        }
+        let mut payload = Vec::with_capacity(8 + header.len() + tensor_bytes.len());
+        payload.extend_from_slice(
+            &u64::try_from(header.len())
+                .expect("small header")
+                .to_le_bytes(),
+        );
+        payload.extend_from_slice(&header);
+        payload.extend_from_slice(&tensor_bytes);
+        let payload_hash = hash_reader(&mut Cursor::new(&payload)).expect("payload hash");
+        let manifest = parse_manifest_json(
+            &serde_json::to_vec(&json!({
+                "spec_version": "0.1.0",
+                "cartridge_id": cartridge_id,
+                "codec": {
+                    "family": "synthetic_test",
+                    "profile": "non_h3_latent",
+                    "profile_version": "0.2.0"
+                },
+                "payloads": [{
+                    "path": "payloads/synthetic.safetensors",
+                    "media_type": "application/vnd.safetensors",
+                    "byte_length": payload_hash.byte_length,
+                    "sha256": payload_hash.sha256.to_string()
+                }],
+                "tensors": [{
+                    "stream": "visual",
+                    "name": "latent_state",
+                    "payload": "payloads/synthetic.safetensors",
+                    "storage_dtype": "F32",
+                    "runtime_dtype": "F32",
+                    "shape": [1, 7, 1, 3, 1]
+                }],
+                "timing": {
+                    "contract": "synthetic_step",
+                    "contract_version": "0.2.0",
+                    "decoded_video": {
+                        "width": 3,
+                        "height": 1,
+                        "frame_count": 1,
+                        "frame_rate": {"numerator": 1, "denominator": 1},
+                        "duration": {
+                            "numerator": duration_numerator,
+                            "denominator": duration_denominator
+                        }
+                    }
+                },
+                "audio": {"policy": "source_absent"},
+                "provenance": {
+                    "created_by": {"name": "latentdeck-app-tests", "version": "0.2.0"},
+                    "sources": []
+                },
+                "parent_cartridges": [],
+                "operation_history": []
+            }))
+            .expect("manifest JSON"),
+            &ValidationLimits::default(),
+        )
+        .expect("synthetic non-H3 manifest");
+        let payload_path = root.join(format!("{name}.safetensors"));
+        let output_path = root.join(format!("{name}.lc"));
+        fs::write(&payload_path, payload).expect("synthetic payload");
+        pack_integrity_atomic(
+            &PackRequest::new(manifest, &payload_path),
+            &output_path,
+            &WriteOptions::default(),
+        )
+        .expect("synthetic non-H3 LC");
+        output_path
+    }
+
     const fn greatest_common_divisor(mut left: u64, mut right: u64) -> u64 {
         while right != 0 {
             let remainder = left % right;
@@ -1103,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn changing_or_deleting_active_bank_never_mutates_loaded_slots() {
+    fn changing_or_deleting_active_bank_keeps_runtime_slots_owned_by_generic_controller() {
         let library = Library::in_memory().expect("in-memory library");
         let mut controller = LibraryController::new(library);
         let first = controller
@@ -1114,15 +1075,6 @@ mod tests {
             .library
             .create_collection("Second")
             .expect("second collection");
-        let d2 = controller.deck_session.begin_deck(DeckKind::D2);
-        controller
-            .deck_session
-            .publish_deck_slots(
-                DeckKind::D2,
-                d2,
-                [("A", fake_key('a')), ("B", fake_key('b'))],
-            )
-            .expect("current D2 session accepts its slots");
         let slots_before = controller.deck_session.view().loaded_slots;
 
         controller
@@ -1140,84 +1092,6 @@ mod tests {
         let after_delete = controller.deck_session.view();
         assert_eq!(after_delete.active_collection_id, ALL_CARTRIDGES_ID);
         assert_eq!(after_delete.loaded_slots, slots_before);
-    }
-
-    #[test]
-    fn deck_slots_are_namespaced_and_replaced_per_runtime() {
-        let mut session = DeckSessionState::default();
-        let d2 = session.begin_deck(DeckKind::D2);
-        session
-            .publish_deck_slots(
-                DeckKind::D2,
-                d2,
-                [("A", fake_key('a')), ("B", fake_key('b'))],
-            )
-            .expect("publish D2");
-        let q4 = session.begin_deck(DeckKind::Q4);
-        session
-            .publish_deck_slots(
-                DeckKind::Q4,
-                q4,
-                [
-                    ("A", fake_key('c')),
-                    ("B", fake_key('d')),
-                    ("C", fake_key('e')),
-                    ("D", fake_key('f')),
-                ],
-            )
-            .expect("publish Q4");
-
-        let view = session.view();
-        assert_eq!(view.loaded_slots.len(), 6);
-        assert_eq!(view.loaded_slots[0].deck_type, "d2");
-        assert_eq!(view.loaded_slots[0].slot, "A");
-        assert_eq!(view.loaded_slots[2].deck_type, "q4");
-        assert_eq!(view.loaded_slots[2].slot, "A");
-
-        let replacement = session.begin_deck(DeckKind::D2);
-        assert_eq!(session.view().loaded_slots.len(), 4);
-        session
-            .publish_deck_slots(
-                DeckKind::D2,
-                replacement,
-                [("A", fake_key('1')), ("B", fake_key('2'))],
-            )
-            .expect("replace D2 only");
-        let view = session.view();
-        assert_eq!(view.loaded_slots.len(), 6);
-        assert!(view.loaded_slots.iter().any(|slot| {
-            slot.deck_type == "q4" && slot.slot == "D" && slot.archive_sha256 == "f".repeat(64)
-        }));
-    }
-
-    #[test]
-    fn closed_or_stale_runtime_cannot_publish_or_clear_another_session() {
-        let mut session = DeckSessionState::default();
-        let stale = session.begin_deck(DeckKind::D2);
-        assert!(session.close_deck(DeckKind::D2, stale));
-        assert!(
-            session
-                .publish_deck_slots(
-                    DeckKind::D2,
-                    stale,
-                    [("A", fake_key('a')), ("B", fake_key('b'))],
-                )
-                .is_err()
-        );
-        assert!(session.view().loaded_slots.is_empty());
-
-        let current = session.begin_deck(DeckKind::D2);
-        session
-            .publish_deck_slots(
-                DeckKind::D2,
-                current,
-                [("A", fake_key('c')), ("B", fake_key('d'))],
-            )
-            .expect("publish replacement");
-        assert!(!session.close_deck(DeckKind::D2, stale));
-        assert_eq!(session.view().loaded_slots.len(), 2);
-        assert!(session.close_deck(DeckKind::D2, current));
-        assert!(session.view().loaded_slots.is_empty());
     }
 
     #[test]
@@ -1256,6 +1130,84 @@ mod tests {
             .expect_err("missing target must not partially change active collection");
         assert_eq!(error.code, "not_found");
         assert_eq!(controller.deck_session.active_collection_id, target.id);
+    }
+
+    #[test]
+    fn library_snapshot_renders_h3_and_codec_neutral_signal_geometry() {
+        let temporary = tempdir().expect("temporary directory");
+        let h3 = write_synthetic_lc(
+            temporary.path(),
+            "h3-source",
+            "550e8400-e29b-41d4-a716-446655440020",
+            2,
+            2,
+            1,
+        );
+        let synthetic = write_synthetic_non_h3_lc(
+            temporary.path(),
+            "synthetic-source",
+            "550e8400-e29b-41d4-a716-446655440021",
+        );
+        let mut library = Library::in_memory().expect("in-memory library");
+        library.import_file(h3).expect("H3 import");
+        library
+            .import_file(synthetic)
+            .expect("codec-neutral import");
+        let mut controller = LibraryController::new(library);
+
+        let snapshot = controller.snapshot(None).expect("generic Library snapshot");
+
+        assert_eq!(snapshot.cartridges.len(), 2);
+        let h3 = snapshot
+            .cartridges
+            .iter()
+            .find(|item| item.codec_family == "minimax_h3")
+            .expect("H3 row");
+        assert_eq!(
+            h3.signal_geometry.runtime_dtype,
+            latentdeck_cartridge::manifest::DType::F16
+        );
+        assert_eq!(h3.signal_geometry.latent_channels, 24);
+        assert_eq!(h3.signal_geometry.latent_slots, 2);
+        assert_eq!(h3.signal_geometry.decoded_frame_count, 5);
+        let synthetic = snapshot
+            .cartridges
+            .iter()
+            .find(|item| item.codec_family == "synthetic_test")
+            .expect("synthetic row");
+        assert_eq!(
+            synthetic.signal_geometry.runtime_dtype,
+            latentdeck_cartridge::manifest::DType::F32
+        );
+        assert_eq!(synthetic.signal_geometry.latent_channels, 7);
+        assert_eq!(synthetic.signal_geometry.latent_height, 3);
+        assert_eq!(synthetic.signal_geometry.latent_width, 1);
+        assert_eq!(synthetic.signal_presentation.decoded_width, 3);
+        assert_eq!(synthetic.signal_presentation.decoded_height, 1);
+    }
+
+    #[test]
+    fn malformed_codec_neutral_import_cannot_poison_library_snapshot() {
+        let temporary = tempdir().expect("temporary directory");
+        let malformed = write_synthetic_non_h3_lc_with_duration(
+            temporary.path(),
+            "malformed-source",
+            "550e8400-e29b-41d4-a716-446655440022",
+            2,
+            1,
+        );
+        let mut library = Library::in_memory().expect("in-memory library");
+
+        let error = library
+            .import_file(malformed)
+            .expect_err("invalid generic signal must not enter the Library");
+        assert_eq!(error.cartridge_code.as_deref(), Some("timing_mismatch"));
+        let mut controller = LibraryController::new(library);
+        let snapshot = controller
+            .snapshot(None)
+            .expect("rejected entry cannot poison snapshot");
+        assert!(snapshot.cartridges.is_empty());
+        assert_eq!(snapshot.total_indexed, 0);
     }
 
     #[test]

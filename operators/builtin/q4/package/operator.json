@@ -1,0 +1,125 @@
+{
+  "schema_version": "0.2.0",
+  "deck_operator_api": "0.2.0",
+  "deck_id": "org.latentdeck.deck.q4",
+  "deck_version": "0.2.0",
+  "operator_id": "org.latentdeck.builtin.ld_q4",
+  "operator_version": "0.2.0",
+  "entrypoint": "latentdeck_operator_q4.operator:process_sources",
+  "source_count": 4,
+  "role_ids": ["carrier", "donor_b", "donor_c", "donor_d"],
+  "controls": [
+    {
+      "control_id": "algorithm",
+      "value_type": "enum",
+      "default": "linear",
+      "options": ["linear", "xs5"]
+    },
+    {
+      "control_id": "interaction",
+      "value_type": "number",
+      "default": 0.0,
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "step": 0.01
+    },
+    {
+      "control_id": "mode",
+      "value_type": "enum",
+      "default": "hybridize",
+      "options": ["hybridize", "interact"]
+    },
+    {
+      "control_id": "preserve",
+      "value_type": "number",
+      "default": 0.55,
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "step": 0.01
+    },
+    {
+      "control_id": "influence_mode",
+      "value_type": "enum",
+      "default": "manual",
+      "options": ["manual", "triangle"]
+    },
+    {
+      "control_id": "donor_weight_b",
+      "value_type": "number",
+      "default": 1.0,
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "step": 0.01
+    },
+    {
+      "control_id": "donor_weight_c",
+      "value_type": "number",
+      "default": 1.0,
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "step": 0.01
+    },
+    {
+      "control_id": "donor_weight_d",
+      "value_type": "number",
+      "default": 1.0,
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "step": 0.01
+    },
+    {
+      "control_id": "triangle_x",
+      "value_type": "number",
+      "default": 0.5,
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "step": 0.01
+    },
+    {
+      "control_id": "triangle_y",
+      "value_type": "number",
+      "default": 0.3333333333333333,
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "step": 0.01
+    },
+    {
+      "control_id": "xs5_routing",
+      "value_type": "enum",
+      "default": "topk",
+      "options": ["topk", "sinkhorn"]
+    },
+    {
+      "control_id": "temperature",
+      "value_type": "number",
+      "default": 0.12,
+      "minimum": 0.02,
+      "maximum": 1.0,
+      "step": 0.01
+    },
+    {
+      "control_id": "top_k",
+      "value_type": "integer",
+      "default": 8,
+      "minimum": 1,
+      "maximum": 64,
+      "step": 1
+    },
+    {
+      "control_id": "sinkhorn_iterations",
+      "value_type": "integer",
+      "default": 5,
+      "minimum": 2,
+      "maximum": 12,
+      "step": 1
+    },
+    {
+      "control_id": "chaos",
+      "value_type": "number",
+      "default": 0.0,
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "step": 0.01
+    }
+  ]
+}

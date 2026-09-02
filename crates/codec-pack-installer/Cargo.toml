@@ -8,17 +8,19 @@ description = "Native current-user H3 Codec Pack install and uninstall lifecycle
 
 [dependencies]
 clap.workspace = true
-fs2.workspace = true
-hex.workspace = true
-latentdeck-core = { path = "../core" }
+latentdeck-extension-manager = { path = "../extension-manager" }
+
+[build-dependencies]
 semver.workspace = true
-sha2.workspace = true
-thiserror.workspace = true
-uuid.workspace = true
-zip.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
+hex.workspace = true
+serde.workspace = true
+serde_jcs.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 
 [lints]

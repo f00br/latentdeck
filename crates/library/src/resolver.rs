@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use latentdeck_cartridge::reader::{ValidationOptions, open_validated};
+use latentdeck_cartridge::reader::{ValidationOptions, open_integrity_validated};
 use rusqlite::{OptionalExtension as _, params};
 
 use crate::{
@@ -144,7 +144,7 @@ fn validate_registered_path(path: &Path, identity: &DeckSourceIdentity) -> Resul
         return Err(source_unavailable());
     }
 
-    let validated = open_validated(path, &ValidationOptions::default())
+    let validated = open_integrity_validated(path, &ValidationOptions::default())
         .map_err(|error| LibraryError::cartridge(&error))?;
     if validated.receipt().archive_sha256.to_string() != identity.archive_sha256.as_str()
         || validated.manifest().cartridge_id.0 != identity.cartridge_id

@@ -190,7 +190,7 @@ class WindowsRingProducer:
         *,
         stream_generation: int,
     ) -> tuple[int, int]:
-        """Publish one D2/Q4 post-operator decoder slot (one to four frames)."""
+        """Publish one generic Deck post-operator decoder slot (one to four frames)."""
 
         if self._closed:
             raise H3RingError("RGB ring producer is closed")

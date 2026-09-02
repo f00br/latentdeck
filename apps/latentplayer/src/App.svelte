@@ -7,8 +7,24 @@
     conversionControls,
     conversionIsActive,
     conversionProgressLabel,
+    rawImportProfileKey,
     type ConversionSnapshot,
+    type RawImportCodecOptions,
+    type RawImportSelection,
   } from "./conversion-model";
+  import {
+    EMPTY_EXTENSIONS_SNAPSHOT,
+    compatibilityReasonLabel,
+    extensionPackageKey,
+    inspectionMatchesPackage,
+    publisherIdentityNotice,
+    replaceVerifiedSummary,
+    shaConfirmationMatches,
+    type ExtensionCodecDevice,
+    type ExtensionPackageSummary,
+    type ExtensionsSnapshot,
+    type InspectedExtension,
+  } from "./extension-manager-model";
   import {
     EMPTY_PLAYER_VIEW,
     acceptTrustedSnapshot,
@@ -40,7 +56,7 @@
   } from "./player-model";
   import { product } from "./product";
 
-  type WorkspaceMode = "play" | "prepare";
+  type WorkspaceMode = "play" | "prepare" | "extensions";
   type ConversionSelection = { path: string; kind: "file" | "folder" };
 
   let player = $state<PlayerView>(EMPTY_PLAYER_VIEW);
@@ -68,6 +84,27 @@
   let conversionBusy = $state(false);
   let conversionError = $state<PlayerError | null>(null);
   let conversionSnapshotPending = false;
+  let rawImportOptions = $state<RawImportCodecOptions | null>(null);
+  let rawImportProfileKeyValue = $state("");
+  let rawImportOptionsPending = false;
+  let extensions = $state<ExtensionsSnapshot>(EMPTY_EXTENSIONS_SNAPSHOT);
+  let extensionsBusy = $state(false);
+  let extensionsSnapshotPending = $state(false);
+  let extensionsError = $state<PlayerError | null>(null);
+  let extensionsStatus = $state(
+    "Installed versions are listed exactly; no version is selected automatically.",
+  );
+  let installArchivePath = $state<string | null>(null);
+  let installInspection = $state<InspectedExtension | null>(null);
+  let installExpectedSha256 = $state("");
+  let repairTarget = $state<ExtensionPackageSummary | null>(null);
+  let repairArchivePath = $state<string | null>(null);
+  let repairInspection = $state<InspectedExtension | null>(null);
+  let repairExpectedSha256 = $state("");
+  let corruptRemovalAcknowledgement = $state<string | null>(null);
+  let codecDeviceSelections = $state<Record<string, ExtensionCodecDevice | "">>(
+    {},
+  );
   const VIEWPORT_RETRY_DELAYS_MS = [250, 1000, 2500] as const;
   let viewportAnchor: HTMLDivElement | null = null;
   let viewportEpoch: number | null = null;
@@ -93,11 +130,28 @@
   );
   const spoutControls = $derived(spoutControlsFor(spout, busy || spoutBusy));
   const canSaveDiagnostics = $derived(diagnosticSaveEnabled(diagnosticBusy));
+  const selectedRawImportProfile = $derived(
+    rawImportOptions?.profiles.find(
+      (profile) => rawImportProfileKey(profile) === rawImportProfileKeyValue,
+    ) ?? null,
+  );
+  const rawImportSelection = $derived<RawImportSelection | null>(
+    rawImportOptions !== null && selectedRawImportProfile !== null
+      ? {
+          packageId: rawImportOptions.packageId,
+          packageVersion: rawImportOptions.packageVersion,
+          adapterId: rawImportOptions.adapterId,
+          adapterVersion: rawImportOptions.adapterVersion,
+          profile: selectedRawImportProfile,
+        }
+      : null,
+  );
   const conversionControlState = $derived(
     conversionControls(
       conversion,
       conversionInputs.length,
       conversionOutputDirectory !== null,
+      selectedRawImportProfile !== null,
       conversionBusy,
     ),
   );
@@ -188,7 +242,6 @@
       const selected = await open({
         multiple: true,
         directory: false,
-        filters: [{ name: "Raw H3 Safetensors", extensions: ["safetensors"] }],
       });
       const paths = Array.isArray(selected)
         ? selected
@@ -228,7 +281,8 @@
   }
 
   async function prepareConversion(): Promise<void> {
-    if (conversionOutputDirectory === null) return;
+    if (conversionOutputDirectory === null || rawImportSelection === null)
+      return;
     conversionBusy = true;
     conversionError = null;
     try {
@@ -236,6 +290,7 @@
         inputs: conversionInputs.map((selection) => selection.path),
         outputDirectory: conversionOutputDirectory,
         recursive: conversionRecursive,
+        selection: rawImportSelection,
       });
     } catch (error) {
       conversion = null;
@@ -305,6 +360,291 @@
     workspaceMode = mode;
     await tick();
     scheduleViewportSync();
+    if (mode === "extensions") void refreshExtensions(true);
+    if (mode === "prepare") void refreshRawImportOptions(true);
+  }
+
+  async function refreshRawImportOptions(reportError = false): Promise<void> {
+    if (rawImportOptionsPending) return;
+    rawImportOptionsPending = true;
+    try {
+      const options = await invoke<RawImportCodecOptions>(
+        "player_raw_import_options",
+      );
+      rawImportOptions = options;
+      if (
+        !options.profiles.some(
+          (profile) =>
+            rawImportProfileKey(profile) === rawImportProfileKeyValue,
+        )
+      ) {
+        rawImportProfileKeyValue = "";
+        invalidateConversionPlan();
+      }
+      if (reportError) conversionError = null;
+    } catch (error) {
+      rawImportOptions = null;
+      rawImportProfileKeyValue = "";
+      invalidateConversionPlan();
+      if (reportError) {
+        conversionError = playerError(error, "raw_import.selection_missing");
+      }
+    } finally {
+      rawImportOptionsPending = false;
+    }
+  }
+
+  async function refreshExtensions(reportError = false): Promise<void> {
+    if (extensionsSnapshotPending) return;
+    extensionsSnapshotPending = true;
+    try {
+      extensions = await invoke<ExtensionsSnapshot>("extensions_snapshot");
+      if (reportError) extensionsError = null;
+    } catch (error) {
+      if (reportError) {
+        extensionsError = playerError(error, "extensions.snapshot_failed");
+      }
+    } finally {
+      extensionsSnapshotPending = false;
+    }
+  }
+
+  function clearInstallInspection(): void {
+    installArchivePath = null;
+    installInspection = null;
+    installExpectedSha256 = "";
+  }
+
+  function startRepair(summary: ExtensionPackageSummary): void {
+    repairTarget = summary;
+    repairArchivePath = null;
+    repairInspection = null;
+    repairExpectedSha256 = "";
+    extensionsError = null;
+    extensionsStatus = `Repair target: ${summary.package.packageId} ${summary.package.packageVersion}.`;
+  }
+
+  function clearRepair(): void {
+    repairTarget = null;
+    repairArchivePath = null;
+    repairInspection = null;
+    repairExpectedSha256 = "";
+  }
+
+  async function inspectExtensionArchive(
+    purpose: "install" | "repair",
+  ): Promise<void> {
+    extensionsError = null;
+    try {
+      const path = await open({
+        multiple: false,
+        directory: false,
+        filters: [
+          { name: "LatentDeck Extension", extensions: ["ld", "ldcodec"] },
+        ],
+      });
+      if (typeof path !== "string") return;
+
+      extensionsBusy = true;
+      const inspection = await invoke<InspectedExtension>(
+        "extensions_inspect",
+        { path },
+      );
+      if (purpose === "install") {
+        installArchivePath = path;
+        installInspection = inspection;
+        installExpectedSha256 = "";
+        extensionsStatus =
+          "Archive inspected locally. Confirm its exact measured SHA-256 to install.";
+      } else {
+        repairArchivePath = path;
+        repairInspection = inspection;
+        repairExpectedSha256 = "";
+        extensionsStatus =
+          repairTarget !== null &&
+          inspectionMatchesPackage(inspection, repairTarget.package)
+            ? "Repair archive identity matches the selected exact version."
+            : "Repair archive does not match the selected exact package version.";
+      }
+    } catch (error) {
+      extensionsError = playerError(error, "extensions.inspect_failed");
+    } finally {
+      extensionsBusy = false;
+    }
+  }
+
+  async function installExtension(): Promise<void> {
+    if (
+      installArchivePath === null ||
+      installInspection === null ||
+      !shaConfirmationMatches(
+        installExpectedSha256,
+        installInspection.archiveSha256,
+      )
+    ) {
+      return;
+    }
+    extensionsBusy = true;
+    extensionsError = null;
+    try {
+      extensions = await invoke<ExtensionsSnapshot>("extensions_install", {
+        path: installArchivePath,
+        expectedSha256: installExpectedSha256,
+      });
+      extensionsStatus = `Installed exact version ${installInspection.package.packageId} ${installInspection.package.packageVersion}.`;
+      clearInstallInspection();
+    } catch (error) {
+      extensionsError = playerError(error, "extensions.install_failed");
+    } finally {
+      extensionsBusy = false;
+    }
+  }
+
+  async function verifyExtension(
+    summary: ExtensionPackageSummary,
+  ): Promise<void> {
+    extensionsBusy = true;
+    extensionsError = null;
+    try {
+      const verified = await invoke<ExtensionPackageSummary>(
+        "extensions_verify",
+        { package: summary.package },
+      );
+      extensions = replaceVerifiedSummary(extensions, verified);
+      await refreshExtensions();
+      extensionsStatus = `Verified ${summary.package.packageId} ${summary.package.packageVersion}: ${verified.health}.`;
+    } catch (error) {
+      extensionsError = playerError(error, "extensions.verify_failed");
+    } finally {
+      extensionsBusy = false;
+    }
+  }
+
+  async function setExtensionEnabled(
+    summary: ExtensionPackageSummary,
+    enabled: boolean,
+  ): Promise<void> {
+    extensionsBusy = true;
+    extensionsError = null;
+    try {
+      extensions = enabled
+        ? await invoke<ExtensionsSnapshot>("extensions_enable", {
+            package: summary.package,
+          })
+        : await invoke<ExtensionsSnapshot>("extensions_disable", {
+            package: summary.package,
+          });
+      extensionsStatus = `${enabled ? "Enabled" : "Disabled"} ${summary.package.packageId} ${summary.package.packageVersion}.`;
+    } catch (error) {
+      extensionsError = playerError(
+        error,
+        enabled ? "extensions.enable_failed" : "extensions.disable_failed",
+      );
+    } finally {
+      extensionsBusy = false;
+    }
+  }
+
+  async function removeExtension(
+    summary: ExtensionPackageSummary,
+  ): Promise<void> {
+    const exactKey = extensionPackageKey(summary.package);
+    const allowCorrupt = summary.health === "corrupt";
+    if (allowCorrupt && corruptRemovalAcknowledgement !== exactKey) return;
+
+    extensionsBusy = true;
+    extensionsError = null;
+    try {
+      extensions = await invoke<ExtensionsSnapshot>("extensions_remove", {
+        package: summary.package,
+        allowCorrupt: allowCorrupt,
+      });
+      extensionsStatus = `Removed exact version ${summary.package.packageId} ${summary.package.packageVersion}.`;
+      corruptRemovalAcknowledgement = null;
+      if (
+        repairTarget !== null &&
+        extensionPackageKey(repairTarget.package) === exactKey
+      ) {
+        clearRepair();
+      }
+    } catch (error) {
+      extensionsError = playerError(error, "extensions.remove_failed");
+    } finally {
+      extensionsBusy = false;
+    }
+  }
+
+  async function repairExtension(): Promise<void> {
+    if (
+      repairTarget === null ||
+      repairArchivePath === null ||
+      repairInspection === null ||
+      !inspectionMatchesPackage(repairInspection, repairTarget.package) ||
+      !shaConfirmationMatches(
+        repairExpectedSha256,
+        repairInspection.archiveSha256,
+      )
+    ) {
+      return;
+    }
+
+    extensionsBusy = true;
+    extensionsError = null;
+    try {
+      extensions = await invoke<ExtensionsSnapshot>("extensions_repair", {
+        path: repairArchivePath,
+        expectedSha256: repairExpectedSha256,
+      });
+      extensionsStatus = `Repaired exact version ${repairTarget.package.packageId} ${repairTarget.package.packageVersion}.`;
+      clearRepair();
+    } catch (error) {
+      extensionsError = playerError(error, "extensions.repair_failed");
+    } finally {
+      extensionsBusy = false;
+    }
+  }
+
+  function setCodecDevice(
+    summary: ExtensionPackageSummary,
+    device: ExtensionCodecDevice | "",
+  ): void {
+    codecDeviceSelections = {
+      ...codecDeviceSelections,
+      [extensionPackageKey(summary.package)]: device,
+    };
+  }
+
+  async function useCodecInPlayer(
+    summary: ExtensionPackageSummary,
+  ): Promise<void> {
+    const device = codecDeviceSelections[extensionPackageKey(summary.package)];
+    if (
+      summary.package.kind !== "codec_pack" ||
+      summary.health !== "healthy" ||
+      !summary.enabled ||
+      (device !== "cpu" && device !== "cuda")
+    ) {
+      return;
+    }
+
+    extensionsBusy = true;
+    extensionsError = null;
+    try {
+      await invoke<void>("player_select_codec_exact", {
+        packageId: summary.package.packageId,
+        packageVersion: summary.package.packageVersion,
+        device,
+      });
+      const snapshot = await invoke<PlayerView>("player_snapshot");
+      player = acceptTrustedSnapshot(player, snapshot);
+      extensionsStatus = `Player selected ${summary.package.packageId} ${summary.package.packageVersion} on ${device}.`;
+      await refreshRawImportOptions();
+      await setWorkspaceMode("play");
+    } catch (error) {
+      extensionsError = playerError(error, "extensions.player_select_failed");
+    } finally {
+      extensionsBusy = false;
+    }
   }
 
   async function command(
@@ -686,6 +1026,8 @@
     void refreshFullscreen();
     void refreshSpout();
     void refreshConversion();
+    void refreshExtensions();
+    void refreshRawImportOptions();
     const snapshotTimer = globalThis.setInterval(() => {
       void refreshSnapshot();
     }, 100);
@@ -753,7 +1095,7 @@
   class:fullscreen-shell={workspaceMode === "play" &&
     fullscreen?.active &&
     player.outputAvailable}
-  aria-busy={busy || conversionBusy}
+  aria-busy={busy || conversionBusy || extensionsBusy}
 >
   <header class="masthead">
     <div class="brand-lockup">
@@ -771,12 +1113,19 @@
         aria-pressed={workspaceMode === "prepare"}
         onclick={() => setWorkspaceMode("prepare")}>Prepare</button
       >
+      <button
+        class:active={workspaceMode === "extensions"}
+        aria-pressed={workspaceMode === "extensions"}
+        onclick={() => setWorkspaceMode("extensions")}>Extensions</button
+      >
     </nav>
     <div class="masthead-actions">
       <span class="phase-badge"
         >{workspaceMode === "play"
           ? player.phase
-          : (conversion?.phase ?? "selection")}</span
+          : workspaceMode === "prepare"
+            ? (conversion?.phase ?? "selection")
+            : `${extensions.packages.length} installed`}</span
       >
       {#if workspaceMode === "play"}
         <button class="open" disabled={!controls.open} onclick={openCartridge}
@@ -972,23 +1321,65 @@
     class="prepare-workspace"
     class:workspace-hidden={workspaceMode !== "prepare"}
     aria-hidden={workspaceMode !== "prepare"}
-    aria-label="Prepare raw H3 cartridges"
+    aria-label="Prepare raw codec cartridges"
   >
     <header class="prepare-heading">
       <div>
-        <p class="eyebrow">Raw H3 → Latent Cartridge</p>
+        <p class="eyebrow">Raw codec source → Latent Cartridge</p>
         <h2>Prepare performance files</h2>
       </div>
       <p>
-        Validate and convert locally. Existing <code>.lc</code> files are never overwritten,
-        and playback codecs or a GPU are not required.
+        An explicitly selected Codec Pack v2 performs bounded CPU preflight and
+        staging. Core validates and commits every <code>.lc</code> without overwrite;
+        no GPU is used.
       </p>
     </header>
 
     <div class="prepare-grid">
+      <section class="codec-builder" aria-label="Raw import codec selection">
+        <header>
+          <span>1 · Exact codec authority</span>
+          <strong>
+            {rawImportOptions === null
+              ? "No raw-import codec selected"
+              : `${rawImportOptions.packageId} ${rawImportOptions.packageVersion}`}
+          </strong>
+        </header>
+        {#if rawImportOptions === null}
+          <p>
+            Select and enable one exact raw-import-capable <code>.ldcodec</code> version
+            in Extensions, then return here.
+          </p>
+        {:else}
+          <p>
+            Adapter <code>{rawImportOptions.adapterId}</code>
+            <code>{rawImportOptions.adapterVersion}</code> · publisher metadata is
+            self-declared.
+          </p>
+          <label>
+            <span>Profile (explicit)</span>
+            <select
+              value={rawImportProfileKeyValue}
+              disabled={!conversionControlState.changeSelection}
+              onchange={(event) => {
+                rawImportProfileKeyValue = event.currentTarget.value;
+                invalidateConversionPlan();
+              }}
+            >
+              <option value="">Choose an exact profile…</option>
+              {#each rawImportOptions.profiles as profile (rawImportProfileKey(profile))}
+                <option value={rawImportProfileKey(profile)}>
+                  {profile.codecFamily} / {profile.profile} / {profile.profileVersion}
+                </option>
+              {/each}
+            </select>
+          </label>
+        {/if}
+      </section>
+
       <section class="source-builder" aria-label="Conversion inputs">
         <header>
-          <span>1 · Sources</span>
+          <span>2 · Sources</span>
           <strong>{conversionInputs.length} selected</strong>
         </header>
         <div class="prepare-actions">
@@ -1026,7 +1417,10 @@
         </label>
         <div class="selection-list">
           {#if conversionInputs.length === 0}
-            <p>No raw H3 Safetensors selected.</p>
+            <p>
+              No raw files selected. The exact codec adapter decides which
+              source format is valid.
+            </p>
           {:else}
             {#each conversionInputs as selection (selection.path)}
               <article>
@@ -1052,7 +1446,7 @@
 
       <section class="output-builder" aria-label="Conversion output">
         <header>
-          <span>2 · Destination</span>
+          <span>3 · Destination</span>
           <strong
             >{conversionOutputDirectory === null
               ? "Not selected"
@@ -1094,7 +1488,7 @@
     <section class="conversion-results" aria-label="Conversion queue">
       <header>
         <div>
-          <span>3 · Preflight and progress</span>
+          <span>4 · Preflight and progress</span>
           <strong aria-live="polite">{conversionStatus}</strong>
         </div>
         {#if conversion !== null}
@@ -1130,14 +1524,14 @@
                   {item.metadata.decodedWidth} × {item.metadata.decodedHeight} ·
                   {item.metadata.decodedFrames} frames ·
                   {item.metadata.storageDtype} · {formatBytes(
-                    item.metadata.payloadBytes,
+                    item.metadata.sourceBytes,
                   )} · {item.metadata.audioPresent ? "AV" : "visual-only"}
                 </p>
                 <p class="item-fingerprint">
                   latent {item.metadata.latentSlots} ×
                   {item.metadata.latentHeight} × {item.metadata.latentWidth} · SHA-256
-                  <code title={item.metadata.payloadSha256}
-                    >{item.metadata.payloadSha256}</code
+                  <code title={item.metadata.sourceSha256}
+                    >{item.metadata.sourceSha256}</code
                   >
                 </p>
               {/if}
@@ -1151,6 +1545,387 @@
                   >Open in Player</button
                 >
               {/if}
+            </article>
+          {/each}
+        {/if}
+      </div>
+    </section>
+  </section>
+
+  <section
+    class="extensions-workspace"
+    class:workspace-hidden={workspaceMode !== "extensions"}
+    aria-hidden={workspaceMode !== "extensions"}
+    aria-label="Extensions Manager"
+  >
+    <header class="extensions-heading">
+      <div>
+        <p class="eyebrow">Local packages · exact immutable versions</p>
+        <h2>Extensions Manager</h2>
+      </div>
+      <p>
+        Inspect and manage local <code>.ld</code> Decks and
+        <code>.ldcodec</code> Codec Packs. Publisher metadata is self-declared; an
+        exact SHA-256 confirms archive bytes, not publisher identity.
+      </p>
+      <button disabled={extensionsBusy} onclick={() => refreshExtensions(true)}
+        >{extensionsSnapshotPending
+          ? "Refreshing…"
+          : "Refresh snapshot"}</button
+      >
+    </header>
+
+    {#if extensionsError}
+      <section class="error-panel extensions-error" role="alert">
+        <strong>{extensionsError.code}</strong>
+        <span>{extensionsError.message}</span>
+      </section>
+    {/if}
+    <p class="extensions-status" aria-live="polite">{extensionsStatus}</p>
+
+    <div class="extensions-grid">
+      <section
+        class="extension-install-card"
+        aria-label="Install local extension"
+      >
+        <header>
+          <div>
+            <span>Local archive preflight</span>
+            <strong>Install exact bytes</strong>
+          </div>
+          <button
+            disabled={extensionsBusy}
+            onclick={() => inspectExtensionArchive("install")}
+            >Inspect local package</button
+          >
+        </header>
+        {#if installInspection === null}
+          <p class="extension-placeholder">
+            Select one local .ld or .ldcodec archive. Nothing is installed until
+            inspection succeeds and you enter its exact measured SHA-256.
+          </p>
+        {:else}
+          <article class="inspection-card">
+            <header>
+              <div>
+                <span>{installInspection.package.kind}</span>
+                <strong>{installInspection.displayName}</strong>
+                <small
+                  >{installInspection.package.packageId} ·
+                  {installInspection.package.packageVersion}</small
+                >
+              </div>
+              <small
+                >{installInspection.fileCount} files · {formatBytes(
+                  installInspection.archiveByteLength,
+                )} archive · {formatBytes(
+                  installInspection.extractedByteLength,
+                )} extracted</small
+              >
+            </header>
+            <strong class="publisher-warning"
+              >Publisher identity is self-declared</strong
+            >
+            <p>{publisherIdentityNotice(installInspection)}</p>
+            <code class="extension-hash" title={installInspection.archiveSha256}
+              >SHA-256 {installInspection.archiveSha256}</code
+            >
+            <label class="sha-confirmation">
+              Exact lowercase SHA-256
+              <input
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                maxlength="64"
+                value={installExpectedSha256}
+                aria-invalid={!shaConfirmationMatches(
+                  installExpectedSha256,
+                  installInspection.archiveSha256,
+                )}
+                oninput={(event) => {
+                  installExpectedSha256 = event.currentTarget.value;
+                }}
+              />
+            </label>
+            <div class="extension-primary-actions">
+              <button
+                disabled={extensionsBusy ||
+                  !shaConfirmationMatches(
+                    installExpectedSha256,
+                    installInspection.archiveSha256,
+                  )}
+                onclick={installExtension}>Install exact version</button
+              >
+              <button disabled={extensionsBusy} onclick={clearInstallInspection}
+                >Clear</button
+              >
+            </div>
+          </article>
+        {/if}
+      </section>
+
+      <section
+        class="installed-extensions"
+        aria-label="Installed exact versions"
+      >
+        <header>
+          <div>
+            <span>Installed snapshot</span>
+            <strong>{extensions.packages.length} exact versions</strong>
+          </div>
+          <small>Side-by-side · explicit activation · no automatic newest</small
+          >
+        </header>
+        <div class="installed-extension-list">
+          {#if extensions.packages.length === 0}
+            <p class="extension-placeholder">
+              No installed Deck or Codec Pack versions.
+            </p>
+          {:else}
+            {#each extensions.packages as summary (extensionPackageKey(summary.package))}
+              <article
+                class:extension-corrupt={summary.health === "corrupt"}
+                class:extension-untrusted={summary.health === "untrusted"}
+              >
+                <header>
+                  <div>
+                    <span>{summary.package.kind}</span>
+                    <strong
+                      >{summary.displayName ??
+                        summary.package.packageId}</strong
+                    >
+                    <small
+                      >{summary.package.packageId} ·
+                      {summary.package.packageVersion}</small
+                    >
+                  </div>
+                  <div class="extension-state">
+                    <span class:enabled={summary.enabled}
+                      >{summary.enabled ? "enabled" : "disabled"}</span
+                    >
+                    <strong class:healthy={summary.health === "healthy"}
+                      >{summary.health}</strong
+                    >
+                  </div>
+                </header>
+                <p>
+                  {summary.publisherName ?? "Publisher not declared"} · self-declared
+                  metadata
+                </p>
+                {#if summary.errorCode !== null}
+                  <code class="extension-package-error"
+                    >{summary.errorCode} · {summary.errorDetail ??
+                      "No detail"}</code
+                  >
+                {/if}
+                <div class="extension-actions">
+                  <button
+                    disabled={extensionsBusy}
+                    onclick={() => verifyExtension(summary)}>Verify</button
+                  >
+                  <button
+                    disabled={extensionsBusy || summary.health !== "healthy"}
+                    onclick={() =>
+                      setExtensionEnabled(summary, !summary.enabled)}
+                    >{summary.enabled ? "Disable" : "Enable"}</button
+                  >
+                  <button
+                    disabled={extensionsBusy}
+                    onclick={() => startRepair(summary)}>Repair…</button
+                  >
+                  <button
+                    class="remove-extension"
+                    disabled={extensionsBusy ||
+                      (summary.health === "corrupt" &&
+                        corruptRemovalAcknowledgement !==
+                          extensionPackageKey(summary.package))}
+                    onclick={() => removeExtension(summary)}
+                    >Remove exact version</button
+                  >
+                </div>
+                {#if summary.package.kind === "codec_pack" && summary.health === "healthy" && summary.enabled}
+                  <div class="codec-player-selection">
+                    <label>
+                      Player device
+                      <select
+                        value={codecDeviceSelections[
+                          extensionPackageKey(summary.package)
+                        ] ?? ""}
+                        disabled={extensionsBusy}
+                        onchange={(event) => {
+                          const value = event.currentTarget.value;
+                          setCodecDevice(
+                            summary,
+                            value === "cpu" || value === "cuda" ? value : "",
+                          );
+                        }}
+                      >
+                        <option value="" disabled>Select device</option>
+                        <option value="cpu">CPU</option>
+                        <option value="cuda">CUDA</option>
+                      </select>
+                    </label>
+                    <button
+                      disabled={extensionsBusy ||
+                        !["cpu", "cuda"].includes(
+                          codecDeviceSelections[
+                            extensionPackageKey(summary.package)
+                          ] ?? "",
+                        )}
+                      onclick={() => useCodecInPlayer(summary)}
+                      >Use in Player</button
+                    >
+                  </div>
+                {/if}
+                {#if summary.health === "corrupt"}
+                  <label class="corrupt-removal-confirmation">
+                    <input
+                      type="checkbox"
+                      checked={corruptRemovalAcknowledgement ===
+                        extensionPackageKey(summary.package)}
+                      disabled={extensionsBusy}
+                      onchange={(event) => {
+                        corruptRemovalAcknowledgement = event.currentTarget
+                          .checked
+                          ? extensionPackageKey(summary.package)
+                          : null;
+                      }}
+                    />
+                    Allow removing this corrupt exact version
+                  </label>
+                {/if}
+              </article>
+            {/each}
+          {/if}
+        </div>
+      </section>
+    </div>
+
+    {#if repairTarget !== null}
+      <section
+        class="extension-repair"
+        aria-label="Repair exact extension version"
+      >
+        <header>
+          <div>
+            <span>Repair exact version</span>
+            <strong
+              >{repairTarget.package.packageId} ·
+              {repairTarget.package.packageVersion}</strong
+            >
+          </div>
+          <div class="extension-primary-actions">
+            <button
+              disabled={extensionsBusy}
+              onclick={() => inspectExtensionArchive("repair")}
+              >Inspect repair archive</button
+            >
+            <button disabled={extensionsBusy} onclick={clearRepair}
+              >Cancel</button
+            >
+          </div>
+        </header>
+        {#if repairInspection === null}
+          <p class="extension-placeholder">
+            Choose a separate local archive. Its kind, ID, and version must
+            match this repair target exactly.
+          </p>
+        {:else}
+          <div class="repair-inspection">
+            <p
+              class:matching={inspectionMatchesPackage(
+                repairInspection,
+                repairTarget.package,
+              )}
+            >
+              {inspectionMatchesPackage(repairInspection, repairTarget.package)
+                ? "Exact package identity matches"
+                : `Mismatch: ${repairInspection.package.kind} ${repairInspection.package.packageId} ${repairInspection.package.packageVersion}`}
+            </p>
+            <p>{publisherIdentityNotice(repairInspection)}</p>
+            <code class="extension-hash" title={repairInspection.archiveSha256}
+              >SHA-256 {repairInspection.archiveSha256}</code
+            >
+            <label class="sha-confirmation">
+              Exact lowercase SHA-256
+              <input
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                maxlength="64"
+                value={repairExpectedSha256}
+                aria-invalid={!shaConfirmationMatches(
+                  repairExpectedSha256,
+                  repairInspection.archiveSha256,
+                )}
+                oninput={(event) => {
+                  repairExpectedSha256 = event.currentTarget.value;
+                }}
+              />
+            </label>
+            <button
+              disabled={extensionsBusy ||
+                !inspectionMatchesPackage(
+                  repairInspection,
+                  repairTarget.package,
+                ) ||
+                !shaConfirmationMatches(
+                  repairExpectedSha256,
+                  repairInspection.archiveSha256,
+                )}
+              onclick={repairExtension}>Repair from exact archive</button
+            >
+          </div>
+        {/if}
+      </section>
+    {/if}
+
+    <section
+      class="extension-matrix"
+      aria-label="Deck and Codec compatibility matrix"
+    >
+      <header>
+        <div>
+          <span>Compatibility matrix</span>
+          <strong>{extensions.matrix.length} exact Deck × Codec pairs</strong>
+        </div>
+        <small
+          >Reasons are explicit; incompatible signals are never converted.</small
+        >
+      </header>
+      <div class="matrix-table">
+        {#if extensions.matrix.length === 0}
+          <p class="extension-placeholder">
+            Install at least one Deck and one Codec Pack to resolve
+            compatibility.
+          </p>
+        {:else}
+          <div class="matrix-row matrix-labels" aria-hidden="true">
+            <span>Deck</span><span>Codec</span><span>Result</span>
+          </div>
+          {#each extensions.matrix as pair (`${extensionPackageKey(pair.deck)}:${extensionPackageKey(pair.codec)}`)}
+            <article
+              class:compatible={pair.reason === "compatible"}
+              class="matrix-row"
+            >
+              <span
+                >{pair.deck.packageId}<small>{pair.deck.packageVersion}</small
+                ></span
+              >
+              <span
+                >{pair.codec.packageId}<small>{pair.codec.packageVersion}</small
+                ></span
+              >
+              <strong>
+                {compatibilityReasonLabel(pair.reason)}
+                {#if pair.compatibleProfile !== null}
+                  <small
+                    >{pair.compatibleProfile.codecFamily} /
+                    {pair.compatibleProfile.profile} /
+                    {pair.compatibleProfile.profileVersion}</small
+                  >
+                {/if}
+              </strong>
             </article>
           {/each}
         {/if}

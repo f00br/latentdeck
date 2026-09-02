@@ -10,8 +10,17 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-from latentdeck_operator_q4 import Q4ContractError
-from latentdeck_operator_q4 import process_slot as process_q4_slot
+from latentdeck_deck_sdk import DeckOperatorContext, RoleBinding
+from latentdeck_operator_q4 import (
+    OPERATOR_ID as Q4_OPERATOR_ID,
+)
+from latentdeck_operator_q4 import (
+    OPERATOR_VERSION as Q4_OPERATOR_VERSION,
+)
+from latentdeck_operator_q4 import (
+    Q4ContractError,
+)
+from latentdeck_operator_q4 import process_sources as process_q4_sources
 
 from .decoder_compare import ToolkitContractError
 from .research_ops import (
@@ -242,24 +251,46 @@ def quad_mixer_lab(
     slots: list[torch.Tensor] = []
     slot_provenance: list[dict[str, Any]] = []
     for index in range(carrier_surface.visual.shape[2]):
+        current_sources = (
+            carrier_surface.visual[:, :, index : index + 1].contiguous(),
+            donor_surfaces[0].visual[:, :, index : index + 1].contiguous(),
+            donor_surfaces[1].visual[:, :, index : index + 1].contiguous(),
+            donor_surfaces[2].visual[:, :, index : index + 1].contiguous(),
+        )
+        previous_sources = tuple(
+            None if index == 0 else surface[:, :, index - 1 : index].contiguous()
+            for surface in (
+                carrier_surface.visual,
+                donor_surfaces[0].visual,
+                donor_surfaces[1].visual,
+                donor_surfaces[2].visual,
+            )
+        )
         try:
-            result = process_q4_slot(
-                carrier_surface.visual[:, :, index : index + 1],
-                donor_surfaces[0].visual[:, :, index : index + 1],
-                donor_surfaces[1].visual[:, :, index : index + 1],
-                donor_surfaces[2].visual[:, :, index : index + 1],
+            result = process_q4_sources(
+                current_sources,
                 parsed,
-                {
-                    "carrier_identity": source_identities[0],
-                    "donor_b_identity": source_identities[1],
-                    "donor_c_identity": source_identities[2],
-                    "donor_d_identity": source_identities[3],
-                    "carrier_playhead": index,
-                    "donor_b_playhead": index,
-                    "donor_c_playhead": index,
-                    "donor_d_playhead": index,
-                    "seed": seed,
-                },
+                DeckOperatorContext(
+                    codec_family="minimax_h3",
+                    profile="h3_av_latent",
+                    profile_version="0.1.0",
+                    timing_contract="minimax_h3_causal",
+                    timing_contract_version="0.1.0",
+                    frame_rate_numerator=24,
+                    frame_rate_denominator=1,
+                    generation=1,
+                    sequence=index + 1,
+                    seed=seed,
+                    playheads=(index, index, index, index),
+                    physical_slots=(1, 2, 3, 4),
+                    roles=(
+                        RoleBinding("carrier", 1),
+                        RoleBinding("donor_b", 2),
+                        RoleBinding("donor_c", 3),
+                        RoleBinding("donor_d", 4),
+                    ),
+                    previous_sources=previous_sources,
+                ),
             )
         except Q4ContractError as error:
             raise ToolkitContractError(f"q4.{error.code}", error.detail) from error
@@ -270,7 +301,7 @@ def quad_mixer_lab(
     provenance: dict[str, Any] = {
         "schema_version": MIXER_LABS_VERSION,
         "operation": "QUAD_MIXER_LAB",
-        "operator": "org.latentdeck.builtin.ld_q4/0.1.0",
+        "operator": f"{Q4_OPERATOR_ID}/{Q4_OPERATOR_VERSION}",
         "controls": parsed,
         "seed": seed,
         "source_identities": list(source_identities),
@@ -294,8 +325,8 @@ def quad_mixer_lab(
             routed_output,
             {
                 "operation": {
-                    "operator_id": "org.latentdeck.builtin.ld_q4",
-                    "operator_version": MIXER_LABS_VERSION,
+                    "operator_id": Q4_OPERATOR_ID,
+                    "operator_version": Q4_OPERATOR_VERSION,
                     "seed": seed,
                     "controls": parsed,
                 }

@@ -1,11 +1,13 @@
 //! Bounded LC inspection and full validation.
 
+use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Take};
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use crate::access::IntegrityAccessReceipt;
 use crate::archive::{ArchiveEntry, ArchiveIndex, inspect_canonical, verify_entry};
 use crate::error::{CartridgeError, ErrorCode, Result};
 use crate::hash::{MeasuredHash, Sha256Hash, hash_reader};
@@ -15,7 +17,8 @@ use crate::preview::inspect_webp;
 use crate::profile::h3::{self, ValidatedH3Profile};
 use crate::safetensor::{
     EntryRange, H3SafetensorsPreflight, SafetensorDType, SafetensorTensorDescriptor,
-    preflight_h3_safetensors, scan_h3_safetensors_finite,
+    SafetensorsPreflight, preflight_h3_safetensors, preflight_safetensors,
+    scan_h3_safetensors_finite, scan_safetensors_finite,
 };
 use crate::writer::canonical_json_bytes;
 
@@ -24,7 +27,7 @@ const H3_PAYLOAD_ENTRY: &str = "payloads/h3.safetensors";
 const PREVIEW_ENTRY: &str = "preview.webp";
 
 /// How far validation progressed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationLevel {
     Structure,
@@ -53,8 +56,17 @@ pub struct CartridgeInspection {
     pub safetensors: H3SafetensorsPreflight,
 }
 
+/// Codec-neutral evidence produced without applying profile semantics.
+#[derive(Debug)]
+pub struct IntegrityInspection {
+    pub validation_level: ValidationLevel,
+    pub archive_size: u64,
+    pub manifest: ManifestV0_1,
+    pub safetensors: SafetensorsPreflight,
+}
+
 /// Evidence produced by full streaming validation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationReceipt {
     pub validation_level: ValidationLevel,
     pub archive_bytes: u64,
@@ -62,6 +74,136 @@ pub struct ValidationReceipt {
     pub payload_bytes: u64,
     pub payload_sha256: Sha256Hash,
     pub visual_runtime_bytes: u64,
+}
+
+/// Codec-neutral evidence for the exact retained cartridge bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrityValidationReceipt {
+    pub validation_level: ValidationLevel,
+    pub archive_bytes: u64,
+    pub archive_sha256: Sha256Hash,
+    pub payload_path: String,
+    pub payload_bytes: u64,
+    pub payload_sha256: Sha256Hash,
+    pub tensor_storage_bytes: u64,
+}
+
+/// An LC envelope whose retained read-only handle passed all generic checks.
+///
+/// Codec adapters receive this object only after ZIP, manifest, entry CRC,
+/// payload hash, Safetensors layout, finite-value, and immutable-handle checks
+/// have completed. Profile semantics deliberately remain outside this type.
+#[derive(Debug)]
+pub struct IntegrityValidatedCartridge {
+    file: File,
+    archive: ArchiveIndex,
+    manifest: ManifestV0_1,
+    safetensors: SafetensorsPreflight,
+    receipt: IntegrityValidationReceipt,
+    access_receipt: IntegrityAccessReceipt,
+}
+
+impl IntegrityValidatedCartridge {
+    /// Returns the codec-neutral manifest from the retained cartridge bytes.
+    #[must_use]
+    pub const fn manifest(&self) -> &ManifestV0_1 {
+        &self.manifest
+    }
+
+    /// Returns the exact integrity receipt for the retained handle.
+    #[must_use]
+    pub const fn receipt(&self) -> &IntegrityValidationReceipt {
+        &self.receipt
+    }
+
+    /// Returns the bounded structural Safetensors receipt.
+    #[must_use]
+    pub const fn safetensors(&self) -> &SafetensorsPreflight {
+        &self.safetensors
+    }
+
+    /// Returns the closed byte-range receipt transported with a duplicated
+    /// native handle.
+    #[must_use]
+    pub const fn access_receipt(&self) -> &IntegrityAccessReceipt {
+        &self.access_receipt
+    }
+
+    /// Borrow the exact retained Windows file handle for one synchronous
+    /// duplication into an authenticated worker process.
+    #[cfg(windows)]
+    pub fn with_retained_file_handle<T>(
+        &self,
+        operation: impl FnOnce(std::os::windows::io::BorrowedHandle<'_>) -> T,
+    ) -> T {
+        use std::os::windows::io::AsHandle;
+
+        operation(self.file.as_handle())
+    }
+
+    /// Opens bounded read-only access to the validated payload entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable error if the retained handle cannot seek to the exact
+    /// payload range recorded by the integrity receipt.
+    pub fn payload_reader(&mut self) -> Result<TensorReader<'_>> {
+        let payload = find_entry(&self.archive, &self.receipt.payload_path)?;
+        self.file
+            .seek(SeekFrom::Start(payload.data_offset))
+            .map_err(|error| {
+                CartridgeError::new(ErrorCode::IoRead, "cannot seek to validated payload")
+                    .at_entry(&payload.name)
+                    .with_source(error)
+            })?;
+        Ok(TensorReader {
+            inner: (&mut self.file).take(payload.size),
+        })
+    }
+
+    /// Opens a bounded tensor stream from the already validated handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable error if the name was not validated or the retained
+    /// handle cannot seek to the exact tensor range.
+    pub fn tensor_reader(&mut self, name: &str) -> Result<TensorReader<'_>> {
+        let descriptor = self.safetensors.tensors.get(name).ok_or_else(|| {
+            CartridgeError::new(
+                ErrorCode::TensorUnexpected,
+                "tensor is not part of the validated LC envelope",
+            )
+            .at_tensor(name)
+        })?;
+        let payload = find_entry(&self.archive, &self.receipt.payload_path)?;
+        let data_area = payload
+            .data_offset
+            .checked_add(self.safetensors.data_offset)
+            .ok_or_else(|| {
+                CartridgeError::new(
+                    ErrorCode::TensorSizeOverflow,
+                    "tensor data area offset overflows u64",
+                )
+                .at_tensor(name)
+            })?;
+        let offset = data_area
+            .checked_add(descriptor.data_offsets[0])
+            .ok_or_else(|| {
+                CartridgeError::new(
+                    ErrorCode::TensorSizeOverflow,
+                    "tensor data offset overflows u64",
+                )
+                .at_tensor(name)
+            })?;
+        self.file.seek(SeekFrom::Start(offset)).map_err(|error| {
+            CartridgeError::new(ErrorCode::IoRead, "cannot seek to validated tensor")
+                .at_tensor(name)
+                .with_source(error)
+        })?;
+        Ok(TensorReader {
+            inner: (&mut self.file).take(descriptor.byte_length),
+        })
+    }
 }
 
 /// A cartridge whose retained handle passed full validation.
@@ -171,6 +313,112 @@ pub fn inspect_path(
     inspect_file(&mut file, &options.limits).map(|state| state.inspection)
 }
 
+/// Performs bounded codec-neutral envelope and tensor-layout inspection.
+///
+/// No codec/profile semantics are applied. A trusted codec adapter must
+/// validate those separately before any runtime or GPU allocation.
+///
+/// # Errors
+///
+/// Returns a stable error when the path cannot be opened or any generic LC
+/// integrity contract is invalid.
+pub fn inspect_integrity_path(
+    path: impl AsRef<Path>,
+    options: &InspectOptions,
+) -> Result<IntegrityInspection> {
+    let mut file = open_readonly(path.as_ref())?;
+    inspect_integrity_file(&mut file, &options.limits).map(|state| state.inspection)
+}
+
+/// Fully validates a codec-neutral LC envelope and retains its exact handle.
+///
+/// # Errors
+///
+/// Returns a stable error for structural, checksum, hash, finite-value, limit,
+/// or I/O failures. Profile semantic failures are intentionally not produced
+/// by this boundary.
+pub fn open_integrity_validated(
+    path: impl AsRef<Path>,
+    options: &ValidationOptions,
+) -> Result<IntegrityValidatedCartridge> {
+    let mut file = open_readonly(path.as_ref())?;
+    let state = inspect_integrity_file(&mut file, &options.limits)?;
+
+    for entry in &state.archive.entries {
+        verify_entry(&mut file, entry)?;
+    }
+    let payload_path = state.inspection.manifest.payloads[0].path.clone();
+    let payload_entry = find_entry(&state.archive, &payload_path)?;
+    scan_safetensors_finite(
+        &mut file,
+        EntryRange::new(payload_entry.data_offset, payload_entry.size),
+        &payload_path,
+        &state.inspection.safetensors,
+    )?;
+    let measured_payload = hash_entry(&mut file, payload_entry)?;
+    let declared_payload = &state.inspection.manifest.payloads[0];
+    let expected_payload_hash = Sha256Hash::parse(&declared_payload.sha256.0)
+        .map_err(|error| error.at_json("/payloads/0/sha256"))?;
+    if measured_payload.byte_length != declared_payload.byte_length
+        || measured_payload.sha256 != expected_payload_hash
+    {
+        return Err(CartridgeError::new(
+            ErrorCode::PayloadHashMismatch,
+            "payload bytes do not match the manifest",
+        )
+        .at_entry(&payload_path));
+    }
+
+    validate_preview_hash(&mut file, &state.archive, &state.inspection.manifest)?;
+
+    file.seek(SeekFrom::Start(0)).map_err(|error| {
+        CartridgeError::new(ErrorCode::IoRead, "cannot rewind cartridge for hashing")
+            .with_source(error)
+    })?;
+    let archive_hash = hash_reader(&mut file)?;
+    let tensor_storage_bytes = state
+        .inspection
+        .safetensors
+        .tensors
+        .values()
+        .try_fold(0_u64, |total, tensor| total.checked_add(tensor.byte_length))
+        .ok_or_else(|| {
+            CartridgeError::new(
+                ErrorCode::TensorSizeOverflow,
+                "tensor storage byte count overflows u64",
+            )
+            .at_entry(&payload_path)
+        })?;
+    let receipt = IntegrityValidationReceipt {
+        validation_level: ValidationLevel::Full,
+        archive_bytes: archive_hash.byte_length,
+        archive_sha256: archive_hash.sha256,
+        payload_path,
+        payload_bytes: measured_payload.byte_length,
+        payload_sha256: measured_payload.sha256,
+        tensor_storage_bytes,
+    };
+    let manifest_entry = find_entry(&state.archive, MANIFEST_ENTRY)?;
+    let manifest_bytes = canonical_json_bytes(&state.inspection.manifest)?;
+    let manifest_hash = hash_reader(&mut std::io::Cursor::new(&manifest_bytes))?;
+    let access_receipt = IntegrityAccessReceipt::from_validated_parts(
+        receipt.clone(),
+        manifest_entry,
+        manifest_hash.sha256,
+        payload_entry,
+        &state.inspection.safetensors,
+    )?;
+
+    Ok(IntegrityValidatedCartridge {
+        file,
+        archive: state.archive,
+        manifest: state.inspection.manifest,
+        safetensors: state.inspection.safetensors,
+        receipt,
+        access_receipt,
+    })
+}
+
 /// Fully validates a cartridge and retains the validated file handle.
 ///
 /// # Errors
@@ -271,6 +519,62 @@ pub fn open_validated(
 struct InspectionState {
     archive: ArchiveIndex,
     inspection: CartridgeInspection,
+}
+
+struct IntegrityInspectionState {
+    archive: ArchiveIndex,
+    inspection: IntegrityInspection,
+}
+
+fn inspect_integrity_file(
+    file: &mut File,
+    limits: &ValidationLimits,
+) -> Result<IntegrityInspectionState> {
+    let archive = inspect_canonical(file, MAX_ARCHIVE_BYTES)?;
+    let manifest_entry = find_entry(&archive, MANIFEST_ENTRY)?;
+    let manifest_bytes = read_entry_bytes(file, manifest_entry)?;
+    let manifest = parse_manifest_json(&manifest_bytes, limits)?;
+    if canonical_json_bytes(&manifest)? != manifest_bytes {
+        return Err(CartridgeError::new(
+            ErrorCode::ManifestInvalid,
+            "manifest.json is not RFC 8785 canonical JSON",
+        )
+        .at_entry(MANIFEST_ENTRY));
+    }
+    validate_integrity_archive_descriptors(&archive, &manifest)?;
+    let payload_path = &manifest.payloads[0].path;
+    let payload_entry = find_entry(&archive, payload_path)?;
+    let safetensors = preflight_safetensors(
+        file,
+        EntryRange::new(payload_entry.data_offset, payload_entry.size),
+        payload_path,
+        limits,
+    )?;
+    crosscheck_integrity_tensor_descriptors(&manifest.tensors, payload_path, &safetensors)?;
+
+    if let Some(preview) = &manifest.preview {
+        let preview_entry = find_entry(&archive, PREVIEW_ENTRY)?;
+        let preview_bytes = read_entry_bytes(file, preview_entry)?;
+        let info = inspect_webp(&preview_bytes, limits)?;
+        if info.width != preview.width || info.height != preview.height {
+            return Err(CartridgeError::new(
+                ErrorCode::ManifestInvalid,
+                "preview dimensions do not match its manifest descriptor",
+            )
+            .at_entry(PREVIEW_ENTRY)
+            .at_json("/preview"));
+        }
+    }
+
+    Ok(IntegrityInspectionState {
+        inspection: IntegrityInspection {
+            validation_level: ValidationLevel::Structure,
+            archive_size: archive.archive_size,
+            manifest,
+            safetensors,
+        },
+        archive,
+    })
 }
 
 fn inspect_file(file: &mut File, limits: &ValidationLimits) -> Result<InspectionState> {
@@ -374,6 +678,136 @@ fn validate_archive_descriptors(archive: &ArchiveIndex, manifest: &ManifestV0_1)
             )
             .at_json("/preview"));
         }
+    }
+    Ok(())
+}
+
+fn validate_integrity_archive_descriptors(
+    archive: &ArchiveIndex,
+    manifest: &ManifestV0_1,
+) -> Result<()> {
+    if manifest.payloads.len() != 1 {
+        return Err(CartridgeError::new(
+            ErrorCode::ManifestInvalid,
+            "LC 0.1 requires exactly one payload descriptor",
+        )
+        .at_json("/payloads"));
+    }
+    let payload = &manifest.payloads[0];
+    let payload_entry = find_entry(archive, &payload.path)?;
+    if payload.media_type != "application/vnd.safetensors"
+        || payload_entry.size != payload.byte_length
+    {
+        return Err(CartridgeError::new(
+            ErrorCode::TensorDescriptorMismatch,
+            "payload descriptor does not match the archive entry",
+        )
+        .at_json("/payloads/0"));
+    }
+
+    match (
+        &manifest.preview,
+        archive
+            .entries
+            .iter()
+            .find(|entry| entry.name == PREVIEW_ENTRY),
+    ) {
+        (None, None) => {}
+        (Some(preview), Some(entry))
+            if preview.path == PREVIEW_ENTRY
+                && preview.media_type == "image/webp"
+                && preview.byte_length == entry.size => {}
+        (Some(_), None) => {
+            return Err(CartridgeError::new(
+                ErrorCode::EntryMissing,
+                "manifest declares a preview but the entry is missing",
+            )
+            .at_entry(PREVIEW_ENTRY));
+        }
+        (None, Some(_)) => {
+            return Err(CartridgeError::new(
+                ErrorCode::EntryUnexpected,
+                "preview entry has no manifest descriptor",
+            )
+            .at_entry(PREVIEW_ENTRY));
+        }
+        (Some(_), Some(_)) => {
+            return Err(CartridgeError::new(
+                ErrorCode::ManifestInvalid,
+                "preview descriptor does not match its archive entry",
+            )
+            .at_json("/preview"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn crosscheck_integrity_tensor_descriptors(
+    manifest: &[TensorDescriptor],
+    payload_path: &str,
+    payload: &SafetensorsPreflight,
+) -> Result<()> {
+    if manifest.len() != payload.tensors.len() {
+        return Err(CartridgeError::new(
+            ErrorCode::TensorDescriptorMismatch,
+            "manifest and Safetensors tensor counts differ",
+        )
+        .at_json("/tensors"));
+    }
+    let mut names = BTreeSet::new();
+    for descriptor in manifest {
+        if !names.insert(descriptor.name.0.as_str()) {
+            return Err(CartridgeError::new(
+                ErrorCode::TensorUnexpected,
+                "manifest tensor name is duplicated",
+            )
+            .at_tensor(&descriptor.name.0));
+        }
+        let header = payload.tensors.get(&descriptor.name.0).ok_or_else(|| {
+            CartridgeError::new(
+                ErrorCode::TensorDescriptorMismatch,
+                "manifest tensor is absent from the Safetensors header",
+            )
+            .at_tensor(&descriptor.name.0)
+        })?;
+        let dtype = match header.dtype {
+            SafetensorDType::F16 => DType::F16,
+            SafetensorDType::F32 => DType::F32,
+        };
+        if descriptor.payload != payload_path
+            || descriptor.storage_dtype != dtype
+            || descriptor.shape != header.shape
+        {
+            return Err(CartridgeError::new(
+                ErrorCode::TensorDescriptorMismatch,
+                "manifest tensor does not match the Safetensors header",
+            )
+            .at_tensor(&descriptor.name.0));
+        }
+    }
+    Ok(())
+}
+
+fn validate_preview_hash(
+    file: &mut File,
+    archive: &ArchiveIndex,
+    manifest: &ManifestV0_1,
+) -> Result<()> {
+    let Some(preview) = &manifest.preview else {
+        return Ok(());
+    };
+    let preview_entry = find_entry(archive, PREVIEW_ENTRY)?;
+    let measured_preview = hash_entry(file, preview_entry)?;
+    let expected_preview_hash =
+        Sha256Hash::parse(&preview.sha256.0).map_err(|error| error.at_json("/preview/sha256"))?;
+    if measured_preview.byte_length != preview.byte_length
+        || measured_preview.sha256 != expected_preview_hash
+    {
+        return Err(CartridgeError::new(
+            ErrorCode::PayloadHashMismatch,
+            "preview bytes do not match the manifest",
+        )
+        .at_entry(PREVIEW_ENTRY));
     }
     Ok(())
 }
