@@ -461,6 +461,8 @@ pub struct NativeOutput {
     offscreen_target: OffscreenTarget,
     surface_configuration: wgpu::SurfaceConfiguration,
     surface_extent: Option<(u32, u32)>,
+    has_uploaded_frame: bool,
+    redraw_pending: bool,
     gpu_health: GpuHealth,
     spout: SpoutSurface,
 }
@@ -606,6 +608,8 @@ impl NativeOutput {
             offscreen_target,
             surface_configuration,
             surface_extent: Some((physical_size.width, physical_size.height)),
+            has_uploaded_frame: false,
+            redraw_pending: false,
             gpu_health,
             spout,
         };
@@ -765,14 +769,24 @@ impl NativeOutput {
     /// for the requested non-zero extent.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<ResizeOutcome, NativeOutputError> {
         self.poll_gpu_health()?;
-        match resize_decision(self.surface_extent, width, height) {
+        let decision = resize_decision(self.surface_extent, width, height);
+        match decision {
             ResizeDecision::Suspend => {
                 self.surface_extent = None;
+                self.redraw_pending = self.has_uploaded_frame;
                 Ok(ResizeOutcome::Suspended)
             }
-            ResizeDecision::Unchanged => Ok(ResizeOutcome::Unchanged),
+            ResizeDecision::Unchanged => {
+                if should_redraw_after_resize(decision, self.redraw_pending) {
+                    self.redraw_cached_frame()?;
+                }
+                Ok(ResizeOutcome::Unchanged)
+            }
             ResizeDecision::Configure => {
                 self.configure_surface(width, height)?;
+                if should_redraw_after_resize(decision, self.redraw_pending) {
+                    self.redraw_cached_frame()?;
+                }
                 Ok(ResizeOutcome::Configured)
             }
         }
@@ -815,6 +829,8 @@ impl NativeOutput {
         self.renderer
             .upload(self.dx12.queue(), upload)
             .map_err(|_| NativeOutputError::FrameRejected)?;
+        self.has_uploaded_frame = true;
+        self.redraw_pending = true;
         self.poll_gpu_health()?;
 
         if self.surface_extent.is_none() {
@@ -825,15 +841,18 @@ impl NativeOutput {
         match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) => {
                 self.render_and_present(texture)?;
+                self.redraw_pending = false;
                 self.spout.submit(self.renderer.frame_texture());
                 Ok(PresentOutcome::Presented)
             }
             wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
                 self.render_and_present(texture)?;
+                self.redraw_pending = false;
                 self.spout.submit(self.renderer.frame_texture());
                 let (surface_width, surface_height) =
                     self.surface_extent.ok_or(NativeOutputError::WindowSize)?;
                 self.configure_surface(surface_width, surface_height)?;
+                self.redraw_cached_frame()?;
                 Ok(PresentOutcome::PresentedAndReconfigured)
             }
             wgpu::CurrentSurfaceTexture::Timeout => {
@@ -908,34 +927,77 @@ impl NativeOutput {
         self.poll_gpu_health()
     }
 
+    fn redraw_cached_frame(&mut self) -> Result<(), NativeOutputError> {
+        debug_assert!(self.has_uploaded_frame);
+        for attempt in 0..=1 {
+            match self.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(texture) => {
+                    // A resize redraw reuses the last uploaded GPU texture. It
+                    // must not submit a duplicate Spout frame or advance any
+                    // application timing, sequence, or playhead state.
+                    self.render_and_present(texture)?;
+                    self.redraw_pending = false;
+                    return Ok(());
+                }
+                wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
+                    self.render_and_present(texture)?;
+                    self.redraw_pending = false;
+                    let (width, height) =
+                        self.surface_extent.ok_or(NativeOutputError::WindowSize)?;
+                    self.configure_surface(width, height)?;
+                    if attempt == 0 {
+                        continue;
+                    }
+                    return Ok(());
+                }
+                wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                    // A transiently unavailable local surface does not turn an
+                    // otherwise successful resize into a runtime fault. Keep
+                    // the redraw pending for the next viewport sync or frame.
+                    return self.poll_gpu_health();
+                }
+                wgpu::CurrentSurfaceTexture::Outdated => {
+                    let (width, height) =
+                        self.surface_extent.ok_or(NativeOutputError::WindowSize)?;
+                    self.configure_surface(width, height)?;
+                    if attempt == 0 {
+                        continue;
+                    }
+                    return Ok(());
+                }
+                wgpu::CurrentSurfaceTexture::Lost => {
+                    self.poll_gpu_health()?;
+                    self.recreate_surface()?;
+                    if attempt == 0 {
+                        continue;
+                    }
+                    return Ok(());
+                }
+                wgpu::CurrentSurfaceTexture::Validation => {
+                    self.poll_gpu_health()?;
+                    return Err(NativeOutputError::SurfaceValidation);
+                }
+            }
+        }
+        unreachable!("bounded redraw loop always returns")
+    }
+
     fn configure_surface(&mut self, width: u32, height: u32) -> Result<(), NativeOutputError> {
         let next = self
             .dx12
             .surface_configuration(&self.surface, width, height)
             .map_err(|_| NativeOutputError::RendererInitialization)?;
         debug_assert_eq!(next.present_mode, wgpu::PresentMode::Fifo);
-        let replacement_renderer = if next.format == self.surface_configuration.format {
-            None
-        } else {
-            let frame = self.renderer.frame_layout();
-            let renderer = RgbaFrameRenderer::new(
-                self.dx12.device(),
-                next.format,
-                frame.width(),
-                frame.height(),
-            )
-            .map_err(|_| NativeOutputError::RendererInitialization)?;
-            let offscreen_target = OffscreenTarget::new(self.dx12.device(), next.format);
-            Some((renderer, offscreen_target))
-        };
+        let format_changed = next.format != self.surface_configuration.format;
 
         self.surface.configure(self.dx12.device(), &next);
-        if let Some((renderer, offscreen_target)) = replacement_renderer {
-            self.renderer = renderer;
-            self.offscreen_target = offscreen_target;
+        if format_changed {
+            self.renderer.retarget(self.dx12.device(), next.format);
+            self.offscreen_target = OffscreenTarget::new(self.dx12.device(), next.format);
         }
         self.surface_configuration = next;
         self.surface_extent = Some((width, height));
+        self.redraw_pending = self.has_uploaded_frame;
         self.poll_gpu_health()
     }
 
@@ -949,27 +1011,15 @@ impl NativeOutput {
             .dx12
             .surface_configuration(&replacement, width, height)
             .map_err(|_| NativeOutputError::RendererInitialization)?;
-        let replacement_renderer = if next.format == self.surface_configuration.format {
-            None
-        } else {
-            let frame = self.renderer.frame_layout();
-            let renderer = RgbaFrameRenderer::new(
-                self.dx12.device(),
-                next.format,
-                frame.width(),
-                frame.height(),
-            )
-            .map_err(|_| NativeOutputError::RendererInitialization)?;
-            let offscreen_target = OffscreenTarget::new(self.dx12.device(), next.format);
-            Some((renderer, offscreen_target))
-        };
+        let format_changed = next.format != self.surface_configuration.format;
         replacement.configure(self.dx12.device(), &next);
         self.surface = replacement;
-        self.surface_configuration = next;
-        if let Some((renderer, offscreen_target)) = replacement_renderer {
-            self.renderer = renderer;
-            self.offscreen_target = offscreen_target;
+        if format_changed {
+            self.renderer.retarget(self.dx12.device(), next.format);
+            self.offscreen_target = OffscreenTarget::new(self.dx12.device(), next.format);
         }
+        self.surface_configuration = next;
+        self.redraw_pending = self.has_uploaded_frame;
         self.poll_gpu_health()
     }
 
@@ -1642,6 +1692,13 @@ const fn resize_decision(current: Option<(u32, u32)>, width: u32, height: u32) -
     }
 }
 
+const fn should_redraw_after_resize(decision: ResizeDecision, redraw_pending: bool) -> bool {
+    matches!(
+        decision,
+        ResizeDecision::Configure | ResizeDecision::Unchanged
+    ) && redraw_pending
+}
+
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum GpuFault {
@@ -1772,6 +1829,17 @@ mod tests {
             resize_decision(Some((800, 448)), 1_600, 900),
             ResizeDecision::Configure
         );
+    }
+
+    #[test]
+    fn resize_services_pending_redraw_only_on_a_non_suspended_surface() {
+        assert!(should_redraw_after_resize(ResizeDecision::Configure, true));
+        assert!(!should_redraw_after_resize(
+            ResizeDecision::Configure,
+            false
+        ));
+        assert!(should_redraw_after_resize(ResizeDecision::Unchanged, true));
+        assert!(!should_redraw_after_resize(ResizeDecision::Suspend, true));
     }
 
     #[test]

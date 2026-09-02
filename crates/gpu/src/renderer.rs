@@ -376,6 +376,17 @@ impl RgbaFrameRenderer {
         Ok(())
     }
 
+    /// Rebuild the presentation pipeline for a changed surface format while
+    /// retaining the fixed frame texture and its most recently uploaded bytes.
+    ///
+    /// Surface recreation can select a different presentation format. Keeping
+    /// the frame resources intact lets a paused output redraw immediately
+    /// without a second decoder read or a CPU-side frame copy.
+    pub fn retarget(&mut self, device: &wgpu::Device, target_format: wgpu::TextureFormat) {
+        let bind_group_layout = self.pipeline.get_bind_group_layout(0);
+        self.pipeline = create_presentation_pipeline(device, target_format, &bind_group_layout);
+    }
+
     /// Records a black clear and one fullscreen triangle into `target`.
     ///
     /// This exact-target primitive remains useful for same-size/offscreen
@@ -639,6 +650,19 @@ mod tests {
                 y: 0,
                 width: 1_600,
                 height: 896,
+            }
+        );
+    }
+
+    #[test]
+    fn h3_frame_is_aspect_fit_on_a_sixteen_nine_monitor() {
+        assert_eq!(
+            aspect_fit_viewport(1_344, 768, 2_560, 1_440).expect("viewport"),
+            AspectFitViewport {
+                x: 20,
+                y: 0,
+                width: 2_520,
+                height: 1_440,
             }
         );
     }
