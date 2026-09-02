@@ -168,7 +168,16 @@ describe("mounted LatentPlayer Extensions Manager", () => {
     const codec = summary(CODEC, { enabled: true });
     const snapshot: ExtensionsSnapshot = { packages: [codec], matrix: [] };
     const pendingSnapshot = deferred<ExtensionsSnapshot>();
+    const pendingRawImportOptions = deferred<{
+      packageId: string;
+      packageVersion: string;
+      adapterId: string;
+      adapterVersion: string;
+      displayName: string;
+      profiles: never[];
+    }>();
     let snapshotCount = 0;
+    let rawImportOptionsCount = 0;
     native.invoke.mockImplementation(async (command: string) => {
       switch (command) {
         case "player_viewport_session_begin":
@@ -182,6 +191,10 @@ describe("mounted LatentPlayer Extensions Manager", () => {
         case "player_conversion_snapshot":
           return null;
         case "player_raw_import_options":
+          rawImportOptionsCount += 1;
+          if (rawImportOptionsCount > 1) {
+            return pendingRawImportOptions.promise;
+          }
           return {
             packageId: CODEC.packageId,
             packageVersion: CODEC.packageVersion,
@@ -235,6 +248,18 @@ describe("mounted LatentPlayer Extensions Manager", () => {
       packageVersion: CODEC.packageVersion,
       device: "cuda",
     });
+    expect(rawImportOptionsCount).toBe(2);
+    expect(button(target, "Open cartridge").disabled).toBe(false);
+
+    pendingRawImportOptions.resolve({
+      packageId: CODEC.packageId,
+      packageVersion: CODEC.packageVersion,
+      adapterId: "org.example.adapter",
+      adapterVersion: "2.0.0",
+      displayName: "Example Codec",
+      profiles: [],
+    });
+    await settle();
 
     await unmount(component);
     target.remove();

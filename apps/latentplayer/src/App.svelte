@@ -641,8 +641,8 @@
       const snapshot = await invoke<PlayerView>("player_snapshot");
       player = acceptTrustedSnapshot(player, snapshot);
       extensionsStatus = `Player selected ${summary.package.packageId} ${summary.package.packageVersion} on ${device}.`;
-      await refreshRawImportOptions();
       await setWorkspaceMode("play");
+      void refreshRawImportOptions();
     } catch (error) {
       extensionsError = playerError(error, "extensions.player_select_failed");
     } finally {
