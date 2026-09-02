@@ -1000,6 +1000,17 @@ fn archive_preflight_rejects_traversal_case_aliases_and_symlinks() {
         ErrorCode::ArchiveInvalid
     );
 
+    let exact_duplicate = raw_archive(
+        temp.path(),
+        "exact-duplicate.ld",
+        &[("same-one.txt", b"first"), ("same-two.txt", b"second")],
+    );
+    replace_zip_name(&exact_duplicate.0, b"same-two.txt", b"same-one.txt");
+    let exact_duplicate_bytes = fs::read(&exact_duplicate.0).expect("read duplicate fixture");
+    let exact_duplicate_error =
+        inspect(&exact_duplicate.0, Some(&sha256(&exact_duplicate_bytes))).unwrap_err();
+    assert_eq!(exact_duplicate_error.code(), ErrorCode::ArchiveInvalid);
+
     let symlink_path = temp.path().join("symlink.ld");
     let file = File::create(&symlink_path).unwrap();
     let mut writer = zip::ZipWriter::new(file);
@@ -1014,6 +1025,19 @@ fn archive_preflight_rejects_traversal_case_aliases_and_symlinks() {
             .code(),
         ErrorCode::ArchiveInvalid
     );
+}
+
+#[test]
+fn archive_preflight_rejects_an_encrypted_entry_before_reading_payload() {
+    let temp = TempDir::new().expect("temp");
+    let archive = raw_archive(temp.path(), "encrypted.ld", &[("payload.txt", b"fixture")]);
+    mark_zip_entries_encrypted(&archive.0);
+    let bytes = fs::read(&archive.0).expect("read encrypted fixture");
+
+    let error = inspect(&archive.0, Some(&sha256(&bytes))).unwrap_err();
+
+    assert_eq!(error.code(), ErrorCode::ArchiveInvalid);
+    assert_eq!(error.detail(), "encrypted ZIP entries are forbidden");
 }
 
 #[test]
@@ -1532,4 +1556,43 @@ fn raw_archive(root: &Path, name: &str, entries: &[(&str, &[u8])]) -> (PathBuf, 
     writer.finish().unwrap();
     let bytes = fs::read(&path).unwrap();
     (path, sha256(&bytes))
+}
+
+fn mark_zip_entries_encrypted(path: &Path) {
+    let mut bytes = fs::read(path).expect("read ZIP fixture");
+    let mut local_headers = 0;
+    let mut central_headers = 0;
+    for offset in 0..bytes.len().saturating_sub(3) {
+        if bytes[offset..].starts_with(b"PK\x03\x04") {
+            bytes[offset + 6] |= 1;
+            local_headers += 1;
+        } else if bytes[offset..].starts_with(b"PK\x01\x02") {
+            bytes[offset + 8] |= 1;
+            central_headers += 1;
+        }
+    }
+    assert_eq!(local_headers, 1, "fixture must have one local header");
+    assert_eq!(central_headers, 1, "fixture must have one central header");
+    fs::write(path, bytes).expect("write encrypted ZIP fixture");
+}
+
+fn replace_zip_name(path: &Path, old: &[u8], new: &[u8]) {
+    assert_eq!(
+        old.len(),
+        new.len(),
+        "ZIP names must keep their encoded size"
+    );
+    let mut bytes = fs::read(path).expect("read ZIP fixture");
+    let mut replacements = 0;
+    for offset in 0..=bytes.len().saturating_sub(old.len()) {
+        if bytes[offset..].starts_with(old) {
+            bytes[offset..offset + old.len()].copy_from_slice(new);
+            replacements += 1;
+        }
+    }
+    assert_eq!(
+        replacements, 2,
+        "fixture name must occur in local and central headers"
+    );
+    fs::write(path, bytes).expect("write duplicate-name ZIP fixture");
 }

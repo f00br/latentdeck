@@ -1268,6 +1268,10 @@ mod tests {
     const GOOD_P2_HELPER: &str = "worker_supervisor::platform::tests::worker_v2_child_helper";
     const BAD_P2_TOKEN_HELPER: &str =
         "worker_supervisor::platform::tests::worker_v2_bad_token_helper";
+    const P2_COMMAND_TIMEOUT_HELPER: &str =
+        "worker_supervisor::platform::tests::worker_v2_command_timeout_helper";
+    const P2_HEARTBEAT_TIMEOUT_HELPER: &str =
+        "worker_supervisor::platform::tests::worker_v2_heartbeat_timeout_helper";
 
     #[derive(Clone, Copy)]
     struct ChildAuthToken([u8; 32]);
@@ -1428,6 +1432,87 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn protocol2_command_deadline_expires_while_an_authenticated_worker_is_silent() {
+        use crate::worker_client_v2::{WorkerClientV2, WorkerClientV2Error};
+
+        let pending = spawn_worker_v2(helper_launch(P2_COMMAND_TIMEOUT_HELPER))
+            .await
+            .expect("spawn Protocol 2 timeout worker");
+        let session = pending
+            .connect()
+            .await
+            .expect("authenticate Protocol 2 timeout worker");
+        let mut client = WorkerClientV2::new(session);
+
+        let error = client
+            .call(
+                protocol2::Command::MetricsGet(protocol2::EmptyPayload {}),
+                Duration::from_millis(250),
+            )
+            .await
+            .expect_err("silent worker must exceed the command deadline");
+        assert!(matches!(
+            error,
+            WorkerClientV2Error::CommandTimeout(protocol2::CommandName::MetricsGet)
+        ));
+
+        let exit = client.force_kill().await.expect("terminate timeout worker");
+        assert!(!exit.success);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn protocol2_heartbeat_deadline_expires_before_a_longer_command_deadline() {
+        use crate::worker_client_v2::{WorkerClientV2, WorkerClientV2Error};
+
+        let pending = spawn_worker_v2(helper_launch(P2_HEARTBEAT_TIMEOUT_HELPER))
+            .await
+            .expect("spawn Protocol 2 heartbeat-timeout worker");
+        let session = pending
+            .connect()
+            .await
+            .expect("authenticate Protocol 2 heartbeat-timeout worker");
+        let mut client = WorkerClientV2::new(session);
+        let requested_capabilities =
+            protocol2::LimitedVec::try_from_vec(vec![protocol2::Capability::Player])
+                .expect("bounded capabilities");
+        let configured = client
+            .call(
+                protocol2::Command::SessionConfigure(protocol2::SessionConfigure {
+                    selected_protocol_version: protocol2::PROTOCOL_VERSION,
+                    app_version: "0.2.0".to_owned(),
+                    heartbeat_interval_ms: 250,
+                    heartbeat_hard_timeout_ms: 750,
+                    max_frame_bytes: u32::try_from(protocol2::MAX_FRAME_BYTES)
+                        .expect("frame bound fits u32"),
+                    max_inflight_batches: 1,
+                    requested_capabilities,
+                }),
+                Duration::from_secs(2),
+            )
+            .await
+            .expect("configure heartbeat timeout");
+        assert!(matches!(configured, protocol2::Ack::SessionConfigure(_)));
+
+        let error = client
+            .call(
+                protocol2::Command::MetricsGet(protocol2::EmptyPayload {}),
+                Duration::from_secs(5),
+            )
+            .await
+            .expect_err("silent configured worker must exceed the heartbeat deadline");
+        assert!(matches!(
+            error,
+            WorkerClientV2Error::HeartbeatTimeout(protocol2::CommandName::MetricsGet)
+        ));
+
+        let exit = client
+            .force_kill()
+            .await
+            .expect("terminate heartbeat-timeout worker");
+        assert!(!exit.success);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_exit_wait_leaves_orderly_shutdown_usable() {
         let pending = spawn_worker(helper_launch(GOOD_HELPER))
             .await
@@ -1565,6 +1650,18 @@ mod tests {
     #[ignore = "spawned by the Protocol 2 worker supervisor contract test"]
     fn worker_v2_child_helper() {
         run_worker_child_v2(false);
+    }
+
+    #[test]
+    #[ignore = "spawned by the Protocol 2 command-timeout contract test"]
+    fn worker_v2_command_timeout_helper() {
+        run_worker_command_timeout_v2();
+    }
+
+    #[test]
+    #[ignore = "spawned by the Protocol 2 heartbeat-timeout contract test"]
+    fn worker_v2_heartbeat_timeout_helper() {
+        run_worker_heartbeat_timeout_v2();
     }
 
     #[test]
@@ -1733,6 +1830,98 @@ mod tests {
             write_envelope_v2(&mut client, &ack)
                 .await
                 .expect("write Protocol 2 shutdown ack");
+        });
+    }
+
+    fn run_worker_command_timeout_v2() {
+        run_worker_timeout_v2(false);
+    }
+
+    fn run_worker_heartbeat_timeout_v2() {
+        run_worker_timeout_v2(true);
+    }
+
+    fn run_worker_timeout_v2(configure_heartbeat: bool) {
+        let bootstrap = read_child_bootstrap_v2();
+        assert_eq!(bootstrap.bootstrap_version, protocol2::PROTOCOL_VERSION);
+        assert_eq!(bootstrap.protocol_version, protocol2::PROTOCOL_VERSION);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("child runtime");
+        runtime.block_on(async move {
+            let mut client = ClientOptions::new()
+                .open(&bootstrap.pipe_name)
+                .expect("connect to Protocol 2 supervisor pipe");
+            let hello = protocol2::Envelope::new(
+                bootstrap.session_id.as_uuid(),
+                1,
+                WireUuid::new_v4().as_uuid(),
+                1,
+                protocol2::Message::Event(protocol2::EventMessage {
+                    caused_by: None,
+                    event: protocol2::Event::WorkerHello(protocol2::WorkerHello {
+                        auth_token: bootstrap.auth_token,
+                        worker_pid: std::process::id(),
+                        worker_identity: "org.latentdeck.test.timeout-worker".to_owned(),
+                        runtime_identity: "test-runtime-cpython-3.13".to_owned(),
+                        protocol_min: protocol2::PROTOCOL_VERSION,
+                        protocol_max: protocol2::PROTOCOL_VERSION,
+                    }),
+                }),
+            );
+            write_envelope_v2(&mut client, &hello)
+                .await
+                .expect("write Protocol 2 hello");
+
+            if configure_heartbeat {
+                let configure = read_envelope_v2(&mut client)
+                    .await
+                    .expect("Protocol 2 configure command");
+                let protocol2::Message::Command(protocol2::Command::SessionConfigure(
+                    configure_body,
+                )) = configure.message
+                else {
+                    panic!("test Protocol 2 worker expected session.configure");
+                };
+                let configured = protocol2::Envelope::new(
+                    bootstrap.session_id.as_uuid(),
+                    2,
+                    WireUuid::new_v4().as_uuid(),
+                    2,
+                    protocol2::Message::Ack(protocol2::AckReply {
+                        reply_to: configure.message_id,
+                        ack: protocol2::Ack::SessionConfigure(protocol2::SessionConfigured {
+                            selected_protocol_version: protocol2::PROTOCOL_VERSION,
+                            maximum_frame_bytes: u32::try_from(protocol2::MAX_FRAME_BYTES)
+                                .expect("frame bound fits u32"),
+                            accepted_capabilities: configure_body.requested_capabilities,
+                        }),
+                        status: protocol2::StatusSnapshot {
+                            session: protocol2::SessionState::Ready,
+                            codec: protocol2::CodecState::Unloaded,
+                            player: protocol2::PlayerState::Empty,
+                            deck: protocol2::DeckState::Empty,
+                            capture: protocol2::CaptureState::Idle,
+                            open_session_count: 1,
+                            foreground_output_session: None,
+                            output_lease_pinned: false,
+                        },
+                    }),
+                );
+                write_envelope_v2(&mut client, &configured)
+                    .await
+                    .expect("write Protocol 2 configure ack");
+            }
+
+            let command = read_envelope_v2(&mut client)
+                .await
+                .expect("Protocol 2 metrics command");
+            assert!(matches!(
+                command.message,
+                protocol2::Message::Command(protocol2::Command::MetricsGet(_))
+            ));
+            tokio::time::sleep(Duration::from_secs(30)).await;
         });
     }
 

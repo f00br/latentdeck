@@ -213,9 +213,7 @@ pub(crate) fn prepare_archive(
     }
     file.seek(SeekFrom::Start(0))
         .map_err(|error| ExtensionError::io(ErrorCode::Io, "rewind archive", &error))?;
-    let mut archive = ZipArchive::new(file).map_err(|error| {
-        ExtensionError::new(ErrorCode::ArchiveInvalid, format!("open ZIP: {error}"))
-    })?;
+    let mut archive = open_archive_with_unique_central_directory(file)?;
     let plan = plan_archive(&mut archive)?;
     let kind = detect_kind(&plan)?;
     if expected_kind.is_some_and(|expected| expected != kind) {
@@ -281,6 +279,21 @@ pub(crate) fn prepare_archive(
         inspection,
         manifest: validated.manifest,
         files,
+    })
+}
+
+fn open_archive_with_unique_central_directory(file: File) -> Result<ZipArchive<File>> {
+    let archive = ZipArchive::new(file).map_err(|error| {
+        ExtensionError::new(ErrorCode::ArchiveInvalid, format!("open ZIP: {error}"))
+    })?;
+    let unique_entry_count = archive.len();
+    let central_directory_start = archive.central_directory_start();
+    let mut file = archive.into_inner();
+    validate_raw_central_directory(&mut file, central_directory_start, unique_entry_count)?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| ExtensionError::io(ErrorCode::Io, "rewind archive", &error))?;
+    ZipArchive::new(file).map_err(|error| {
+        ExtensionError::new(ErrorCode::ArchiveInvalid, format!("reopen ZIP: {error}"))
     })
 }
 
@@ -439,6 +452,112 @@ pub(crate) fn extract_prepared(prepared: &mut PreparedPackage, destination: &Pat
     Ok(())
 }
 
+fn validate_raw_central_directory(
+    file: &mut File,
+    central_directory_start: u64,
+    unique_entry_count: usize,
+) -> Result<()> {
+    const CENTRAL_ENTRY_SIGNATURE: [u8; 4] = *b"PK\x01\x02";
+    const END_SIGNATURES: [[u8; 4]; 4] = [
+        *b"PK\x05\x05",
+        *b"PK\x06\x06",
+        *b"PK\x06\x07",
+        *b"PK\x05\x06",
+    ];
+    file.seek(SeekFrom::Start(central_directory_start))
+        .map_err(|error| {
+            ExtensionError::io(
+                ErrorCode::ArchiveInvalid,
+                "seek ZIP central directory",
+                &error,
+            )
+        })?;
+    let mut paths = HashSet::new();
+    let mut entry_count = 0_usize;
+    loop {
+        let mut signature = [0_u8; 4];
+        file.read_exact(&mut signature).map_err(|error| {
+            ExtensionError::io(
+                ErrorCode::ArchiveInvalid,
+                "read ZIP central-directory signature",
+                &error,
+            )
+        })?;
+        if END_SIGNATURES.contains(&signature) {
+            break;
+        }
+        if signature != CENTRAL_ENTRY_SIGNATURE {
+            return Err(ExtensionError::new(
+                ErrorCode::ArchiveInvalid,
+                "ZIP central directory contains an unexpected record",
+            ));
+        }
+        entry_count = entry_count.checked_add(1).ok_or_else(|| {
+            ExtensionError::new(ErrorCode::ArchiveInvalid, "ZIP entry count overflowed")
+        })?;
+        if entry_count > MAX_ARCHIVE_ENTRIES {
+            return Err(ExtensionError::new(
+                ErrorCode::ArchiveInvalid,
+                format!("ZIP entry count exceeds {MAX_ARCHIVE_ENTRIES}"),
+            ));
+        }
+        let mut fixed = [0_u8; 42];
+        file.read_exact(&mut fixed).map_err(|error| {
+            ExtensionError::io(
+                ErrorCode::ArchiveInvalid,
+                "read ZIP central-directory entry",
+                &error,
+            )
+        })?;
+        let name_length = usize::from(u16::from_le_bytes([fixed[24], fixed[25]]));
+        let extra_length = u64::from(u16::from_le_bytes([fixed[26], fixed[27]]));
+        let comment_length = u64::from(u16::from_le_bytes([fixed[28], fixed[29]]));
+        if name_length == 0 || name_length > 241 {
+            return Err(ExtensionError::new(
+                ErrorCode::ArchiveInvalid,
+                "ZIP path is outside the portable path bound",
+            ));
+        }
+        let mut name = vec![0_u8; name_length];
+        file.read_exact(&mut name).map_err(|error| {
+            ExtensionError::io(ErrorCode::ArchiveInvalid, "read ZIP central path", &error)
+        })?;
+        if !paths.insert(name) {
+            return Err(ExtensionError::new(
+                ErrorCode::ArchiveInvalid,
+                "ZIP contains a duplicate path",
+            ));
+        }
+        let trailing_length = extra_length.checked_add(comment_length).ok_or_else(|| {
+            ExtensionError::new(
+                ErrorCode::ArchiveInvalid,
+                "ZIP central-directory length overflowed",
+            )
+        })?;
+        let trailing_length = i64::try_from(trailing_length).map_err(|_| {
+            ExtensionError::new(
+                ErrorCode::ArchiveInvalid,
+                "ZIP central-directory length is unsupported",
+            )
+        })?;
+        file.seek(SeekFrom::Current(trailing_length))
+            .map_err(|error| {
+                ExtensionError::io(
+                    ErrorCode::ArchiveInvalid,
+                    "skip ZIP central-directory metadata",
+                    &error,
+                )
+            })?;
+    }
+    if entry_count != unique_entry_count {
+        return Err(ExtensionError::new(
+            ErrorCode::ArchiveInvalid,
+            "ZIP central-directory identity count is inconsistent",
+        ));
+    }
+    Ok(())
+}
+
 fn plan_archive(archive: &mut ZipArchive<File>) -> Result<Vec<ArchiveEntryPlan>> {
     if archive.is_empty() || archive.len() > MAX_ARCHIVE_ENTRIES {
         return Err(ExtensionError::new(
@@ -450,7 +569,7 @@ fn plan_archive(archive: &mut ZipArchive<File>) -> Result<Vec<ArchiveEntryPlan>>
     let mut normalized_paths = HashSet::with_capacity(archive.len());
     let mut general_extracted = 0_u64;
     for index in 0..archive.len() {
-        let entry = archive.by_index(index).map_err(|error| {
+        let entry = archive.by_index_raw(index).map_err(|error| {
             ExtensionError::new(
                 ErrorCode::ArchiveInvalid,
                 format!("read ZIP header: {error}"),
@@ -1190,6 +1309,94 @@ impl Drop for TemporaryFileGuard {
     fn drop(&mut self) {
         if let Some(path) = &self.0 {
             let _ = fs::remove_file(path);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extraction_stays_bound_to_the_preflighted_handle_during_path_swap_attempt() {
+        let temp = tempfile::tempdir().expect("temp");
+        let source = temp.path().join("source");
+        copy_catalogued_deck_fixture(&source);
+        let archive_path = temp.path().join("preflight.ld");
+        let receipt = pack(&PackRequest {
+            source_directory: source,
+            output_path: archive_path.clone(),
+        })
+        .expect("pack fixture");
+        let replacement_path = temp.path().join("replacement.ld");
+        let replacement_bytes = b"replacement archive bytes";
+        fs::write(&replacement_path, replacement_bytes).expect("write replacement");
+
+        let mut prepared = prepare_archive(
+            &archive_path,
+            Some(&receipt.inspection.archive_sha256),
+            Some(PackageKind::DeckPack),
+        )
+        .expect("preflight fixture");
+        let preflight_files = prepared.files.clone();
+        let moved_path = temp.path().join("preflight-moved.ld");
+        let path_was_swapped = fs::rename(&archive_path, &moved_path).is_ok();
+        if path_was_swapped {
+            fs::rename(&replacement_path, &archive_path).expect("swap archive path");
+        } else {
+            let mutation = OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&archive_path);
+            assert!(
+                mutation.is_err(),
+                "an exclusive retained handle must reject in-place mutation"
+            );
+        }
+
+        let destination = temp.path().join("extracted");
+        fs::create_dir(&destination).expect("create destination");
+        extract_prepared(&mut prepared, &destination).expect("extract retained archive handle");
+
+        assert_eq!(prepared.files, preflight_files);
+        assert_eq!(
+            prepared.inspection.archive_sha256,
+            receipt.inspection.archive_sha256
+        );
+        if path_was_swapped {
+            assert_eq!(
+                fs::read(&archive_path).expect("read replacement path"),
+                replacement_bytes
+            );
+        }
+    }
+
+    fn copy_catalogued_deck_fixture(destination: &Path) {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../operators/builtin/d2/package");
+        let integrity_bytes =
+            fs::read(source.join("integrity.json")).expect("read fixture integrity catalog");
+        let integrity: serde_json::Value =
+            serde_json::from_slice(&integrity_bytes).expect("parse fixture integrity catalog");
+        let mut paths = vec!["deck-pack.json".to_owned(), "integrity.json".to_owned()];
+        paths.extend(
+            integrity["files"]
+                .as_array()
+                .expect("integrity files")
+                .iter()
+                .map(|entry| {
+                    entry["path"]
+                        .as_str()
+                        .expect("integrity file path")
+                        .to_owned()
+                }),
+        );
+        for relative in paths {
+            let relative_path = path_from_archive(&relative);
+            let output = destination.join(&relative_path);
+            fs::create_dir_all(output.parent().expect("fixture parent"))
+                .expect("create fixture parent");
+            fs::copy(source.join(relative_path), output).expect("copy fixture file");
         }
     }
 }
