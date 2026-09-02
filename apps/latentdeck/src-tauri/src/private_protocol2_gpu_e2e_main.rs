@@ -1041,6 +1041,13 @@ async fn player_step_frames(player: &mut OpenPlayer) -> GateResult<Vec<DecodedFr
         .decoded_frames
         .checked_add(u64::try_from(frames.len()).map_err(|_| "Player frame count overflow")?)
         .ok_or("Player frame count overflow")?;
+    // The final non-empty batch carries the EOS marker. Reset immediately
+    // after consuming that batch so the stability loop never issues an
+    // out-of-range player.step; Protocol 2 requires an explicit generation
+    // transition instead of an implicit decoder wrap.
+    if step.status.end_of_stream {
+        player_reset(player).await?;
+    }
     Ok(frames)
 }
 

@@ -297,6 +297,17 @@ fn production_private_gate_surface_is_generic_protocol2_only() {
 }
 
 #[test]
+fn private_gpu_stability_resets_player_on_the_final_nonempty_batch() {
+    let runner = include_str!("../src/private_protocol2_gpu_e2e_main.rs");
+    assert!(
+        runner.contains(
+            "if step.status.end_of_stream {\n        player_reset(player).await?;\n    }"
+        ),
+        "the private GPU stability runner must consume the final decoded batch and reset before issuing another player.step"
+    );
+}
+
+#[test]
 fn private_protocol2_receipt_contract_is_closed_and_path_free() {
     let value = valid_receipt();
     validate_receipt_value(value).expect("valid path-free Protocol 2 evidence");
