@@ -23,6 +23,8 @@ use latentdeck_gpu::{
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 const SLOT_ID: &str = "private-player-proof";
+const P1_CODEC_PACK_ID: &str = "org.latentdeck.h3";
+const P1_CODEC_PACK_VERSION: &str = "0.1.0";
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires private LC/weight, installed linked Codec Pack, CUDA, and an NVIDIA GPU"]
@@ -38,6 +40,9 @@ async fn real_h3_worker_decodes_resets_and_republishes_rgba() {
     let mut coordinator =
         PlayerCoordinator::discover(&[codec_root], latentdeck_core::product_version())
             .expect("private Codec Pack must validate");
+    coordinator
+        .select_codec_pack_exact(P1_CODEC_PACK_ID, P1_CODEC_PACK_VERSION)
+        .expect("private P1 Codec Pack version must be selected explicitly");
     coordinator
         .select_decoder_asset(&decoder_path)
         .expect("private decoder selection must match pack receipt");

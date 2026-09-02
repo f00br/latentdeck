@@ -104,7 +104,7 @@ fn discovers_a_fully_integrity_checked_h3_pack() {
 }
 
 #[test]
-fn player_selects_newest_pack_without_coupling_adapter_version() {
+fn player_requires_an_explicit_exact_pack_instead_of_selecting_newest() {
     let root = TempDir::new().expect("root");
     write_pack(root.path(), "org.latentdeck.h3", "0.1.0");
     write_pack(root.path(), "org.latentdeck.h3", "0.1.1");
@@ -117,9 +117,32 @@ fn player_selects_newest_pack_without_coupling_adapter_version() {
             .all(|pack| pack.manifest.adapter.adapter_version == "0.1.0")
     );
 
-    let player = PlayerCoordinator::discover(&[root.path().to_path_buf()], "0.1.0")
+    let mut player = PlayerCoordinator::discover(&[root.path().to_path_buf()], "0.1.0")
         .expect("player codec discovery");
-    assert_eq!(player.view().codec.pack_version.as_deref(), Some("0.1.1"));
+    assert_eq!(player.view().codec.pack_version, None);
+    assert_eq!(
+        player
+            .launch_inputs()
+            .err()
+            .expect("discovery must never imply a selected version")
+            .code,
+        "codec.selection_missing"
+    );
+
+    let selected = player
+        .select_codec_pack_exact("org.latentdeck.h3", "0.1.0")
+        .expect("the requested older version remains selectable");
+    assert_eq!(selected.codec.pack_version.as_deref(), Some("0.1.0"));
+
+    let missing = player
+        .select_codec_pack_exact("org.latentdeck.h3", "0.1.9")
+        .expect_err("an absent exact version must not fall back to newest");
+    assert_eq!(missing.code, "codec.pack_missing");
+    assert_eq!(
+        player.view().codec.pack_version.as_deref(),
+        Some("0.1.0"),
+        "failed reselection must not silently change the active exact version"
+    );
 }
 
 #[test]
@@ -135,6 +158,9 @@ fn player_exposes_decoder_provenance_and_recovers_after_incompatible_selection()
     });
     let mut player = PlayerCoordinator::discover(&[root.path().to_path_buf()], "0.1.0")
         .expect("player codec discovery");
+    player
+        .select_codec_pack_exact("org.latentdeck.h3", "0.1.0")
+        .expect("exact P1 pack selection");
 
     let initial = player.view().codec;
     assert_eq!(initial.state, CodecState::Missing);

@@ -6,7 +6,6 @@ use latentdeck_cartridge::{
     manifest::AudioDisposition,
     reader::{IntegrityValidatedCartridge, ValidationOptions, open_integrity_validated},
 };
-use semver::Version;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -193,12 +192,11 @@ impl PlayerCoordinator {
     }
 
     fn with_validated_packs(packs: Vec<ValidatedCodecPack>) -> Self {
-        let selected_pack = newest_h3_pack(&packs);
         Self {
             revision: 0,
             phase: PlayerPhase::Empty,
             packs,
-            selected_pack,
+            selected_pack: None,
             codec_fault: None,
             protocol2_codec: None,
             decoder_asset: None,
@@ -208,6 +206,47 @@ impl PlayerCoordinator {
             output_available: false,
             error: None,
         }
+    }
+
+    /// Select one exact legacy H3 Codec Pack identity for the Player-only
+    /// Protocol 1 bridge.
+    ///
+    /// Discovery deliberately never calls this method. Installed versions are
+    /// immutable, side-by-side choices and the caller must supply both the
+    /// package ID and version without a newest-version fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable missing-package error when that exact validated H3
+    /// identity is unavailable.
+    pub fn select_codec_pack_exact(
+        &mut self,
+        pack_id: &str,
+        pack_version: &str,
+    ) -> Result<PlayerView, PlayerCoordinatorError> {
+        let selected_pack = self
+            .packs
+            .iter()
+            .position(|pack| {
+                pack.manifest.pack_id == H3_PACK_ID
+                    && pack.manifest.pack_id == pack_id
+                    && pack.manifest.pack_version == pack_version
+            })
+            .ok_or_else(|| {
+                PlayerCoordinatorError::new(
+                    "codec.pack_missing",
+                    "The exact selected H3 Codec Pack version is unavailable.",
+                )
+            })?;
+        if self.selected_pack != Some(selected_pack) {
+            self.decoder_asset = None;
+        }
+        self.selected_pack = Some(selected_pack);
+        self.protocol2_codec = None;
+        self.codec_fault = None;
+        self.error = None;
+        self.bump_revision()?;
+        Ok(self.view())
     }
 
     /// Select and verify the external TAEH3 weight declared by the pack.
@@ -220,12 +259,9 @@ impl PlayerCoordinator {
         &mut self,
         path: impl AsRef<Path>,
     ) -> Result<PlayerView, PlayerCoordinatorError> {
-        let pack = self.selected_codec_pack().ok_or_else(|| {
-            PlayerCoordinatorError::new(
-                "codec.pack_missing",
-                "Install a compatible H3 Codec Pack before selecting its decoder weight.",
-            )
-        })?;
+        let pack = self
+            .selected_codec_pack()
+            .ok_or_else(|| self.codec_selection_error())?;
         let validation = validate_external_asset(pack, H3_ASSET_ID, path);
         match validation {
             Ok(asset) => {
@@ -309,9 +345,9 @@ impl PlayerCoordinator {
     /// Returns a stable state error while the cartridge, pack, or explicit
     /// decoder asset is missing.
     pub fn launch_inputs(&self) -> Result<PlayerLaunchInputs<'_>, PlayerCoordinatorError> {
-        let codec_pack = self.selected_codec_pack().ok_or_else(|| {
-            PlayerCoordinatorError::new("codec.pack_missing", "No compatible H3 Codec Pack")
-        })?;
+        let codec_pack = self
+            .selected_codec_pack()
+            .ok_or_else(|| self.codec_selection_error())?;
         let decoder_asset = self.decoder_asset.as_ref().ok_or_else(|| {
             PlayerCoordinatorError::new(
                 "codec.asset_missing",
@@ -571,6 +607,24 @@ impl PlayerCoordinator {
         self.selected_pack.and_then(|index| self.packs.get(index))
     }
 
+    fn codec_selection_error(&self) -> PlayerCoordinatorError {
+        if self
+            .packs
+            .iter()
+            .any(|pack| pack.manifest.pack_id == H3_PACK_ID)
+        {
+            PlayerCoordinatorError::new(
+                "codec.selection_missing",
+                "Select an exact compatible H3 Codec Pack version.",
+            )
+        } else {
+            PlayerCoordinatorError::new(
+                "codec.pack_missing",
+                "Install a compatible H3 Codec Pack before selecting it.",
+            )
+        }
+    }
+
     fn codec_summary(&self) -> CodecSummary {
         if let Some(summary) = &self.protocol2_codec {
             return summary.clone();
@@ -579,10 +633,16 @@ impl PlayerCoordinator {
             return fault.clone();
         }
         let Some(pack) = self.selected_codec_pack() else {
-            return codec_summary_without_pack(
-                CodecState::Missing,
-                Some("Install a compatible H3 Codec Pack.".to_owned()),
-            );
+            let detail = if self
+                .packs
+                .iter()
+                .any(|pack| pack.manifest.pack_id == H3_PACK_ID)
+            {
+                "Select an exact compatible H3 Codec Pack version."
+            } else {
+                "Install a compatible H3 Codec Pack."
+            };
+            return codec_summary_without_pack(CodecState::Missing, Some(detail.to_owned()));
         };
         if self.decoder_asset.is_none() {
             return codec_summary_for_pack(
@@ -660,20 +720,6 @@ fn codec_summary_for_pack(
             })
             .collect(),
     }
-}
-
-fn newest_h3_pack(packs: &[ValidatedCodecPack]) -> Option<usize> {
-    packs
-        .iter()
-        .enumerate()
-        .filter(|(_, pack)| pack.manifest.pack_id == H3_PACK_ID)
-        .filter_map(|(index, pack)| {
-            Version::parse(&pack.manifest.pack_version)
-                .ok()
-                .map(|version| (index, version))
-        })
-        .max_by(|(_, left), (_, right)| left.cmp(right))
-        .map(|(index, _)| index)
 }
 
 /// Stable command failure returned to the desktop shell.

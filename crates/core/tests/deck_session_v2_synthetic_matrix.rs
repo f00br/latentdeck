@@ -285,6 +285,9 @@ async fn installed_non_h3_codec_runs_external_decks_without_p1_fallback() {
     assert_eq!(batch.metadata().session_id(), *deck_session_id.as_bytes());
     assert_eq!((batch.width(), batch.height()), (3, 1));
     assert_eq!(batch.pixels(), &[0xa2; 12]);
+    let first_output_sha256 = sha256(batch.pixels());
+    let first_status = processed.status.clone();
+    let first_provenance = processed.provenance.clone();
 
     let reset_generation = first_generation + 1;
     let Ack::DeckReset(reset) = session
@@ -331,6 +334,58 @@ async fn installed_non_h3_codec_runs_external_decks_without_p1_fallback() {
     assert_eq!(status.stream_generation, reset_generation);
     assert_eq!(status.roles.as_slice(), load.roles);
     assert_eq!(status.source_transport.as_slice(), load.source_transport);
+
+    let Ack::DeckProcess(replayed) = session
+        .client_mut()
+        .call(
+            Command::DeckProcess(DeckProcess {
+                deck_session_id,
+                deck_revision: 1,
+                stream_generation: reset_generation,
+            }),
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("replay the exact seeded Deck command after reset")
+    else {
+        panic!("worker returned the wrong replay deck.process acknowledgement");
+    };
+    assert_eq!(
+        replayed.status.stream_sequence,
+        first_status.stream_sequence
+    );
+    assert_eq!(replayed.status.playheads, first_status.playheads);
+    assert_eq!(replayed.status.roles, first_status.roles);
+    assert_eq!(replayed.status.controls, first_status.controls);
+    assert_eq!(
+        replayed.status.source_transport,
+        first_status.source_transport
+    );
+    assert_eq!(replayed.status.seed, first_status.seed);
+    assert_eq!(replayed.status.state, first_status.state);
+    assert_eq!(replayed.status.capture_state, first_status.capture_state);
+    assert_eq!(replayed.provenance, first_provenance);
+    assert_eq!(
+        session
+            .ring_consumer_mut()
+            .wait_ready(Duration::from_secs(5))
+            .expect("replay ABI2 ready event"),
+        FramesReady::Signaled
+    );
+    let ReadV2Status::Batch(replay_batch) = session
+        .ring_consumer_mut()
+        .try_read()
+        .expect("read replayed synthetic ABI2 batch")
+    else {
+        panic!("replayed deck.process must publish one complete ABI2 batch");
+    };
+    assert_eq!(replay_batch.metadata().generation(), reset_generation);
+    assert_eq!(replay_batch.metadata().logical_sequence(), 1);
+    assert_eq!(
+        replay_batch.metadata().session_id(),
+        *deck_session_id.as_bytes()
+    );
+    assert_eq!(sha256(replay_batch.pixels()), first_output_sha256);
 
     let exit = session
         .client_mut()

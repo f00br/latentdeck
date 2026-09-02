@@ -956,22 +956,11 @@ impl RuntimeActor {
 
     async fn causal_loop_reset(&mut self) -> Result<(), GenericDeckRuntimeError> {
         let before = self.status.clone();
-        let generation = before
-            .stream_generation
-            .checked_add(1)
-            .ok_or_else(GenericDeckRuntimeError::protocol)?;
+        let (generation, reset) = causal_loop_reset_request(&before)?;
         let ack = self
             .session
             .client_mut()
-            .call(
-                Command::DeckReset(DeckReset {
-                    deck_session_id: before.deck_session_id,
-                    deck_revision: before.deck_revision,
-                    new_stream_generation: generation,
-                    preserve_playheads: true,
-                }),
-                self.command_timeout,
-            )
+            .call(Command::DeckReset(reset), self.command_timeout)
             .await
             .map_err(map_client_error)?;
         let Ack::DeckReset(status) = ack else {
@@ -1170,18 +1159,7 @@ impl RuntimeActor {
         mode: CaptureMode,
         output: PathBuf,
     ) -> Result<GenericCaptureView, GenericDeckRuntimeError> {
-        if self.active_capture.is_some() {
-            return Err(GenericDeckRuntimeError::capture(
-                "capture.already_active",
-                "Only one latent capture may be active in this Deck session.",
-            ));
-        }
-        if self.recording.is_active() {
-            return Err(GenericDeckRuntimeError::capture(
-                "capture.recording_conflict",
-                "Stop decoded MP4 recording before starting latent capture.",
-            ));
-        }
+        validate_capture_start_availability(self.active_capture.is_some(), &self.recording)?;
         let capture_id = Uuid::new_v4();
         let binding = CaptureStagingRoot::create(&self.app_local_data, capture_id)
             .map_err(map_capture_finalizer_error)?;
@@ -2025,6 +2003,24 @@ fn looped_physical_slots(
     Ok(looped)
 }
 
+fn causal_loop_reset_request(
+    status: &DeckStatusSnapshot,
+) -> Result<(u64, DeckReset), GenericDeckRuntimeError> {
+    let generation = status
+        .stream_generation
+        .checked_add(1)
+        .ok_or_else(GenericDeckRuntimeError::protocol)?;
+    Ok((
+        generation,
+        DeckReset {
+            deck_session_id: status.deck_session_id,
+            deck_revision: status.deck_revision,
+            new_stream_generation: generation,
+            preserve_playheads: true,
+        },
+    ))
+}
+
 fn validate_batch(
     batch: &RgbaBatchV2,
     status: &DeckStatusSnapshot,
@@ -2104,6 +2100,25 @@ fn transport_active(status: &DeckStatusSnapshot) -> bool {
         .as_slice()
         .iter()
         .any(|source| source.playing)
+}
+
+fn validate_capture_start_availability(
+    active_capture: bool,
+    recording: &DecodedRecordingController,
+) -> Result<(), GenericDeckRuntimeError> {
+    if active_capture {
+        return Err(GenericDeckRuntimeError::capture(
+            "capture.already_active",
+            "Only one latent capture may be active in this Deck session.",
+        ));
+    }
+    if recording.is_active() {
+        return Err(GenericDeckRuntimeError::capture(
+            "capture.recording_conflict",
+            "Stop decoded MP4 recording before starting latent capture.",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_capture_status(
@@ -2303,6 +2318,23 @@ mod tests {
         }
     }
 
+    fn capture_status_fixture(
+        deck: &DeckStatusSnapshot,
+        capture_id: Uuid,
+        reset_events: u32,
+    ) -> CaptureStatusSnapshot {
+        CaptureStatusSnapshot {
+            deck_session_id: deck.deck_session_id,
+            deck_revision: deck.deck_revision,
+            capture_id,
+            state: CaptureState::Capturing,
+            mode: CaptureMode::LiveCapture,
+            latent_slots: 1,
+            reset_events,
+            artifact: None,
+        }
+    }
+
     #[test]
     fn loop_detection_is_physical_slot_scoped_and_requires_exact_bounds() {
         let previous = status(4, 1, 9);
@@ -2319,6 +2351,48 @@ mod tests {
                 .code,
             "deck.protocol_fault"
         );
+    }
+
+    #[test]
+    fn automatic_loop_transition_builds_a_causal_reset_and_preserves_capture_state() {
+        let mut previous = status(4, 1, 9);
+        previous.capture_state = CaptureState::Capturing;
+        previous.state = DeckState::Capturing;
+        let mut wrapped = status(0, 1, 10);
+        wrapped.deck_session_id = previous.deck_session_id;
+        wrapped.capture_state = CaptureState::Capturing;
+        wrapped.state = DeckState::Capturing;
+
+        validate_process_status(&previous, &wrapped, &[(1, 5)])
+            .expect("process status may wrap one active loop");
+        assert_eq!(
+            looped_physical_slots(&previous, &wrapped, &[(1, 5)]).expect("detect loop"),
+            vec![1]
+        );
+        let (generation, reset) =
+            causal_loop_reset_request(&wrapped).expect("build causal loop reset");
+        assert_eq!(generation, 2);
+        assert_eq!(reset.deck_session_id, previous.deck_session_id);
+        assert_eq!(reset.deck_revision, previous.deck_revision);
+        assert_eq!(reset.new_stream_generation, generation);
+        assert!(reset.preserve_playheads);
+
+        let mut reset_status = wrapped.clone();
+        reset_status.stream_generation = generation;
+        reset_status.stream_sequence = 0;
+        validate_reset_status(&wrapped, &reset_status, generation, true, &[(1, 5)])
+            .expect("causal reset preserves wrapped playhead and active capture");
+
+        let capture_id = Uuid::new_v4();
+        let capture = capture_status_fixture(&reset_status, capture_id, 1);
+        validate_capture_status(
+            &capture,
+            &reset_status,
+            capture_id,
+            CaptureMode::LiveCapture,
+            &[CaptureState::Capturing],
+        )
+        .expect("capture receipt records the causal reset event");
     }
 
     #[test]
@@ -2401,6 +2475,65 @@ mod tests {
         assert!(effective_spout_enabled(true, true));
         assert!(!effective_spout_enabled(false, true));
         assert!(!effective_spout_enabled(true, false));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn active_mp4_blocks_latent_capture_with_the_stable_reverse_conflict() {
+        let root = tempfile::tempdir().expect("temporary recording directory");
+        let recording = DecodedRecordingController::new();
+        recording
+            .arm(root.path().join("active.mp4"))
+            .expect("arm decoded recording");
+        assert!(recording.is_active());
+
+        let conflict = validate_capture_start_availability(false, &recording)
+            .expect_err("active MP4 must block latent capture");
+        assert_eq!(conflict.code, "capture.recording_conflict");
+        assert_eq!(
+            conflict.message,
+            "Stop decoded MP4 recording before starting latent capture."
+        );
+        assert!(!conflict.fatal);
+
+        let ordered = validate_capture_start_availability(true, &recording)
+            .expect_err("existing latent capture retains first precedence");
+        assert_eq!(ordered.code, "capture.already_active");
+        assert_eq!(
+            ordered.message,
+            "Only one latent capture may be active in this Deck session."
+        );
+        assert!(!ordered.fatal);
+
+        recording.stop().expect("cancel test recording");
+    }
+
+    #[test]
+    fn capture_reset_event_bound_accepts_thirty_two_and_fails_closed_on_the_thirty_third() {
+        let deck = status(0, 1, 0);
+        let capture_id = Uuid::new_v4();
+        let mut receipt = capture_status_fixture(&deck, capture_id, 32);
+
+        validate_capture_status(
+            &receipt,
+            &deck,
+            capture_id,
+            CaptureMode::LiveCapture,
+            &[CaptureState::Capturing],
+        )
+        .expect("the negotiated thirty-two-event boundary remains valid");
+
+        receipt.reset_events = 33;
+        let error = validate_capture_status(
+            &receipt,
+            &deck,
+            capture_id,
+            CaptureMode::LiveCapture,
+            &[CaptureState::Capturing],
+        )
+        .expect_err("the thirty-third reset event must fail closed");
+        assert_eq!(error.code, "deck.protocol_fault");
+        assert!(error.fatal);
     }
 
     #[test]
