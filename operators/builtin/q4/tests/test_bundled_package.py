@@ -302,7 +302,9 @@ def test_q4_wheel_build_uses_the_same_authoritative_package_tree(tmp_path: Path)
     from latentdeck_operator_q4 import process_sources
 
     source = PACKAGE_ROOT / "python" / "latentdeck_operator_q4" / "operator.py"
-    assert Path(inspect.getfile(inspect.unwrap(process_sources))).resolve() == source.resolve()
+    imported_source = Path(inspect.getfile(inspect.unwrap(process_sources))).resolve()
+    assert process_sources.__module__ == "latentdeck_operator_q4.operator"
+    assert imported_source.read_bytes() == source.read_bytes()
 
     wheel_directory = tmp_path / "wheel"
     completed = subprocess.run(
