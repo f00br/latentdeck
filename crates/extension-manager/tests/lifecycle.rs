@@ -275,6 +275,46 @@ fn pack_source(source: &Path, output: &Path) -> (String, u64) {
     )
 }
 
+fn write_unchecked_deck_archive(source: &Path, output: &Path) -> (String, u64) {
+    write_unchecked_deck_archive_with_directories(source, output, &[])
+}
+
+fn write_unchecked_deck_archive_with_directories(
+    source: &Path,
+    output: &Path,
+    directories: &[&str],
+) -> (String, u64) {
+    let file = File::create(output).expect("create unchecked Deck archive");
+    let mut writer = zip::ZipWriter::new(file);
+    let options = SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default())
+        .unix_permissions(0o644);
+    for directory in directories {
+        writer
+            .add_directory(*directory, options)
+            .expect("add unchecked Deck directory");
+    }
+    for relative in [
+        "LICENSE.txt",
+        "deck-pack.json",
+        "faceplate.json",
+        "integrity.json",
+        "operator.json",
+        "python/deck_operator.py",
+    ] {
+        writer
+            .start_file(relative, options)
+            .expect("start unchecked Deck entry");
+        writer
+            .write_all(&fs::read(source.join(relative)).expect("read unchecked Deck entry"))
+            .expect("write unchecked Deck entry");
+    }
+    writer.finish().expect("finish unchecked Deck archive");
+    let bytes = fs::read(output).expect("read unchecked Deck archive");
+    (sha256(&bytes), bytes.len() as u64)
+}
+
 #[test]
 fn deterministic_deck_and_codec_packages_pass_closed_schema_inspection() {
     let temp = TempDir::new().expect("temp");
@@ -521,6 +561,94 @@ fn lifecycle_is_hash_bound_immutable_side_by_side_and_explicitly_selected() {
         ErrorCode::PackageMissing
     );
     assert!(verify(&roots, &package_021).is_ok());
+}
+
+#[cfg(windows)]
+#[test]
+fn repair_rejects_case_aliased_semver_without_replacing_the_installed_version() {
+    let temp = TempDir::new().expect("temp");
+    let installed_source = temp.path().join("deck-alpha");
+    let alias_source = temp.path().join("deck-uppercase-source");
+    fs::create_dir(&installed_source).expect("create installed source");
+    fs::create_dir(&alias_source).expect("create alias source");
+    write_deck_source(&installed_source, "1.0.0-alpha", 45);
+    write_deck_source(&alias_source, "1.0.0-ALPHA", 45);
+    let installed_archive = temp.path().join("deck-alpha.ld");
+    let alias_archive = temp.path().join("deck-uppercase.ld");
+    let (installed_hash, _) = pack_source(&installed_source, &installed_archive);
+    let (alias_hash, _) = write_unchecked_deck_archive(&alias_source, &alias_archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let installed = install(
+        &roots,
+        &InstallRequest {
+            archive_path: installed_archive,
+            expected_sha256: installed_hash,
+        },
+    )
+    .expect("install lowercase canonical version");
+
+    assert_eq!(
+        install(
+            &roots,
+            &InstallRequest {
+                archive_path: alias_archive.clone(),
+                expected_sha256: alias_hash.clone(),
+            },
+        )
+        .expect_err("case-aliased SemVer must not address the install destination")
+        .code(),
+        ErrorCode::ManifestInvalid
+    );
+    assert_eq!(
+        repair(
+            &roots,
+            &InstallRequest {
+                archive_path: alias_archive,
+                expected_sha256: alias_hash,
+            },
+        )
+        .expect_err("case-aliased SemVer must not address the installed version")
+        .code(),
+        ErrorCode::ManifestInvalid
+    );
+    assert_eq!(
+        resolve_installed(&roots, &installed.inspection.package)
+            .expect("original exact version remains installed")
+            .manifest()
+            .package_version(),
+        "1.0.0-alpha"
+    );
+}
+
+#[test]
+fn package_version_storage_key_accepts_115_bytes_and_rejects_116() {
+    let temp = TempDir::new().expect("temp");
+    let accepted_version = format!("1.0.0-{}", "a".repeat(109));
+    let rejected_version = format!("1.0.0-{}", "a".repeat(110));
+    assert_eq!(accepted_version.len(), 115);
+    assert_eq!(rejected_version.len(), 116);
+
+    let accepted_source = temp.path().join("accepted-source");
+    fs::create_dir(&accepted_source).expect("create accepted source");
+    write_deck_source(&accepted_source, &accepted_version, 45);
+    pack(&PackRequest {
+        source_directory: accepted_source,
+        output_path: temp.path().join("accepted.ld"),
+    })
+    .expect("115-byte package version fits the bounded storage key");
+
+    let rejected_source = temp.path().join("rejected-source");
+    fs::create_dir(&rejected_source).expect("create rejected source");
+    write_deck_source(&rejected_source, &rejected_version, 45);
+    assert_eq!(
+        pack(&PackRequest {
+            source_directory: rejected_source,
+            output_path: temp.path().join("rejected.ld"),
+        })
+        .expect_err("116-byte package version exceeds the bounded storage key")
+        .code(),
+        ErrorCode::ManifestInvalid
+    );
 }
 
 #[test]
@@ -1041,6 +1169,45 @@ fn archive_preflight_rejects_an_encrypted_entry_before_reading_payload() {
 }
 
 #[test]
+fn archive_preflight_rejects_declared_entry_counts_before_zip_metadata_allocation() {
+    let temp = TempDir::new().expect("temp");
+    for (name, bytes) in [
+        ("too-many-zip32.ldcodec", forged_zip32_eocd(32_769)),
+        ("too-many-zip64.ldcodec", forged_zip64_eocd(32_769)),
+    ] {
+        let path = temp.path().join(name);
+        fs::write(&path, &bytes).expect("write forged entry-count archive");
+        let error = inspect(&path, Some(&sha256(&bytes)))
+            .expect_err("oversized declared entry count must fail before ZIP metadata allocation");
+        assert_eq!(error.code(), ErrorCode::ArchiveInvalid);
+        assert_eq!(
+            error.detail(),
+            "ZIP declares more than 32768 entries before metadata allocation"
+        );
+    }
+}
+
+#[test]
+fn archive_preflight_accepts_zip64_metadata_when_entry_count_is_bounded() {
+    let temp = TempDir::new().expect("temp");
+    let source = temp.path().join("codec-source");
+    fs::create_dir(&source).expect("create Codec source");
+    write_codec_source(&source, "0.2.0", profile());
+    let archive = temp.path().join("bounded-zip64.ldcodec");
+    pack_source(&source, &archive);
+    promote_archive_end_to_zip64(&archive);
+    let bytes = fs::read(&archive).expect("read ZIP64 archive");
+
+    assert_eq!(
+        inspect(&archive, Some(&sha256(&bytes)))
+            .expect("bounded ZIP64 entry count remains valid")
+            .package
+            .kind,
+        PackageKind::CodecPack
+    );
+}
+
+#[test]
 fn archive_preflight_rejects_windows_path_aliases_and_file_parent_collisions() {
     let temp = TempDir::new().expect("temp");
     for (name, entry) in [
@@ -1102,6 +1269,52 @@ fn deck_archive_preflight_rejects_compressed_expansion_past_extracted_bound() {
             .unwrap_err()
             .code(),
         ErrorCode::ArchiveInvalid
+    );
+}
+
+#[test]
+fn closed_tree_rejects_unknown_directories_before_descending_or_inflating() {
+    let temp = TempDir::new().expect("temp");
+    let filesystem_source = temp.path().join("filesystem-source");
+    fs::create_dir(&filesystem_source).expect("create filesystem source");
+    write_deck_source(&filesystem_source, "0.2.0", 45);
+    fs::create_dir_all(filesystem_source.join("unexpected/deep/empty"))
+        .expect("create unexpected directory tree");
+    let filesystem_error = pack(&PackRequest {
+        source_directory: filesystem_source,
+        output_path: temp.path().join("filesystem.ld"),
+    })
+    .expect_err("unknown filesystem directory must fail at its root");
+    assert_eq!(filesystem_error.code(), ErrorCode::IntegrityFailed);
+    assert_eq!(
+        filesystem_error.detail(),
+        "package tree contains unexpected or empty directory: unexpected"
+    );
+
+    let archive_source = temp.path().join("archive-source");
+    fs::create_dir(&archive_source).expect("create archive source");
+    write_deck_source(&archive_source, "0.2.0", 45);
+    let derived_directory_archive = temp.path().join("derived-directory.ld");
+    let (derived_hash, _) = write_unchecked_deck_archive_with_directories(
+        &archive_source,
+        &derived_directory_archive,
+        &["python/"],
+    );
+    inspect(&derived_directory_archive, Some(&derived_hash))
+        .expect("explicit parent implied by a catalogued file remains valid");
+
+    let archive_path = temp.path().join("unexpected-directory.ld");
+    let (archive_hash, _) = write_unchecked_deck_archive_with_directories(
+        &archive_source,
+        &archive_path,
+        &["unexpected/"],
+    );
+    let archive_error = inspect(&archive_path, Some(&archive_hash))
+        .expect_err("unknown archive directory must fail before file inflation");
+    assert_eq!(archive_error.code(), ErrorCode::ArchiveInvalid);
+    assert_eq!(
+        archive_error.detail(),
+        "ZIP contains unexpected or empty directory: unexpected"
     );
 }
 
@@ -1556,6 +1769,98 @@ fn raw_archive(root: &Path, name: &str, entries: &[(&str, &[u8])]) -> (PathBuf, 
     writer.finish().unwrap();
     let bytes = fs::read(&path).unwrap();
     (path, sha256(&bytes))
+}
+
+fn forged_zip32_eocd(entry_count: u16) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(22);
+    bytes.extend_from_slice(b"PK\x05\x06");
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&entry_count.to_le_bytes());
+    bytes.extend_from_slice(&entry_count.to_le_bytes());
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes
+}
+
+fn forged_zip64_eocd(entry_count: u64) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(98);
+    bytes.extend_from_slice(b"PK\x06\x06");
+    bytes.extend_from_slice(&44_u64.to_le_bytes());
+    bytes.extend_from_slice(&45_u16.to_le_bytes());
+    bytes.extend_from_slice(&45_u16.to_le_bytes());
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&entry_count.to_le_bytes());
+    bytes.extend_from_slice(&entry_count.to_le_bytes());
+    bytes.extend_from_slice(&0_u64.to_le_bytes());
+    bytes.extend_from_slice(&0_u64.to_le_bytes());
+    bytes.extend_from_slice(b"PK\x06\x07");
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_u64.to_le_bytes());
+    bytes.extend_from_slice(&1_u32.to_le_bytes());
+    bytes.extend_from_slice(b"PK\x05\x06");
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&u16::MAX.to_le_bytes());
+    bytes.extend_from_slice(&u16::MAX.to_le_bytes());
+    bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+    bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes
+}
+
+fn promote_archive_end_to_zip64(path: &Path) {
+    let bytes = fs::read(path).expect("read ZIP32 archive");
+    let eocd_offset = bytes
+        .windows(4)
+        .rposition(|window| window == b"PK\x05\x06")
+        .expect("find ZIP32 EOCD");
+    assert_eq!(
+        eocd_offset + 22,
+        bytes.len(),
+        "fixture must have no ZIP comment"
+    );
+    let entry_count = u16::from_le_bytes(
+        bytes[eocd_offset + 10..eocd_offset + 12]
+            .try_into()
+            .expect("entry count"),
+    );
+    let central_size = u32::from_le_bytes(
+        bytes[eocd_offset + 12..eocd_offset + 16]
+            .try_into()
+            .expect("central size"),
+    );
+    let central_offset = u32::from_le_bytes(
+        bytes[eocd_offset + 16..eocd_offset + 20]
+            .try_into()
+            .expect("central offset"),
+    );
+    let mut promoted = bytes[..eocd_offset].to_vec();
+    promoted.extend_from_slice(b"PK\x06\x06");
+    promoted.extend_from_slice(&44_u64.to_le_bytes());
+    promoted.extend_from_slice(&45_u16.to_le_bytes());
+    promoted.extend_from_slice(&45_u16.to_le_bytes());
+    promoted.extend_from_slice(&0_u32.to_le_bytes());
+    promoted.extend_from_slice(&0_u32.to_le_bytes());
+    promoted.extend_from_slice(&u64::from(entry_count).to_le_bytes());
+    promoted.extend_from_slice(&u64::from(entry_count).to_le_bytes());
+    promoted.extend_from_slice(&u64::from(central_size).to_le_bytes());
+    promoted.extend_from_slice(&u64::from(central_offset).to_le_bytes());
+    promoted.extend_from_slice(b"PK\x06\x07");
+    promoted.extend_from_slice(&0_u32.to_le_bytes());
+    promoted.extend_from_slice(&(eocd_offset as u64).to_le_bytes());
+    promoted.extend_from_slice(&1_u32.to_le_bytes());
+    promoted.extend_from_slice(b"PK\x05\x06");
+    promoted.extend_from_slice(&0_u16.to_le_bytes());
+    promoted.extend_from_slice(&0_u16.to_le_bytes());
+    promoted.extend_from_slice(&u16::MAX.to_le_bytes());
+    promoted.extend_from_slice(&u16::MAX.to_le_bytes());
+    promoted.extend_from_slice(&u32::MAX.to_le_bytes());
+    promoted.extend_from_slice(&u32::MAX.to_le_bytes());
+    promoted.extend_from_slice(&0_u16.to_le_bytes());
+    fs::write(path, promoted).expect("write ZIP64 archive");
 }
 
 fn mark_zip_entries_encrypted(path: &Path) {

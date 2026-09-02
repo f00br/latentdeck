@@ -11,15 +11,20 @@ use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
 use crate::error::{ErrorCode, ExtensionError, Result};
 use crate::model::{InspectedPackage, PackReceipt, PackageKind, PackageManifest};
 use crate::schema::{
-    MAX_CODEC_EXTRACTED_BYTES, MAX_DECK_FILE_BYTES, MAX_JSON_BYTES, max_archive_bytes,
-    max_extracted_bytes, max_files, parse_integrity_catalog, parse_manifest,
+    MAX_CODEC_EXTRACTED_BYTES, MAX_CODEC_FILES, MAX_DECK_FILE_BYTES, MAX_JSON_BYTES,
+    max_archive_bytes, max_extracted_bytes, max_files, parse_integrity_catalog, parse_manifest,
     validate_deck_file_extension, validate_portable_relative_path, validate_sha256,
     validate_strict_json_value,
 };
 
-const MAX_ARCHIVE_ENTRIES: usize = 65_536;
+const MAX_ARCHIVE_ENTRIES: usize = MAX_CODEC_FILES;
 const MAX_TREE_DEPTH: usize = 256;
 const COPY_BUFFER_BYTES: usize = 1024 * 1024;
+const ZIP32_EOCD_MIN_BYTES: usize = 22;
+const ZIP32_EOCD_SCAN_BYTES: u64 = 22 + 65_535;
+const ZIP64_LOCATOR_BYTES: u64 = 20;
+const ZIP64_EOCD_MIN_BYTES: usize = 56;
+const ZIP64_EOCD_SCAN_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct PackRequest {
@@ -60,6 +65,12 @@ pub(crate) struct ValidatedDirectory {
     pub manifest_sha256: String,
     pub integrity_catalog_sha256: String,
     pub extracted_byte_length: u64,
+}
+
+struct ExpectedDirectoryLayout {
+    kind: PackageKind,
+    files: BTreeSet<String>,
+    directories: BTreeSet<String>,
 }
 
 /// Fully inspect an archive without installing it.
@@ -204,6 +215,7 @@ pub(crate) fn prepare_archive(
             "archive is empty or exceeds the 32 GiB absolute archive bound",
         ));
     }
+    preflight_zip_metadata(&mut file, archive_byte_length)?;
     let archive_sha256 = hash_open_file(&mut file)?;
     if expected_sha256.is_some_and(|expected| expected != archive_sha256) {
         return Err(ExtensionError::new(
@@ -282,6 +294,183 @@ pub(crate) fn prepare_archive(
     })
 }
 
+fn preflight_zip_metadata(file: &mut File, archive_byte_length: u64) -> Result<()> {
+    if archive_byte_length < ZIP32_EOCD_MIN_BYTES as u64 {
+        return Err(ExtensionError::new(
+            ErrorCode::ArchiveInvalid,
+            "ZIP end-of-central-directory record is missing",
+        ));
+    }
+    let tail_length = archive_byte_length.min(ZIP32_EOCD_SCAN_BYTES);
+    let tail_start = archive_byte_length - tail_length;
+    let tail_capacity = usize::try_from(tail_length).map_err(|_| {
+        ExtensionError::new(
+            ErrorCode::ArchiveInvalid,
+            "ZIP metadata scan length cannot be represented safely",
+        )
+    })?;
+    let mut tail = vec![0_u8; tail_capacity];
+    file.seek(SeekFrom::Start(tail_start)).map_err(|error| {
+        ExtensionError::io(ErrorCode::ArchiveInvalid, "seek ZIP tail metadata", &error)
+    })?;
+    file.read_exact(&mut tail).map_err(|error| {
+        ExtensionError::io(ErrorCode::ArchiveInvalid, "read ZIP tail metadata", &error)
+    })?;
+
+    let mut selected = None;
+    for offset in (0..=tail.len() - ZIP32_EOCD_MIN_BYTES).rev() {
+        if tail[offset..].starts_with(b"PK\x05\x06") {
+            let comment_length =
+                usize::from(u16::from_le_bytes([tail[offset + 20], tail[offset + 21]]));
+            if offset
+                .checked_add(ZIP32_EOCD_MIN_BYTES)
+                .and_then(|end| end.checked_add(comment_length))
+                == Some(tail.len())
+            {
+                selected = Some(offset);
+                break;
+            }
+        }
+    }
+    let eocd_tail_offset = selected.ok_or_else(|| {
+        ExtensionError::new(
+            ErrorCode::ArchiveInvalid,
+            "ZIP end-of-central-directory record is absent from its bounded tail",
+        )
+    })?;
+    let eocd_offset = tail_start
+        .checked_add(eocd_tail_offset as u64)
+        .ok_or_else(|| {
+            ExtensionError::new(ErrorCode::ArchiveInvalid, "ZIP EOCD offset overflowed")
+        })?;
+    let eocd = &tail[eocd_tail_offset..eocd_tail_offset + ZIP32_EOCD_MIN_BYTES];
+    let count = declared_zip_entry_count(file, eocd, eocd_offset)?;
+    if count > MAX_ARCHIVE_ENTRIES as u64 {
+        return Err(ExtensionError::new(
+            ErrorCode::ArchiveInvalid,
+            format!(
+                "ZIP declares more than {MAX_ARCHIVE_ENTRIES} entries before metadata allocation"
+            ),
+        ));
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| ExtensionError::io(ErrorCode::Io, "rewind ZIP metadata", &error))?;
+    Ok(())
+}
+
+fn declared_zip_entry_count(file: &mut File, eocd: &[u8], eocd_offset: u64) -> Result<u64> {
+    let entries_on_disk = u16::from_le_bytes([eocd[8], eocd[9]]);
+    let total_entries = u16::from_le_bytes([eocd[10], eocd[11]]);
+    let central_size = u32::from_le_bytes([eocd[12], eocd[13], eocd[14], eocd[15]]);
+    let central_offset = u32::from_le_bytes([eocd[16], eocd[17], eocd[18], eocd[19]]);
+    let needs_zip64 = entries_on_disk == u16::MAX
+        || total_entries == u16::MAX
+        || central_size == u32::MAX
+        || central_offset == u32::MAX;
+    if !needs_zip64 {
+        return Ok(u64::from(total_entries));
+    }
+    read_zip64_entry_count(file, eocd_offset)
+}
+
+fn read_zip64_entry_count(file: &mut File, eocd_offset: u64) -> Result<u64> {
+    let locator_offset = eocd_offset
+        .checked_sub(ZIP64_LOCATOR_BYTES)
+        .ok_or_else(invalid_zip64_metadata)?;
+    let mut locator = [0_u8; 20];
+    file.seek(SeekFrom::Start(locator_offset))
+        .and_then(|_| file.read_exact(&mut locator))
+        .map_err(|_| invalid_zip64_metadata())?;
+    if !locator.starts_with(b"PK\x06\x07") {
+        return Err(invalid_zip64_metadata());
+    }
+    let relative_offset = u64::from_le_bytes(
+        locator[8..16]
+            .try_into()
+            .expect("ZIP64 locator offset has fixed width"),
+    );
+    if let Some(count) = read_zip64_count_at(file, relative_offset, locator_offset)? {
+        return Ok(count);
+    }
+
+    let scan_start = locator_offset.saturating_sub(ZIP64_EOCD_SCAN_BYTES);
+    let scan_length = usize::try_from(locator_offset - scan_start).map_err(|_| {
+        ExtensionError::new(
+            ErrorCode::ArchiveInvalid,
+            "ZIP64 metadata scan length cannot be represented safely",
+        )
+    })?;
+    let mut bytes = vec![0_u8; scan_length];
+    file.seek(SeekFrom::Start(scan_start))
+        .and_then(|_| file.read_exact(&mut bytes))
+        .map_err(|_| invalid_zip64_metadata())?;
+    for offset in (0..=bytes.len().saturating_sub(ZIP64_EOCD_MIN_BYTES)).rev() {
+        if !bytes[offset..].starts_with(b"PK\x06\x06") {
+            continue;
+        }
+        let record_size = u64::from_le_bytes(
+            bytes[offset + 4..offset + 12]
+                .try_into()
+                .expect("ZIP64 record size has fixed width"),
+        );
+        let absolute_offset = scan_start + offset as u64;
+        if record_size >= 44
+            && absolute_offset
+                .checked_add(12)
+                .and_then(|start| start.checked_add(record_size))
+                == Some(locator_offset)
+        {
+            return Ok(u64::from_le_bytes(
+                bytes[offset + 32..offset + 40]
+                    .try_into()
+                    .expect("ZIP64 entry count has fixed width"),
+            ));
+        }
+    }
+    Err(invalid_zip64_metadata())
+}
+
+fn read_zip64_count_at(file: &mut File, offset: u64, locator_offset: u64) -> Result<Option<u64>> {
+    if offset
+        .checked_add(ZIP64_EOCD_MIN_BYTES as u64)
+        .is_none_or(|end| end > locator_offset)
+    {
+        return Ok(None);
+    }
+    let mut header = [0_u8; ZIP64_EOCD_MIN_BYTES];
+    file.seek(SeekFrom::Start(offset))
+        .and_then(|_| file.read_exact(&mut header))
+        .map_err(|_| invalid_zip64_metadata())?;
+    if !header.starts_with(b"PK\x06\x06") {
+        return Ok(None);
+    }
+    let record_size = u64::from_le_bytes(
+        header[4..12]
+            .try_into()
+            .expect("ZIP64 record size has fixed width"),
+    );
+    if record_size < 44
+        || offset
+            .checked_add(12)
+            .and_then(|start| start.checked_add(record_size))
+            != Some(locator_offset)
+    {
+        return Ok(None);
+    }
+    Ok(Some(u64::from_le_bytes(
+        header[32..40]
+            .try_into()
+            .expect("ZIP64 entry count has fixed width"),
+    )))
+}
+
+fn invalid_zip64_metadata() -> ExtensionError {
+    ExtensionError::new(
+        ErrorCode::ArchiveInvalid,
+        "ZIP64 end metadata is missing, malformed, or exceeds its bounded scan",
+    )
+}
+
 fn open_archive_with_unique_central_directory(file: File) -> Result<ZipArchive<File>> {
     let archive = ZipArchive::new(file).map_err(|error| {
         ExtensionError::new(ErrorCode::ArchiveInvalid, format!("open ZIP: {error}"))
@@ -310,17 +499,12 @@ pub(crate) fn validate_directory(
             "package root is not a regular non-reparse directory",
         ));
     }
+    let expected = expected_directory_layout(root, expected_kind)?;
     let mut file_paths = Vec::new();
     let mut directories = BTreeSet::new();
-    scan_directory(root, root, 0, &mut file_paths, &mut directories)?;
+    scan_directory(&expected, root, root, 0, &mut file_paths, &mut directories)?;
     file_paths.sort_by(|left, right| left.0.cmp(&right.0));
-    let kind = detect_kind_from_paths(file_paths.iter().map(|(path, _)| path.as_str()))?;
-    if expected_kind.is_some_and(|expected| expected != kind) {
-        return Err(ExtensionError::new(
-            ErrorCode::ManifestInvalid,
-            "installed package kind differs from its root",
-        ));
-    }
+    let kind = expected.kind;
     if file_paths.is_empty() || file_paths.len() > max_files(kind) {
         return Err(ExtensionError::new(
             ErrorCode::IntegrityFailed,
@@ -379,6 +563,83 @@ pub(crate) fn validate_directory(
     let mut validated = validate_contract(kind, &files, &directories, &contents)?;
     validated.extracted_byte_length = extracted;
     Ok(validated)
+}
+
+fn expected_directory_layout(
+    root: &Path,
+    expected_kind: Option<PackageKind>,
+) -> Result<ExpectedDirectoryLayout> {
+    let mut controls = Vec::with_capacity(2);
+    for kind in [PackageKind::DeckPack, PackageKind::CodecPack] {
+        let path = root.join(kind.manifest_name());
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && !is_reparse_or_symlink(&metadata) => {
+                controls.push(kind.manifest_name());
+            }
+            Ok(_) => {
+                return Err(ExtensionError::new(
+                    ErrorCode::LifecycleConflict,
+                    "package root control manifest is not a regular non-reparse file",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(ExtensionError::io(
+                    ErrorCode::Io,
+                    "inspect package root control manifest",
+                    &error,
+                ));
+            }
+        }
+    }
+    let kind = detect_kind_from_paths(controls.iter().copied())?;
+    if expected_kind.is_some_and(|expected| expected != kind) {
+        return Err(ExtensionError::new(
+            ErrorCode::ManifestInvalid,
+            "installed package kind differs from its root",
+        ));
+    }
+
+    let manifest_bytes = read_bounded_control_file(&root.join(kind.manifest_name()))?;
+    let manifest = parse_manifest(kind, &manifest_bytes)?;
+    let catalog_bytes = read_bounded_control_file(&root.join("integrity.json"))?;
+    if hash_bytes(&catalog_bytes) != manifest.integrity().catalog_sha256 {
+        return Err(ExtensionError::new(
+            ErrorCode::IntegrityFailed,
+            "integrity.json hash does not match the control manifest",
+        ));
+    }
+    let catalog = parse_integrity_catalog(&catalog_bytes, kind)?;
+    let mut files = BTreeSet::from([kind.manifest_name().to_owned(), "integrity.json".to_owned()]);
+    files.extend(catalog.files.into_iter().map(|file| file.path));
+    let directories = implied_directories(files.iter().map(String::as_str));
+    Ok(ExpectedDirectoryLayout {
+        kind,
+        files,
+        directories,
+    })
+}
+
+fn read_bounded_control_file(path: &Path) -> Result<Vec<u8>> {
+    let mut file = open_regular_no_follow(path, false)?;
+    let byte_length = file
+        .metadata()
+        .map_err(|error| ExtensionError::io(ErrorCode::Io, "inspect control file", &error))?
+        .len();
+    if byte_length > MAX_JSON_BYTES as u64 {
+        return Err(ExtensionError::new(
+            ErrorCode::ManifestInvalid,
+            "package control JSON exceeds the 1 MiB bound",
+        ));
+    }
+    read_and_hash(&mut file, byte_length, true).and_then(|measured| {
+        measured.bytes.ok_or_else(|| {
+            ExtensionError::new(
+                ErrorCode::IntegrityFailed,
+                "bounded package control bytes are unavailable",
+            )
+        })
+    })
 }
 
 pub(crate) fn extract_prepared(prepared: &mut PreparedPackage, destination: &Path) -> Result<()> {
@@ -690,6 +951,22 @@ fn validate_archive_hierarchy(plan: &[ArchiveEntryPlan]) -> Result<()> {
                 ));
             }
             parent = prefix;
+        }
+    }
+    let implied = implied_directories(
+        plan.iter()
+            .filter(|entry| !entry.directory)
+            .map(|entry| entry.path.as_str()),
+    );
+    for directory in plan.iter().filter(|entry| entry.directory) {
+        if !implied.contains(&directory.path) {
+            return Err(ExtensionError::new(
+                ErrorCode::ArchiveInvalid,
+                format!(
+                    "ZIP contains unexpected or empty directory: {}",
+                    directory.path
+                ),
+            ));
         }
     }
     Ok(())
@@ -1013,6 +1290,7 @@ fn implied_directories<'a>(paths: impl Iterator<Item = &'a str>) -> BTreeSet<Str
 }
 
 fn scan_directory(
+    expected: &ExpectedDirectoryLayout,
     root: &Path,
     current: &Path,
     depth: usize,
@@ -1050,9 +1328,24 @@ fn scan_directory(
         let portable = relative.to_string_lossy().replace('\\', "/");
         validate_portable_relative_path(&portable, metadata.is_dir())?;
         if metadata.is_dir() {
+            if !expected.directories.contains(&portable) {
+                return Err(ExtensionError::new(
+                    ErrorCode::IntegrityFailed,
+                    format!("package tree contains unexpected or empty directory: {portable}"),
+                ));
+            }
             directories.insert(portable);
-            scan_directory(root, &path, depth + 1, files, directories)?;
+            scan_directory(expected, root, &path, depth + 1, files, directories)?;
         } else if metadata.is_file() {
+            if expected.kind == PackageKind::DeckPack {
+                validate_deck_file_extension(&portable)?;
+            }
+            if !expected.files.contains(&portable) {
+                return Err(ExtensionError::new(
+                    ErrorCode::IntegrityFailed,
+                    format!("uncatalogued package file: {portable}"),
+                ));
+            }
             files.push((portable, path));
             if files.len() > MAX_ARCHIVE_ENTRIES {
                 return Err(ExtensionError::new(

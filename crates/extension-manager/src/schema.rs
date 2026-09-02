@@ -28,6 +28,7 @@ pub(crate) const MAX_CODEC_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 pub(crate) const MAX_CODEC_EXTRACTED_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 pub(crate) const MAX_EXTERNAL_ASSETS: usize = 16;
 pub(crate) const MAX_DECK_GEOMETRIES: usize = 64;
+const MAX_PACKAGE_VERSION_BYTES: usize = 115;
 
 struct StrictJson(Value);
 
@@ -245,7 +246,7 @@ fn validate_deck_manifest(manifest: &DeckPackManifest) -> Result<()> {
         ));
     }
     validate_reverse_dns_id(&manifest.deck_id, "deck_id")?;
-    validate_semver(&manifest.deck_version, "deck_version")?;
+    validate_package_version(&manifest.deck_version, "deck_version")?;
     validate_common_manifest_text(
         &manifest.display_name,
         &manifest.summary,
@@ -362,7 +363,7 @@ fn validate_codec_manifest(manifest: &CodecPackManifest) -> Result<()> {
         ));
     }
     validate_reverse_dns_id(&manifest.pack_id, "pack_id")?;
-    validate_semver(&manifest.pack_version, "pack_version")?;
+    validate_package_version(&manifest.pack_version, "pack_version")?;
     validate_common_manifest_text(
         &manifest.display_name,
         &manifest.summary,
@@ -574,7 +575,7 @@ fn validate_profile_key(profile: &ProfileKey) -> Result<()> {
 
 pub(crate) fn validate_package_reference(package: &crate::model::PackageReference) -> Result<()> {
     validate_reverse_dns_id(&package.package_id, "package_id")?;
-    validate_semver(&package.package_version, "package_version")
+    validate_package_version(&package.package_version, "package_version")
 }
 
 pub(crate) fn validate_bundled_index(index: &BundledPackageIndex) -> Result<()> {
@@ -625,6 +626,24 @@ fn validate_semver(value: &str, name: &str) -> Result<()> {
     let parsed = Version::parse(value).map_err(|_| invalid(format!("{name} is not SemVer")))?;
     if parsed.to_string() != value {
         return Err(invalid(format!("{name} must be canonical SemVer")));
+    }
+    Ok(())
+}
+
+fn validate_package_version(value: &str, name: &str) -> Result<()> {
+    validate_semver(value, name)?;
+    // The version is both a directory component and a `<version>.json` receipt
+    // component. Keeping the generated receipt name within the same 120-byte
+    // portable-component bound also leaves one injective spelling on Windows.
+    if value.len() > MAX_PACKAGE_VERSION_BYTES {
+        return Err(invalid(format!(
+            "{name} exceeds the {MAX_PACKAGE_VERSION_BYTES} byte storage-key bound"
+        )));
+    }
+    if value.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        return Err(invalid(format!(
+            "{name} must be lowercase for an injective Windows storage key"
+        )));
     }
     Ok(())
 }
