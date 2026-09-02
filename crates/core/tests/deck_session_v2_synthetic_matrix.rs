@@ -202,7 +202,8 @@ async fn installed_non_h3_codec_runs_external_decks_without_p1_fallback() {
     assert_eq!(prepared.cartridges.len(), 2);
     assert_eq!(prepared.validation_work.full_cartridge_validations, 0);
     assert_eq!(prepared.validation_work.retained_handle_clones, 2);
-    assert_eq!(active_packages.stats().cold_full_hash_passes, 2);
+    assert_eq!(active_packages.stats().cold_full_hash_passes, 1);
+    assert_eq!(active_packages.stats().persistent_fast_checkouts, 1);
     assert_eq!(active_packages.stats().cached_checkouts, 0);
 
     let repeated_preflight = prepare_exact_deck_selection_with_cache(
@@ -220,7 +221,8 @@ async fn installed_non_h3_codec_runs_external_decks_without_p1_fallback() {
         0
     );
     assert_eq!(repeated_preflight.validation_work.retained_handle_clones, 2);
-    assert_eq!(active_packages.stats().cold_full_hash_passes, 2);
+    assert_eq!(active_packages.stats().cold_full_hash_passes, 1);
+    assert_eq!(active_packages.stats().persistent_fast_checkouts, 1);
     assert_eq!(active_packages.stats().cached_checkouts, 2);
     drop(repeated_preflight);
     assert_eq!(prepared.host.profile_key, protocol_profile());
