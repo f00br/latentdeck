@@ -412,6 +412,13 @@ fn validate_codec_manifest(manifest: &CodecPackManifest) -> Result<()> {
         }
     }
     validate_reverse_dns_id(&manifest.adapter.adapter_id, "adapter_id")?;
+    if is_reserved_package_id(&manifest.adapter.adapter_id)
+        && !is_reserved_package_id(&manifest.pack_id)
+    {
+        return Err(invalid(
+            "the reserved org.latentdeck.* adapter namespace requires a reserved pack_id",
+        ));
+    }
     validate_semver(&manifest.adapter.adapter_version, "adapter_version")?;
     validate_entrypoint(&manifest.adapter.entrypoint, "Codec adapter entrypoint")?;
     validate_codec_worker(manifest)?;

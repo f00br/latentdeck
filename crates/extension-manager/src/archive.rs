@@ -404,7 +404,10 @@ fn read_zip64_entry_count(file: &mut File, eocd_offset: u64) -> Result<u64> {
     file.seek(SeekFrom::Start(scan_start))
         .and_then(|_| file.read_exact(&mut bytes))
         .map_err(|_| invalid_zip64_metadata())?;
-    for offset in (0..=bytes.len().saturating_sub(ZIP64_EOCD_MIN_BYTES)).rev() {
+    let Some(last_record_offset) = bytes.len().checked_sub(ZIP64_EOCD_MIN_BYTES) else {
+        return Err(invalid_zip64_metadata());
+    };
+    for offset in (0..=last_record_offset).rev() {
         if !bytes[offset..].starts_with(b"PK\x06\x06") {
             continue;
         }

@@ -263,6 +263,16 @@ fn write_codec_source_with_worker(
     write_file(root, "codec-pack.json", &canonical(&manifest));
 }
 
+fn rewrite_codec_identities(root: &Path, pack_id: &str, adapter_id: &str) {
+    let path = root.join("codec-pack.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("read Codec manifest"))
+            .expect("parse Codec manifest");
+    manifest["pack_id"] = serde_json::Value::String(pack_id.to_owned());
+    manifest["adapter"]["adapter_id"] = serde_json::Value::String(adapter_id.to_owned());
+    fs::write(path, canonical(&manifest)).expect("rewrite Codec identities");
+}
+
 fn pack_source(source: &Path, output: &Path) -> (String, u64) {
     let receipt = pack(&PackRequest {
         source_directory: source.to_path_buf(),
@@ -457,6 +467,47 @@ fn reserved_namespace_requires_an_exact_build_generated_hash_index() {
     repair_from_bundled_index(&roots, &request, &exact_index)
         .expect("exact build index authorizes reserved package repair");
     verify(&roots, &receipt.inspection.package).expect("repaired reserved package verifies");
+}
+
+#[test]
+fn reserved_adapter_identity_requires_a_reserved_codec_pack_identity() {
+    let temp = TempDir::new().expect("temp");
+    for (label, adapter_id) in [("exact", "org.latentdeck"), ("child", "org.latentdeck.h3")] {
+        let external_source = temp.path().join(format!("external-codec-{label}"));
+        fs::create_dir(&external_source).expect("create external Codec source");
+        write_codec_source(&external_source, "0.2.0", profile());
+        rewrite_codec_identities(&external_source, "com.example.codec", adapter_id);
+        assert_eq!(
+            pack(&PackRequest {
+                source_directory: external_source,
+                output_path: temp
+                    .path()
+                    .join(format!("external-reserved-adapter-{label}.ldcodec")),
+            })
+            .expect_err("external pack must not claim the reserved adapter namespace")
+            .code(),
+            ErrorCode::ManifestInvalid
+        );
+    }
+
+    let bundled_source = temp.path().join("bundled-codec");
+    fs::create_dir(&bundled_source).expect("create bundled Codec source");
+    write_codec_source(&bundled_source, "0.2.0", profile());
+    rewrite_codec_identities(
+        &bundled_source,
+        "org.latentdeck.codec.synthetic",
+        "org.latentdeck.synthetic",
+    );
+    let bundled_archive = temp.path().join("bundled-reserved-adapter.ldcodec");
+    let receipt = pack(&PackRequest {
+        source_directory: bundled_source,
+        output_path: bundled_archive,
+    })
+    .expect("reserved pack may carry a reserved adapter identity");
+    assert_eq!(
+        receipt.inspection.package.package_id,
+        "org.latentdeck.codec.synthetic"
+    );
 }
 
 #[test]
@@ -1188,6 +1239,18 @@ fn archive_preflight_rejects_declared_entry_counts_before_zip_metadata_allocatio
 }
 
 #[test]
+fn malformed_tiny_zip64_tail_returns_archive_invalid_without_panicking() {
+    let temp = TempDir::new().expect("temp");
+    let path = temp.path().join("tiny-malformed.ldcodec");
+    let bytes = forged_tiny_zip64_tail();
+    fs::write(&path, &bytes).expect("write tiny malformed ZIP64 archive");
+
+    let error = inspect(&path, Some(&sha256(&bytes)))
+        .expect_err("tiny malformed ZIP64 metadata must fail closed without panicking");
+    assert_eq!(error.code(), ErrorCode::ArchiveInvalid);
+}
+
+#[test]
 fn archive_preflight_accepts_zip64_metadata_when_entry_count_is_bounded() {
     let temp = TempDir::new().expect("temp");
     let source = temp.path().join("codec-source");
@@ -1796,6 +1859,23 @@ fn forged_zip64_eocd(entry_count: u64) -> Vec<u8> {
     bytes.extend_from_slice(&entry_count.to_le_bytes());
     bytes.extend_from_slice(&0_u64.to_le_bytes());
     bytes.extend_from_slice(&0_u64.to_le_bytes());
+    bytes.extend_from_slice(b"PK\x06\x07");
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_u64.to_le_bytes());
+    bytes.extend_from_slice(&1_u32.to_le_bytes());
+    bytes.extend_from_slice(b"PK\x05\x06");
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&u16::MAX.to_le_bytes());
+    bytes.extend_from_slice(&u16::MAX.to_le_bytes());
+    bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+    bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes
+}
+
+fn forged_tiny_zip64_tail() -> Vec<u8> {
+    let mut bytes = b"PK\x06\x06\0\0\0\0\0\0".to_vec();
     bytes.extend_from_slice(b"PK\x06\x07");
     bytes.extend_from_slice(&0_u32.to_le_bytes());
     bytes.extend_from_slice(&0_u64.to_le_bytes());
