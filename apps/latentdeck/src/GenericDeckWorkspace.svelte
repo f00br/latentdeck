@@ -671,10 +671,18 @@
     const sessionId = selectedSessionId;
     if (sessionId === "" || busy) return;
     try {
+      const outputPinKindBeforePoll = activeOutputPinKind();
       applySession(await genericDeckClient.statusGet(sessionId));
       capture = await genericDeckClient.captureStatusGet(sessionId);
-      await publishCompletedCapture(capture);
       recording = await genericDeckClient.recordingStatusGet(sessionId);
+      const outputPinKindAfterPoll = activeOutputPinKind();
+      if (
+        outputPinKindBeforePoll !== outputPinKindAfterPoll ||
+        selectedSessionOutputPinKind() !== outputPinKindAfterPoll
+      ) {
+        await refreshSessions();
+      }
+      await publishCompletedCapture(capture);
       spout = await genericDeckClient.spoutStatusGet(sessionId);
       outputFullscreen = await genericDeckClient.fullscreenStatusGet(sessionId);
       if (spout !== null && !spoutNameDirty) spoutName = spout.requestedName;
@@ -702,6 +710,7 @@
           mode,
         );
       }
+      if (capture !== null) await refreshSessions();
       await publishCompletedCapture(capture);
     });
   }
@@ -736,12 +745,16 @@
         recording = await genericDeckClient.recordingStop(
           selectedSession!.sessionId,
         );
+        await refreshSessions();
         return;
       }
       const started = await genericDeckClient.recordingStart(
         selectedSession!.sessionId,
       );
-      if (started !== null) recording = started;
+      if (started !== null) {
+        recording = started;
+        await refreshSessions();
+      }
     });
   }
 
@@ -1052,6 +1065,17 @@
       recording?.state === "recording" ||
       recording?.state === "finalizing"
     );
+  }
+
+  function activeOutputPinKind(): "capture" | "mp4" | null {
+    if (captureActive()) return "capture";
+    if (recordingActive()) return "mp4";
+    return null;
+  }
+
+  function selectedSessionOutputPinKind(): "capture" | "mp4" | null {
+    const pin = sessions.outputPin;
+    return pin?.session_id === selectedSessionId ? pin.kind : null;
   }
 
   async function librarySnapshot(): Promise<LibraryView> {
