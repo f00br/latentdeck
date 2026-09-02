@@ -48,6 +48,17 @@ fn private_protocol2_gpu_runner_is_an_executable_evidence_producer() {
         source.contains("DeckState::Ready | DeckState::Paused | DeckState::Playing"),
         "the GPU gate must accept the exact Playing status produced after startup transport"
     );
+    assert!(
+        !source.contains("let process_count = if mode == CaptureMode::Snapshot { 1 } else { 2 };"),
+        "snapshot completion cannot assume that every codec has a one-slot valid boundary"
+    );
+    assert!(
+        source.contains("SNAPSHOT_BOUNDARY_ATTEMPTS")
+            && source.contains(
+                "mode == CaptureMode::Snapshot && last_process_state == CaptureState::Completed"
+            ),
+        "the GPU gate must process until the codec reports its first completed snapshot boundary"
+    );
 
     let orchestrator = include_str!("../../../../tools/Run-PrivateProtocol2GpuE2E.ps1");
     for required in [

@@ -100,6 +100,7 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 const RING_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CAPTURE_LATENT_SLOTS: u64 = 16_382;
 const MAX_CAPTURE_VISUAL_BYTES: u64 = 1024 * 1024 * 1024;
+const SNAPSHOT_BOUNDARY_ATTEMPTS: usize = 8;
 
 type GateResult<T> = Result<T, &'static str>;
 
@@ -1501,7 +1502,14 @@ async fn run_capture(
         return Err("Protocol 2 capture.start did not enter the exact Capturing state");
     }
 
-    let process_count = if mode == CaptureMode::Snapshot { 1 } else { 2 };
+    // Snapshot is one codec-valid payload, not necessarily one latent slot.
+    // H3, for example, first becomes serializable at T=2. Keep the probe
+    // bounded while allowing the trusted adapter to report that boundary.
+    let process_count = if mode == CaptureMode::Snapshot {
+        SNAPSHOT_BOUNDARY_ATTEMPTS
+    } else {
+        2
+    };
     let mut last_process_state = CaptureState::Capturing;
     for _ in 0..process_count {
         let Ack::DeckProcess(processed) = deck
@@ -1542,6 +1550,9 @@ async fn run_capture(
             .processed_frames
             .checked_add(u64::try_from(frames.len()).map_err(|_| "capture frame overflow")?)
             .ok_or("capture frame overflow")?;
+        if mode == CaptureMode::Snapshot && last_process_state == CaptureState::Completed {
+            break;
+        }
     }
     if mode == CaptureMode::Snapshot && last_process_state != CaptureState::Completed {
         return Err("Snapshot did not finish on the first codec-valid boundary");
