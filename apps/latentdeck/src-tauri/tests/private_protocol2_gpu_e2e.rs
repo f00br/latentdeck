@@ -59,6 +59,10 @@ fn private_protocol2_gpu_runner_is_an_executable_evidence_producer() {
             ),
         "the GPU gate must process until the codec reports its first completed snapshot boundary"
     );
+    assert!(
+        source.contains(r#"const EXTERNAL_DECK_ID: &str = "dev.latentdeck.private.h3-probe";"#),
+        "the generated external Deck must use a valid lowercase reverse-DNS package ID"
+    );
 
     let orchestrator = include_str!("../../../../tools/Run-PrivateProtocol2GpuE2E.ps1");
     for required in [
