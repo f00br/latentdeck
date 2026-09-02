@@ -29,11 +29,14 @@ describe("LatentDeck startup discovery boundary", () => {
     openMock.mockReset();
     loadDeckUiCatalogMock.mockReset();
     invokeMock.mockImplementation((command: string) => {
-      if (command === "library_snapshot") return Promise.resolve(EMPTY_LIBRARY_VIEW);
+      if (command === "library_snapshot")
+        return Promise.resolve(EMPTY_LIBRARY_VIEW);
       if (command === "extensions_snapshot") {
         return Promise.resolve({ packages: [], matrix: [] });
       }
-      return Promise.reject(new Error(`unexpected startup command: ${command}`));
+      return Promise.reject(
+        new Error(`unexpected startup command: ${command}`),
+      );
     });
     loadDeckUiCatalogMock.mockResolvedValue({ decks: [], issues: [] });
   });
@@ -55,7 +58,8 @@ describe("LatentDeck startup discovery boundary", () => {
   });
 
   it("coalesces an immediate Extensions click with pending Deck catalog discovery", async () => {
-    let resolveCatalog: ((value: { decks: []; issues: [] }) => void) | undefined;
+    let resolveCatalog:
+      ((value: { decks: []; issues: [] }) => void) | undefined;
     loadDeckUiCatalogMock.mockImplementation(
       () =>
         new Promise<{ decks: []; issues: [] }>((resolve) => {
@@ -102,7 +106,8 @@ describe("LatentDeck startup discovery boundary", () => {
         }),
     );
     invokeMock.mockImplementation((command: string) => {
-      if (command === "library_snapshot") return Promise.resolve(EMPTY_LIBRARY_VIEW);
+      if (command === "library_snapshot")
+        return Promise.resolve(EMPTY_LIBRARY_VIEW);
       if (command === "extensions_snapshot") {
         return Promise.resolve({
           packages: [
