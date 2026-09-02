@@ -247,7 +247,10 @@ fn run_main() -> GateResult<()> {
         })
         .build(tauri::generate_context!())
         .map_err(|_| "tauri host initialization failed")?;
-    app.run(|_, _| {});
+    let exit_code = app.run_return(|_, _| {});
+    if exit_code != 0 {
+        return Err("private GPU Tauri host exited with a nonzero status");
+    }
     let receipt = receiver
         .recv()
         .map_err(|_| "private GPU runner ended without an evidence result")??;

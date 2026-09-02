@@ -17,6 +17,7 @@ fn private_protocol2_gpu_runner_is_an_executable_evidence_producer() {
         "set_spout_name",
         "STABILITY_SECONDS",
         "tokio::task::yield_now",
+        "app.run_return",
         "write_validated_receipt",
     ] {
         assert!(
@@ -31,6 +32,7 @@ fn private_protocol2_gpu_runner_is_an_executable_evidence_producer() {
         "q4_worker_client",
         "Command::D2",
         "Command::Q4",
+        "app.run(|_, _| {})",
     ] {
         assert!(
             !source.contains(forbidden),
