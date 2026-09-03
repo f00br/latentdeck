@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use latentdeck_extension_manager::{
-    ErrorCode, ExtensionError, ExtensionRoots, InstallRequest, PackRequest, PackageKind,
-    PackageReference, RemoveOptions, compatibility_matrix, disable, enable, inspect, install, list,
-    pack, remove, repair, verify,
+    ActivePackageCache, ErrorCode, ExtensionError, ExtensionRoots, InstallRequest, PackRequest,
+    PackageKind, PackageReference, RemoveOptions, disable, enable, inspect, install, pack, remove,
+    repair, verify,
 };
 use serde::Serialize;
 
@@ -162,8 +162,14 @@ fn run(cli: Cli) -> Result<String, ExtensionError> {
                         expected_sha256,
                     },
                 )?),
-                Command::List => encode(&list(&roots)?),
-                Command::Matrix => encode(&compatibility_matrix(&roots)?),
+                Command::List => {
+                    let inventory = ActivePackageCache::new().runtime_inventory(&roots)?;
+                    encode(&inventory.packages)
+                }
+                Command::Matrix => {
+                    let inventory = ActivePackageCache::new().runtime_inventory(&roots)?;
+                    encode(&inventory.matrix)
+                }
                 Command::Inspect { .. } | Command::Pack { .. } => unreachable!(),
             }
         }

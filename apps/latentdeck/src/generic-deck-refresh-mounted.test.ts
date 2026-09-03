@@ -129,7 +129,75 @@ describe("generic Deck Extensions refresh", () => {
           recentFaults: [],
         });
       }
-      if (command === "deck_generic_viewport_hide") return Promise.resolve();
+      if (command === "deck_generic_viewport_session_begin") {
+        return Promise.resolve({ epoch: 1 });
+      }
+      if (
+        command === "deck_generic_viewport_set_bounds" ||
+        command === "deck_generic_viewport_hide"
+      ) {
+        return Promise.resolve();
+      }
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+    const deck = model();
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(GenericDeckWorkspaceRefreshHarness, {
+      target,
+      props: {
+        model: deck,
+        initialModels: [deck],
+        library: EMPTY_LIBRARY_VIEW,
+      },
+    });
+    await settleUi();
+    expect(refreshCount).toBe(1);
+
+    component.setActive(true);
+    await settleUi();
+    component.replaceModels([deck]);
+    await settleUi();
+    expect(refreshCount).toBe(1);
+
+    first.resolve(snapshot("org.example.codec.stale"));
+    await settleUi();
+    expect(refreshCount).toBe(2);
+    expect(target.textContent).not.toContain("org.example.codec.stale");
+
+    second.resolve(snapshot("org.example.codec.latest"));
+    await settleUi();
+    expect(target.textContent).toContain("org.example.codec.latest");
+    expect(target.textContent).not.toContain("org.example.codec.stale");
+
+    await unmount(component);
+    target.remove();
+  });
+
+  it("defers hidden model refreshes and requests one snapshot when active again", async () => {
+    let refreshCount = 0;
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "extensions_snapshot") {
+        refreshCount += 1;
+        return Promise.resolve(snapshot(`org.example.codec.${refreshCount}`));
+      }
+      if (command === "deck_generic_sessions_get") {
+        return Promise.resolve({
+          sessions: [],
+          foregroundOutput: null,
+          outputPin: null,
+          recentFaults: [],
+        });
+      }
+      if (command === "deck_generic_viewport_session_begin") {
+        return Promise.resolve({ epoch: 1 });
+      }
+      if (
+        command === "deck_generic_viewport_set_bounds" ||
+        command === "deck_generic_viewport_hide"
+      ) {
+        return Promise.resolve();
+      }
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
     const deck = model();
@@ -147,18 +215,15 @@ describe("generic Deck Extensions refresh", () => {
     expect(refreshCount).toBe(1);
 
     component.replaceModels([deck]);
+    component.replaceModels([deck]);
     await settleUi();
     expect(refreshCount).toBe(1);
 
-    first.resolve(snapshot("org.example.codec.stale"));
+    component.setActive(true);
     await settleUi();
     expect(refreshCount).toBe(2);
-    expect(target.textContent).not.toContain("org.example.codec.stale");
-
-    second.resolve(snapshot("org.example.codec.latest"));
     await settleUi();
-    expect(target.textContent).toContain("org.example.codec.latest");
-    expect(target.textContent).not.toContain("org.example.codec.stale");
+    expect(refreshCount).toBe(2);
 
     await unmount(component);
     target.remove();

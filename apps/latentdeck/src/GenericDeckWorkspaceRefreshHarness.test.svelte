@@ -8,9 +8,14 @@
   export let library: LibraryView;
 
   let models = initialModels;
+  let active = false;
 
   export function replaceModels(next: readonly DeckUiModel[]): void {
     models = next;
+  }
+
+  export function setActive(next: boolean): void {
+    active = next;
   }
 </script>
 
@@ -18,6 +23,6 @@
   {model}
   {models}
   {library}
-  active={false}
+  {active}
   registerLeave={() => undefined}
 />

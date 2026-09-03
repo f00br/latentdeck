@@ -73,6 +73,12 @@ struct ExpectedDirectoryLayout {
     directories: BTreeSet<String>,
 }
 
+struct ObservedDirectoryFile {
+    relative: String,
+    path: PathBuf,
+    byte_length: u64,
+}
+
 /// Fully inspect an archive without installing it.
 ///
 /// # Errors
@@ -507,7 +513,7 @@ pub(crate) fn validate_directory(
     let mut file_paths = Vec::new();
     let mut directories = BTreeSet::new();
     scan_directory(&expected, root, root, 0, &mut file_paths, &mut directories)?;
-    file_paths.sort_by(|left, right| left.0.cmp(&right.0));
+    file_paths.sort_by(|left, right| left.relative.cmp(&right.relative));
     let mut directory_paths: Vec<_> = directories
         .iter()
         .map(|relative| root.join(path_from_archive(relative)))
@@ -530,7 +536,9 @@ pub(crate) fn validate_directory(
     }
     let mut jobs = Vec::with_capacity(file_paths.len());
     let mut extracted = 0_u64;
-    for (index, (relative, full_path)) in file_paths.into_iter().enumerate() {
+    for (index, observed) in file_paths.into_iter().enumerate() {
+        let relative = observed.relative;
+        let full_path = observed.path;
         if kind == PackageKind::DeckPack {
             validate_deck_file_extension(&relative)?;
         }
@@ -626,22 +634,17 @@ pub(crate) fn validate_directory_snapshot(
             "package tree no longer matches its validated closed layout",
         ));
     }
-    for (relative, path) in observed_files {
-        let expected_file = expected_files.get(&relative).ok_or_else(|| {
+    for observed in observed_files {
+        let expected_file = expected_files.get(&observed.relative).ok_or_else(|| {
             ExtensionError::new(
                 ErrorCode::IntegrityFailed,
-                format!("uncatalogued package file: {relative}"),
+                format!("uncatalogued package file: {}", observed.relative),
             )
         })?;
-        let observed_length = fs::symlink_metadata(&path)
-            .map_err(|error| {
-                ExtensionError::io(ErrorCode::IntegrityFailed, "reinspect package file", &error)
-            })?
-            .len();
-        if observed_length != expected_file.byte_length {
+        if observed.byte_length != expected_file.byte_length {
             return Err(ExtensionError::new(
                 ErrorCode::IntegrityFailed,
-                format!("catalogued file length changed: {relative}"),
+                format!("catalogued file length changed: {}", observed.relative),
             ));
         }
     }
@@ -1472,7 +1475,7 @@ fn scan_directory(
     root: &Path,
     current: &Path,
     depth: usize,
-    files: &mut Vec<(String, PathBuf)>,
+    files: &mut Vec<ObservedDirectoryFile>,
     directories: &mut BTreeSet<String>,
 ) -> Result<()> {
     if depth > MAX_TREE_DEPTH {
@@ -1488,7 +1491,11 @@ fn scan_directory(
             ExtensionError::io(ErrorCode::Io, "read package directory entry", &error)
         })?;
         let path = entry.path();
-        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+        // `DirEntry::metadata` is backed by the directory enumeration data on
+        // Windows. Keep that exact no-follow metadata with the observed path so
+        // closed-tree validation does not issue a second path lookup for every
+        // Codec payload file.
+        let metadata = entry.metadata().map_err(|error| {
             ExtensionError::io(ErrorCode::Io, "inspect package directory entry", &error)
         })?;
         if is_reparse_or_symlink(&metadata) {
@@ -1524,7 +1531,11 @@ fn scan_directory(
                     format!("uncatalogued package file: {portable}"),
                 ));
             }
-            files.push((portable, path));
+            files.push(ObservedDirectoryFile {
+                relative: portable,
+                path,
+                byte_length: metadata.len(),
+            });
             if files.len() > MAX_ARCHIVE_ENTRIES {
                 return Err(ExtensionError::new(
                     ErrorCode::IntegrityFailed,
@@ -1923,6 +1934,61 @@ mod tests {
                 replacement_bytes
             );
         }
+    }
+
+    #[test]
+    fn directory_snapshot_rejects_added_root_and_deep_children() {
+        for unexpected in ["unexpected.bin", "runtime/nested/unexpected.bin"] {
+            let (temp, root, expected) = directory_snapshot_fixture();
+            validate_directory_snapshot(&root, PackageKind::CodecPack, &expected)
+                .expect("baseline closed tree");
+
+            fs::write(root.join(path_from_archive(unexpected)), b"unexpected")
+                .expect("write unexpected child");
+            let error = validate_directory_snapshot(&root, PackageKind::CodecPack, &expected)
+                .expect_err("an added child must invalidate the closed tree");
+
+            assert_eq!(error.code(), ErrorCode::IntegrityFailed);
+            drop(temp);
+        }
+    }
+
+    #[test]
+    fn directory_snapshot_rejects_a_catalogued_length_change() {
+        let (_temp, root, expected) = directory_snapshot_fixture();
+        let payload = root.join("runtime/nested/payload.bin");
+        fs::write(&payload, b"longer").expect("change catalogued file length");
+
+        let error = validate_directory_snapshot(&root, PackageKind::CodecPack, &expected)
+            .expect_err("a changed file length must invalidate the closed tree");
+
+        assert_eq!(error.code(), ErrorCode::IntegrityFailed);
+        assert_eq!(
+            error.detail(),
+            "catalogued file length changed: runtime/nested/payload.bin"
+        );
+    }
+
+    fn directory_snapshot_fixture() -> (
+        tempfile::TempDir,
+        PathBuf,
+        BTreeMap<String, FileMeasurement>,
+    ) {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().join("codec");
+        let payload = root.join("runtime/nested/payload.bin");
+        fs::create_dir_all(payload.parent().expect("payload parent"))
+            .expect("create package directories");
+        fs::write(&payload, b"exact").expect("write catalogued payload");
+        let expected = BTreeMap::from([(
+            "runtime/nested/payload.bin".to_owned(),
+            FileMeasurement {
+                path: "runtime/nested/payload.bin".to_owned(),
+                byte_length: 5,
+                sha256: "0".repeat(64),
+            },
+        )]);
+        (temp, root, expected)
     }
 
     fn copy_catalogued_deck_fixture(destination: &Path) {

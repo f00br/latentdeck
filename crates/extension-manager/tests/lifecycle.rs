@@ -1943,6 +1943,44 @@ fn process_cache_rejects_an_added_child_before_cached_checkout() {
 }
 
 #[test]
+fn process_cache_rejects_a_deep_added_child_before_cached_checkout() {
+    let temp = TempDir::new().expect("temp");
+    let source = temp.path().join("deck-source");
+    fs::create_dir(&source).expect("create source");
+    write_deck_source(&source, "0.2.0", 45);
+    let archive = temp.path().join("deck.ld");
+    let (hash, _) = pack_source(&source, &archive);
+    let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+    let installed = install(
+        &roots,
+        &InstallRequest {
+            archive_path: archive,
+            expected_sha256: hash,
+        },
+    )
+    .expect("install");
+    enable(&roots, &installed.inspection.package).expect("enable");
+    let cache = ActivePackageCache::new();
+    cache
+        .resolve_active(&roots, &installed.inspection.package)
+        .expect("prime cache");
+
+    fs::write(
+        installed.destination.join("python/unexpected.txt"),
+        b"uncatalogued",
+    )
+    .expect("add deep uncatalogued child");
+
+    assert_eq!(
+        cache
+            .resolve_active(&roots, &installed.inspection.package)
+            .expect_err("closed-tree scan must reject a deep added child")
+            .code(),
+        ErrorCode::IntegrityFailed
+    );
+}
+
+#[test]
 fn process_cache_rejects_a_changed_exact_receipt_before_cached_checkout() {
     let temp = TempDir::new().expect("temp");
     let source = temp.path().join("deck-source");

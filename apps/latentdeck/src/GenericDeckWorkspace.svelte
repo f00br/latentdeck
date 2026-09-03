@@ -128,6 +128,7 @@
   let viewportSuspended = false;
   let viewportObservedActive = active;
   let observedModels = models;
+  let extensionsRefreshDeferred = false;
   let publishedCaptureKey = "";
   let extensionsRefreshPending: Promise<void> | null = null;
   let extensionsRefreshRevision = 0;
@@ -228,11 +229,18 @@
   $: if (model.exactKey !== configuredDeckKey) resetForExactDeck();
   $: if (models !== observedModels) {
     observedModels = models;
-    void refreshExtensions();
+    if (active) {
+      extensionsRefreshDeferred = false;
+      void refreshExtensions();
+    } else extensionsRefreshDeferred = true;
   }
   $: if (active !== viewportObservedActive) {
     viewportObservedActive = active;
     if (active) {
+      if (extensionsRefreshDeferred) {
+        extensionsRefreshDeferred = false;
+        void refreshExtensions();
+      }
       viewportSuspended = false;
       viewportRetryAttempt = 0;
       viewportRetryExhausted = false;
