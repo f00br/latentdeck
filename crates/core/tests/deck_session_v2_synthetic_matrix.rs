@@ -2202,13 +2202,13 @@ impl SyntheticWorker {
                 {
                     BUNDLED_D2_ID => (
                         Path::new(&runtime.python_root).join("latentdeck_operator_d2/operator.py"),
-                        "latentdeck_operator_d2.operator:process_sources",
-                        "def process_sources(",
+                        "latentdeck_operator_d2.operator:process_sources_host",
+                        "def process_sources_host(",
                     ),
                     BUNDLED_Q4_ID => (
                         Path::new(&runtime.python_root).join("latentdeck_operator_q4/operator.py"),
-                        "latentdeck_operator_q4.operator:process_sources",
-                        "def process_sources(",
+                        "latentdeck_operator_q4.operator:process_sources_host",
+                        "def process_sources_host(",
                     ),
                     _ => (
                         Path::new(&runtime.python_root).join("synthetic_operator.py"),
