@@ -614,10 +614,7 @@
       profileKey: profile ?? null,
       device,
       deviceOrdinal,
-      sources:
-        profile === undefined
-          ? []
-          : availableSourceIdentities(),
+      sources: profile === undefined ? [] : availableSourceIdentities(),
       selectedSources: profile === undefined ? [] : selectedSourceSet(draft),
     });
     if (profile === undefined) {
@@ -1218,9 +1215,11 @@
     }
     const incoming = await librarySnapshot();
     completedCaptureSource = capturedSource;
-    acceptLibrarySnapshot(incoming, [capturedSource], [
-      capturedSource.archiveSha256,
-    ]);
+    acceptLibrarySnapshot(
+      incoming,
+      [capturedSource],
+      [capturedSource.archiveSha256],
+    );
     if (selectedCodec !== undefined && selectedProfile !== undefined) {
       await refreshRuntimeOptionsInsideAction();
     }
@@ -1440,11 +1439,7 @@
         sources as CartridgeView[],
       );
       draftRevision += 1;
-      acceptLibrarySnapshot(
-        incoming,
-        sources,
-        draft.sourceArchiveSha256s,
-      );
+      acceptLibrarySnapshot(incoming, sources, draft.sourceArchiveSha256s);
       presetMessage =
         "Exact preset v2 loaded as a draft; press Load exact Deck draft.";
       if (selectedProfile !== undefined) await refreshSourceEligibility();
@@ -1868,8 +1863,8 @@
         <summary>
           Codec assets · {(runtimeOptions ?? discovery)?.externalAssets.filter(
             (asset) => asset.bound,
-          ).length ?? 0}/{(runtimeOptions ?? discovery)?.externalAssets.length ??
-            0} bound
+          ).length ?? 0}/{(runtimeOptions ?? discovery)?.externalAssets
+            .length ?? 0} bound
         </summary>
         <div class="asset-grid" aria-label="External Codec assets">
           {#each (runtimeOptions ?? discovery)?.externalAssets ?? [] as asset (asset.assetId)}
@@ -2006,9 +2001,9 @@
       liveCaptureActive={capture?.mode === "live_capture" &&
         capture.state === "capturing"}
       {captureUnavailableReason}
-       {capturedSourceAvailable}
-       {captureReuseAvailable}
-       {sourceGeometryWarning}
+      {capturedSourceAvailable}
+      {captureReuseAvailable}
+      {sourceGeometryWarning}
       mp4Available={recordingAvailable &&
         (decodedRecordingControls(
           recording ?? IDLE_DECODED_RECORDING,

@@ -198,10 +198,7 @@ function idleRecording(): GenericRecordingView {
   };
 }
 
-function sourceCartridge(
-  marker: string,
-  cartridgeId: string,
-): CartridgeView {
+function sourceCartridge(marker: string, cartridgeId: string): CartridgeView {
   return {
     archiveSha256: marker.repeat(64),
     cartridgeId,
@@ -383,7 +380,9 @@ function installHost(state: {
             })),
           });
         case "deck_generic_sources_replace":
-          return state.replaceSources?.(args) ?? Promise.resolve(runtimeSession);
+          return (
+            state.replaceSources?.(args) ?? Promise.resolve(runtimeSession)
+          );
         case "deck_generic_capture_start":
           state.capture = capture("capturing");
           state.outputPin = {
@@ -603,7 +602,9 @@ describe("generic Deck foreground output pin refresh", () => {
       recording: idleRecording(),
       replaceSources: async (args: Record<string, unknown>) => {
         replacements.push(args);
-        const request = args.request as { sources: GenericDeckSessionView["sources"] };
+        const request = args.request as {
+          sources: GenericDeckSessionView["sources"];
+        };
         return { ...session(), sources: request.sources };
       },
     };
@@ -642,8 +643,11 @@ describe("generic Deck foreground output pin refresh", () => {
     expect(replacements).toHaveLength(1);
     expect(replacements[0].sessionId).toBe(SESSION_ID);
     expect(
-      (replacements[0].request as { sources: GenericDeckSessionView["sources"] })
-        .sources,
+      (
+        replacements[0].request as {
+          sources: GenericDeckSessionView["sources"];
+        }
+      ).sources,
     ).toEqual([
       {
         cartridgeId: "captured-cartridge",
@@ -652,7 +656,9 @@ describe("generic Deck foreground output pin refresh", () => {
       { cartridgeId: "source-b", archiveSha256: "b".repeat(64) },
     ]);
     expect(
-      invokeMock.mock.calls.filter(([command]) => command === "deck_generic_open"),
+      invokeMock.mock.calls.filter(
+        ([command]) => command === "deck_generic_open",
+      ),
     ).toHaveLength(0);
 
     await unmount(component);
