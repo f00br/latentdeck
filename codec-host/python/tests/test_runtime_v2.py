@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import json
+import shutil
 import sys
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -16,12 +19,14 @@ from latentdeck_codec_host.runtime_v2 import (
     _device_matches_codec_load,
 )
 from latentdeck_codec_sdk import Capability, ProtocolError, TensorAccessDescriptor
+from latentdeck_deck_sdk import DeckOperatorContext, DeckOperatorResult
 
 PROFILE = {
     "codec_family": "test_codec",
     "profile": "synthetic_latent",
     "profile_version": "1.0.0",
 }
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 
 @pytest.mark.parametrize(
@@ -734,6 +739,59 @@ def _assert_no_bulk_data(value: object) -> None:
         assert value.__class__.__module__.split(".", maxsplit=1)[0] != "torch"
 
 
+def _bundled_deck_runtime_fixture(tmp_path: Path, deck_name: str) -> tuple[dict[str, object], Path]:
+    source_root = REPOSITORY_ROOT / "operators" / "builtin" / deck_name / "package"
+    descriptor = json.loads((source_root / "operator.json").read_text(encoding="utf-8"))
+    assert isinstance(descriptor, dict)
+    python_root = tmp_path / f"bundled-{deck_name}-deck-pack" / "python"
+    shutil.copytree(source_root / "python", python_root)
+    return descriptor, python_root
+
+
+def _descriptor_default_controls(
+    descriptor: Mapping[str, object],
+) -> list[dict[str, object]]:
+    raw_controls = descriptor["controls"]
+    assert isinstance(raw_controls, list) and raw_controls
+    wire_kinds = {
+        "boolean": "boolean",
+        "integer": "integer",
+        "number": "number",
+        "enum": "text",
+        "text": "text",
+    }
+    controls: list[dict[str, object]] = []
+    for raw in raw_controls:
+        assert isinstance(raw, dict)
+        value_type = raw["value_type"]
+        assert isinstance(value_type, str) and value_type in wire_kinds
+        controls.append(
+            {
+                "name": raw["control_id"],
+                "value": {"kind": wire_kinds[value_type], "value": raw["default"]},
+            }
+        )
+    return controls
+
+
+@contextmanager
+def _isolated_module_namespace(prefix: str) -> Iterator[None]:
+    saved = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == prefix or name.startswith(f"{prefix}.")
+    }
+    for name in saved:
+        sys.modules.pop(name, None)
+    try:
+        yield
+    finally:
+        for name in tuple(sys.modules):
+            if name == prefix or name.startswith(f"{prefix}."):
+                sys.modules.pop(name, None)
+        sys.modules.update(saved)
+
+
 def test_metadata_discovery_does_not_import_torch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1078,6 +1136,221 @@ def test_synthetic_non_h3_deck_processes_bounded_source_arities_exactly(
     )
     _assert_ack(reply, "deck.process")
     assert second.provenance["history_present"] == [True] * source_count
+
+
+@pytest.mark.parametrize(
+    (
+        "deck_name",
+        "source_count",
+        "module_name",
+        "expected_operator_id",
+        "expected_first_value",
+    ),
+    [
+        (
+            "d2",
+            2,
+            "latentdeck_operator_d2.operator",
+            "org.latentdeck.builtin.ld_d2",
+            1.5,
+        ),
+        (
+            "q4",
+            4,
+            "latentdeck_operator_q4.operator",
+            "org.latentdeck.builtin.ld_q4",
+            1.0,
+        ),
+    ],
+)
+def test_synthetic_non_h3_runtime_executes_exact_bundled_deck_operators(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    deck_name: str,
+    source_count: int,
+    module_name: str,
+    expected_operator_id: str,
+    expected_first_value: float,
+) -> None:
+    codec_python_root = tmp_path / "synthetic-non-h3-codec-pack" / "python"
+    codec_python_root.mkdir(parents=True)
+    worker, sink, harness, factory = _worker(codec_python_root, monkeypatch, deck_entrypoints=())
+    _describe_codec(harness)
+    synthetic_codec_module = sys.modules["synthetic_codec_package"]
+    assert (
+        Path(synthetic_codec_module.__file__).resolve().is_relative_to(codec_python_root.resolve())
+    )
+    sources = [
+        _bind_and_validate(worker, harness, factory, slot=index, seed=index)[2]
+        for index in range(1, source_count + 1)
+    ]
+    _load_codec(harness)
+    descriptor, deck_python_root = _bundled_deck_runtime_fixture(tmp_path, deck_name)
+    controls = _descriptor_default_controls(descriptor)
+    control_names = [str(control["name"]) for control in controls]
+    assert control_names != sorted(control_names)
+    roles = [
+        {"role": role, "physical_slot": index}
+        for index, role in enumerate(descriptor["role_ids"], start=1)
+    ]
+    deck_id = uuid.uuid4()
+    load_payload = {
+        "deck_session_id": str(deck_id),
+        "deck_id": descriptor["deck_id"],
+        "deck_version": descriptor["deck_version"],
+        "operator_id": descriptor["operator_id"],
+        "operator_version": descriptor["operator_version"],
+        "runtime": {
+            "deck_id": descriptor["deck_id"],
+            "deck_version": descriptor["deck_version"],
+            "operator_id": descriptor["operator_id"],
+            "operator_version": descriptor["operator_version"],
+            "python_root": str(deck_python_root.resolve()),
+            "entrypoint": descriptor["entrypoint"],
+            "package_manifest_sha256": "a" * 64,
+            "integrity_catalog_sha256": "b" * 64,
+        },
+        "sources": sources,
+        "roles": roles,
+        "controls": controls,
+        "seed": 0x5EED,
+        "stream_generation": 1,
+    }
+
+    runtime_module = sys.modules[Protocol2Worker.__module__]
+    original_process_sources_checked = runtime_module.process_sources_checked
+    operator_calls: list[dict[str, object]] = []
+
+    def observe_exact_operator_call(
+        operator: Callable[..., DeckOperatorResult],
+        tensors: tuple[object, ...],
+        values: Mapping[str, object],
+        context: DeckOperatorContext,
+    ) -> DeckOperatorResult:
+        result = original_process_sources_checked(operator, tensors, values, context)
+        operator_calls.append(
+            {
+                "operator": operator,
+                "control_names": tuple(values),
+                "context": context,
+                "source_tensors": tensors,
+                "output": result.output.detach().clone(),
+                "provenance": dict(result.provenance),
+            }
+        )
+        return result
+
+    monkeypatch.setattr(runtime_module, "process_sources_checked", observe_exact_operator_call)
+
+    def process(generation: int) -> tuple[dict[str, object], ProcessReceipt]:
+        reply, result = harness.command(
+            "deck.process",
+            {
+                "deck_session_id": str(deck_id),
+                "deck_revision": 1,
+                "stream_generation": generation,
+            },
+        )
+        _assert_ack(reply, "deck.process")
+        assert isinstance(result, ProcessReceipt)
+        return reply["message"]["body"]["ack"]["payload"]["status"], result
+
+    package_name = module_name.split(".", maxsplit=1)[0]
+    with _isolated_module_namespace(package_name):
+        reply, _ = harness.command("deck.load", load_payload)
+        _assert_ack(reply, "deck.load")
+        load_status = reply["message"]["body"]["ack"]["payload"]
+        assert load_status["controls"] == controls
+        assert load_status["roles"] == roles
+
+        first_status, first_result = process(1)
+        second_status, second_result = process(1)
+        assert first_status["state"] == "playing"
+        assert first_status["stream_sequence"] == 1
+        assert second_status["stream_sequence"] == 2
+        assert first_status["controls"] == controls
+        assert first_status["roles"] == roles
+
+        reply, _ = harness.command(
+            "deck.reset",
+            {
+                "deck_session_id": str(deck_id),
+                "deck_revision": 1,
+                "new_stream_generation": 2,
+                "preserve_playheads": False,
+            },
+        )
+        _assert_ack(reply, "deck.reset")
+        replay_status, replay_result = process(2)
+
+        imported_operator = sys.modules[module_name]
+        assert Path(imported_operator.__file__).resolve().is_relative_to(deck_python_root.resolve())
+
+    assert "synthetic_deck_package" not in sys.modules
+    assert len(operator_calls) == 3
+    first_call, second_call, replay_call = operator_calls
+    operator = first_call["operator"]
+    assert operator.__module__ == module_name
+    assert operator.__name__ == "process_sources"
+    assert first_call["control_names"] == tuple(control_names)
+
+    first_context = first_call["context"]
+    second_context = second_call["context"]
+    replay_context = replay_call["context"]
+    assert first_context.codec_family == "test_codec"
+    assert first_context.profile == "synthetic_latent"
+    assert all(previous is None for previous in first_context.previous_sources)
+    assert all(previous is not None for previous in second_context.previous_sources)
+    assert all(previous is None for previous in replay_context.previous_sources)
+
+    torch = importlib.import_module("torch")
+    assert all(
+        torch.equal(previous, source)
+        for previous, source in zip(
+            second_context.previous_sources,
+            first_call["source_tensors"],
+            strict=True,
+        )
+    )
+    first_output = first_call["output"]
+    replay_output = replay_call["output"]
+    assert torch.is_tensor(first_output)
+    assert tuple(first_output.shape) == (1, 4, 1, 2, 3)
+    assert first_output.dtype == torch.float32
+    assert first_output.device.type == "cpu"
+    assert first_output.is_contiguous()
+    assert bool(torch.isfinite(first_output).all().item())
+    torch.testing.assert_close(first_output, torch.full_like(first_output, expected_first_value))
+    torch.testing.assert_close(replay_output, first_output)
+
+    assert first_result.latent_shape == (1, 4, 1, 2, 3)
+    assert first_result.latent_dtype == "float32"
+    assert first_result.latent_device == "cpu"
+    assert first_result.provenance["operation"]["operator_id"] == expected_operator_id
+    assert first_result.provenance["profile"]["codec_family"] == "test_codec"
+    assert first_result.provenance == first_call["provenance"]
+    assert replay_result.provenance == first_result.provenance
+    assert second_result.provenance["operation"]["operator_id"] == expected_operator_id
+    if deck_name == "d2":
+        assert first_result.provenance["history"] == {
+            "previous_a_supplied": False,
+            "previous_b_supplied": False,
+        }
+        assert second_result.provenance["history"] == {
+            "previous_a_supplied": True,
+            "previous_b_supplied": True,
+        }
+    else:
+        assert [donor["playhead"] for donor in second_result.provenance["roles"]["donors"]] == [
+            1,
+            1,
+            1,
+        ]
+
+    replay_status_without_generation = dict(replay_status)
+    replay_status_without_generation["stream_generation"] = 1
+    assert replay_status_without_generation == first_status
+    assert len(sink.deliveries) == 3
 
 
 def test_deck_status_preserves_non_alphabetical_control_order_during_startup(
