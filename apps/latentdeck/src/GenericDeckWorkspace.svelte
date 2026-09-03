@@ -144,6 +144,8 @@
   let captureAvailable = false;
   let captureUnavailableReason = "Load and foreground an exact session first.";
   let recordingAvailable = false;
+  let captureIsActive = false;
+  let recordingIsActive = false;
 
   $: codecOptions = codecOptionsForExactDeck(model.exactKey, extensions.matrix);
   $: selectedCodec = codecOptions.find(
@@ -172,19 +174,31 @@
   }
   $: playheads = playheadsFor(model, selectedSession);
   $: sourceOptions = library.cartridges.map((cartridge) =>
-    sourceOption(cartridge),
+    sourceOption(cartridge, selectedProfile, runtimeOptions),
   );
-  $: runtimeAvailable = exactRuntimeAvailable();
-  $: runtimeUnavailableReason = describeRuntimeAvailability();
+  $: runtimeAvailable = exactRuntimeAvailable(
+    selectedCodec,
+    selectedProfile,
+    runtimeOptions,
+  );
+  $: runtimeUnavailableReason = describeRuntimeAvailability(
+    selectedCodec,
+    selectedDevice,
+    discovery,
+    selectedProfile,
+    runtimeOptions,
+  );
   $: loadAvailable = sessionCapacityState(sessions.sessions.length).canOpen;
+  $: captureIsActive = captureActive(capture);
+  $: recordingIsActive = recordingActive(recording);
   $: captureAvailable =
     selectedSessionReady &&
     selectedSession?.foreground === true &&
     selectedSession.runtime.faultCode === null &&
-    !recordingActive() &&
+    !recordingIsActive &&
     model.requiredCapabilities.includes("snapshot_capture") &&
     model.requiredCapabilities.includes("live_capture");
-  $: captureUnavailableReason = recordingActive()
+  $: captureUnavailableReason = recordingIsActive
     ? "MP4 recording pins the foreground output lease."
     : selectedSession?.foreground !== true
       ? "Capture requires this exact session to own the foreground output lease."
@@ -193,7 +207,7 @@
     selectedSessionReady &&
     selectedSession?.foreground === true &&
     selectedSession.runtime.faultCode === null &&
-    !captureActive();
+    !captureIsActive;
   $: if (model.exactKey !== configuredDeckKey) resetForExactDeck();
   $: if (models !== observedModels) {
     observedModels = models;
@@ -287,37 +301,58 @@
   }
 
   async function selectCodec(event: Event): Promise<void> {
-    selectedCodecKey = (event.currentTarget as HTMLSelectElement).value;
+    const codecKey = (event.currentTarget as HTMLSelectElement).value;
+    selectedCodecKey = codecKey;
     selectedProfileKey = "";
     discovery = null;
     runtimeOptions = null;
-    if (selectedCodec?.reason !== "compatible") {
+    const codec = codecOptions.find((option) => option.exactKey === codecKey);
+    if (codec?.reason !== "compatible") {
       message =
-        selectedCodec === undefined
+        codec === undefined
           ? "Choose an exact Codec version."
-          : compatibilityReasonLabel(selectedCodec.reason);
+          : compatibilityReasonLabel(codec.reason);
       return;
     }
-    await discoverRuntime();
+    await discoverRuntime(codec, selectedDevice);
   }
 
   async function selectDevice(event: Event): Promise<void> {
-    selectedDevice = (event.currentTarget as HTMLSelectElement).value as
+    const device = (event.currentTarget as HTMLSelectElement).value as
       GenericDevice | "";
+    selectedDevice = device;
     selectedProfileKey = "";
     discovery = null;
     runtimeOptions = null;
-    await discoverRuntime();
+    await discoverRuntime(selectedCodec, device);
   }
 
-  async function discoverRuntime(): Promise<void> {
+  async function rediscoverRuntimeAfterOrdinalChange(): Promise<void> {
     const codec = selectedCodec;
     const device = selectedDevice;
-    if (codec?.reason !== "compatible" || device === "" || busy) {
-      return;
+    const retainedProfileKey = selectedProfileKey;
+    discovery = null;
+    runtimeOptions = null;
+    const nextDiscovery = await discoverRuntime(codec, device);
+    if (retainedProfileKey === "" || nextDiscovery === null) return;
+    const retainedProfile = nextDiscovery.profiles.find(
+      (candidate) => profileKey(candidate) === retainedProfileKey,
+    );
+    if (retainedProfile !== undefined) {
+      await refreshSourceEligibility(codec, retainedProfile, device);
     }
+  }
+
+  async function discoverRuntime(
+    codec: GenericCodecOption | undefined = selectedCodec,
+    device: GenericDevice | "" = selectedDevice,
+  ): Promise<GenericRuntimeOptions | null> {
+    if (codec?.reason !== "compatible" || device === "" || busy) {
+      return null;
+    }
+    let nextDiscovery: GenericRuntimeOptions | null = null;
     await run(async () => {
-      discovery = await genericDeckClient.runtimeOptions({
+      const next = await genericDeckClient.runtimeOptions({
         deckId: model.deckId,
         deckVersion: model.deckVersion,
         codecId: codec.codecId,
@@ -327,27 +362,35 @@
         deviceOrdinal,
         sources: [],
       });
+      nextDiscovery = next;
+      discovery = next;
       selectedProfileKey = retainExactSelection(
         selectedProfileKey,
-        discovery.profiles.map(profileKey),
+        next.profiles.map(profileKey),
       );
       runtimeOptions = null;
       message =
-        discovery.reason === "compatible"
+        next.reason === "compatible"
           ? "Choose one exact compatible Codec profile."
-          : compatibilityReasonLabel(discovery.reason);
+          : compatibilityReasonLabel(next.reason);
     });
+    return nextDiscovery;
   }
 
   async function selectProfile(event: Event): Promise<void> {
-    selectedProfileKey = (event.currentTarget as HTMLSelectElement).value;
-    await refreshSourceEligibility();
+    const nextProfileKey = (event.currentTarget as HTMLSelectElement).value;
+    selectedProfileKey = nextProfileKey;
+    const profile = profiles.find(
+      (candidate) => profileKey(candidate) === nextProfileKey,
+    );
+    await refreshSourceEligibility(selectedCodec, profile, selectedDevice);
   }
 
-  async function refreshSourceEligibility(): Promise<void> {
-    const codec = selectedCodec;
-    const profile = selectedProfile;
-    const device = selectedDevice;
+  async function refreshSourceEligibility(
+    codec: GenericCodecOption | undefined = selectedCodec,
+    profile: GenericProfileKey | undefined = selectedProfile,
+    device: GenericDevice | "" = selectedDevice,
+  ): Promise<void> {
     if (codec === undefined || profile === undefined || device === "" || busy) {
       runtimeOptions = null;
       return;
@@ -400,38 +443,56 @@
   }
 
   async function refreshRuntimeOptionsInsideAction(): Promise<void> {
-    if (
-      selectedCodec === undefined ||
-      selectedProfile === undefined ||
-      selectedDevice === ""
-    ) {
-      return;
-    }
-    runtimeOptions = await genericDeckClient.runtimeOptions({
+    const codec = selectedCodec;
+    const profile = selectedProfile;
+    const device = selectedDevice;
+    if (codec === undefined || device === "") return;
+    const next = await genericDeckClient.runtimeOptions({
       deckId: model.deckId,
       deckVersion: model.deckVersion,
-      codecId: selectedCodec.codecId,
-      codecVersion: selectedCodec.codecVersion,
-      profileKey: selectedProfile,
-      device: selectedDevice,
+      codecId: codec.codecId,
+      codecVersion: codec.codecVersion,
+      profileKey: profile ?? null,
+      device,
       deviceOrdinal,
-      sources: library.cartridges
-        .filter((cartridge) => cartridge.availability === "present")
-        .map((cartridge) => ({
-          cartridgeId: cartridge.cartridgeId,
-          archiveSha256: cartridge.archiveSha256,
-        })),
+      sources:
+        profile === undefined
+          ? []
+          : library.cartridges
+              .filter((cartridge) => cartridge.availability === "present")
+              .map((cartridge) => ({
+                cartridgeId: cartridge.cartridgeId,
+                archiveSha256: cartridge.archiveSha256,
+              })),
     });
+    if (profile === undefined) {
+      discovery = next;
+      runtimeOptions = null;
+      message =
+        next.reason === "compatible"
+          ? "Choose one exact compatible Codec profile."
+          : compatibilityReasonLabel(next.reason);
+      return;
+    }
+    runtimeOptions = next;
+    message =
+      runtimeOptions.reason === "compatible"
+        ? "Exact runtime preflight complete."
+        : compatibilityReasonLabel(runtimeOptions.reason);
   }
 
-  function sourceOption(cartridge: CartridgeView) {
-    const eligibility = runtimeOptions?.sources.find(
+  function sourceOption(
+    cartridge: CartridgeView,
+    profile: GenericProfileKey | undefined,
+    options: GenericRuntimeOptions | null,
+  ) {
+    const eligibility = options?.sources.find(
       (candidate) =>
         candidate.archiveSha256 === cartridge.archiveSha256 &&
         candidate.cartridgeId === cartridge.cartridgeId,
     );
     const incompatibilityReason =
-      selectedProfile === undefined
+      profile === undefined
         ? "Select an exact Codec profile"
         : eligibility === undefined
           ? "Host source preflight unavailable"
@@ -446,36 +507,47 @@
     };
   }
 
-  function exactRuntimeAvailable(): boolean {
+  function exactRuntimeAvailable(
+    codec: GenericCodecOption | undefined,
+    profile: GenericProfileKey | undefined,
+    options: GenericRuntimeOptions | null,
+  ): boolean {
     if (
-      selectedCodec?.reason !== "compatible" ||
-      selectedProfile === undefined ||
-      runtimeOptions?.reason !== "compatible"
+      codec?.reason !== "compatible" ||
+      profile === undefined ||
+      options?.reason !== "compatible"
     ) {
       return false;
     }
-    return runtimeOptions.externalAssets.every(
+    return options.externalAssets.every(
       (asset) => !asset.required || asset.bound,
     );
   }
 
-  function describeRuntimeAvailability(): string {
-    if (selectedCodec === undefined) return "Choose an exact Codec version.";
-    if (selectedCodec.reason !== "compatible") {
-      return compatibilityReasonLabel(selectedCodec.reason);
+  function describeRuntimeAvailability(
+    codec: GenericCodecOption | undefined,
+    device: GenericDevice | "",
+    runtimeDiscovery: GenericRuntimeOptions | null,
+    profile: GenericProfileKey | undefined,
+    options: GenericRuntimeOptions | null,
+  ): string {
+    if (codec === undefined) return "Choose an exact Codec version.";
+    if (codec.reason !== "compatible") {
+      return compatibilityReasonLabel(codec.reason);
     }
-    if (selectedDevice === "") return "Choose the negotiated runtime device.";
-    if (discovery === null) return "Exact Codec discovery has not completed.";
-    if (discovery.reason !== "compatible") {
-      return compatibilityReasonLabel(discovery.reason);
+    if (device === "") return "Choose the negotiated runtime device.";
+    if (runtimeDiscovery === null)
+      return "Exact Codec discovery has not completed.";
+    if (profile === undefined) {
+      return runtimeDiscovery.reason === "compatible"
+        ? "Choose an exact Codec profile."
+        : compatibilityReasonLabel(runtimeDiscovery.reason);
     }
-    if (selectedProfile === undefined) return "Choose an exact Codec profile.";
-    if (runtimeOptions === null)
-      return "Exact source preflight has not completed.";
-    if (runtimeOptions.reason !== "compatible") {
-      return compatibilityReasonLabel(runtimeOptions.reason);
+    if (options === null) return "Exact source preflight has not completed.";
+    if (options.reason !== "compatible") {
+      return compatibilityReasonLabel(options.reason);
     }
-    const missing = runtimeOptions.externalAssets.filter(
+    const missing = options.externalAssets.filter(
       (asset) => asset.required && !asset.bound,
     );
     return missing.length === 0
@@ -1051,25 +1123,25 @@
       : `${capture.mode ?? "capture"} · ${capture.state} · ${capture.latentSlots} slots`;
   }
 
-  function captureActive(): boolean {
+  function captureActive(value: GenericCaptureView | null): boolean {
     return (
-      capture?.state === "starting" ||
-      capture?.state === "capturing" ||
-      capture?.state === "finalizing"
+      value?.state === "starting" ||
+      value?.state === "capturing" ||
+      value?.state === "finalizing"
     );
   }
 
-  function recordingActive(): boolean {
+  function recordingActive(value: GenericRecordingView | null): boolean {
     return (
-      recording?.state === "armed" ||
-      recording?.state === "recording" ||
-      recording?.state === "finalizing"
+      value?.state === "armed" ||
+      value?.state === "recording" ||
+      value?.state === "finalizing"
     );
   }
 
   function activeOutputPinKind(): "capture" | "mp4" | null {
-    if (captureActive()) return "capture";
-    if (recordingActive()) return "mp4";
+    if (captureActive(capture)) return "capture";
+    if (recordingActive(recording)) return "mp4";
     return null;
   }
 
@@ -1132,7 +1204,7 @@
           step="1"
           bind:value={deviceOrdinal}
           disabled={busy || selectedDevice === ""}
-          onchange={() => void discoverRuntime()}
+          onchange={() => void rediscoverRuntimeAfterOrdinalChange()}
         />
       </label>
       <label>
@@ -1331,7 +1403,7 @@
           : "Record MP4…"}</button
       >
       <small
-        >{captureActive()
+        >{captureIsActive
           ? "Latent capture pins the foreground output lease."
           : describeDecodedRecording(
               recording ?? IDLE_DECODED_RECORDING,
@@ -1356,7 +1428,7 @@
       {playheads}
       captureState={captureState()}
       {captureAvailable}
-      captureActive={captureActive()}
+      captureActive={captureIsActive}
       liveCaptureActive={capture?.mode === "live_capture" &&
         capture.state === "capturing"}
       {captureUnavailableReason}

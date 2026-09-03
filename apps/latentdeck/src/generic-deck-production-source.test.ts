@@ -28,10 +28,8 @@ describe("generic Deck production surface", () => {
     expect(clientSource).not.toMatch(/deck_d2_|deck_q4_/);
     expect(clientSource).not.toMatch(/fallback|newest|unique/i);
     expect(workspaceSource).toContain("deckVersion: model.deckVersion");
-    expect(workspaceSource).toContain(
-      "codecVersion: selectedCodec.codecVersion",
-    );
-    expect(workspaceSource).toContain("profileKey: selectedProfile");
+    expect(workspaceSource).toContain("codecVersion: codec.codecVersion");
+    expect(workspaceSource).toContain("profileKey: profile");
     expect(workspaceSource).toContain(
       "if (extensionsRefreshPending !== null) return extensionsRefreshPending",
     );

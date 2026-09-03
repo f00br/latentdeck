@@ -211,6 +211,16 @@ function clickButton(target: HTMLElement, label: string): void {
   flushSync();
 }
 
+function findButton(target: HTMLElement, label: string): HTMLButtonElement {
+  const button = Array.from(target.querySelectorAll("button")).find(
+    (candidate) => candidate.textContent?.trim() === label,
+  );
+  if (!(button instanceof HTMLButtonElement)) {
+    throw new Error(`Missing button: ${label}`);
+  }
+  return button;
+}
+
 async function settleUi(): Promise<void> {
   for (let index = 0; index < 8; index += 1) {
     await Promise.resolve();
@@ -344,6 +354,10 @@ describe("generic Deck foreground output pin refresh", () => {
     clickButton(target, "Start Live Capture");
     await settleUi();
     expect(target.textContent).toContain("Pinned by capture");
+    expect(findButton(target, "Record MP4…").disabled).toBe(true);
+    expect(target.textContent).toContain(
+      "Latent capture pins the foreground output lease.",
+    );
     expect(sessionsGetCount()).toBe(2);
 
     await vi.advanceTimersByTimeAsync(500);
@@ -371,6 +385,7 @@ describe("generic Deck foreground output pin refresh", () => {
     await vi.advanceTimersByTimeAsync(500);
     await settleUi();
     expect(target.textContent).toContain("Output lease unpinned");
+    expect(findButton(target, "Record MP4…").disabled).toBe(false);
     expect(sessionsGetCount()).toBe(6);
 
     await vi.advanceTimersByTimeAsync(500);
@@ -395,6 +410,10 @@ describe("generic Deck foreground output pin refresh", () => {
     clickButton(target, "Record MP4…");
     await settleUi();
     expect(target.textContent).toContain("Pinned by mp4");
+    expect(findButton(target, "Snapshot").disabled).toBe(true);
+    expect(target.textContent).toContain(
+      "MP4 recording pins the foreground output lease.",
+    );
     expect(sessionsGetCount()).toBe(2);
 
     await vi.advanceTimersByTimeAsync(500);
@@ -422,6 +441,7 @@ describe("generic Deck foreground output pin refresh", () => {
     await vi.advanceTimersByTimeAsync(500);
     await settleUi();
     expect(target.textContent).toContain("Output lease unpinned");
+    expect(findButton(target, "Snapshot").disabled).toBe(false);
     expect(sessionsGetCount()).toBe(6);
 
     await vi.advanceTimersByTimeAsync(500);

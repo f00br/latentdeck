@@ -59,7 +59,11 @@ describe("decoded MP4 recording policy", () => {
     expect(genericWorkspace).toContain("recordingAction()");
     expect(genericWorkspace).toContain("Record MP4");
     expect(genericWorkspace).toContain("video-only H.264");
-    expect(genericWorkspace).toContain("recordingActive()");
-    expect(genericWorkspace).toContain("captureActive()");
+    expect(genericWorkspace).toContain(
+      "$: recordingIsActive = recordingActive(recording)",
+    );
+    expect(genericWorkspace).toContain(
+      "$: captureIsActive = captureActive(capture)",
+    );
   });
 });
