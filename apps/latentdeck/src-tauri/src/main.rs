@@ -2,7 +2,7 @@
 
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
     time::SystemTime,
 };
@@ -65,6 +65,15 @@ struct ExitLifecycle {
     ready: AtomicBool,
 }
 
+const APP_LOCAL_DATA_DIRECTORY: &str = "studio.latentdeck.deck";
+
+#[derive(Clone)]
+struct AppLocalDataDir(PathBuf);
+
+fn app_local_data_dir(local_app_data: &Path) -> PathBuf {
+    local_app_data.join(APP_LOCAL_DATA_DIRECTORY)
+}
+
 #[tauri::command]
 const fn product_version() -> &'static str {
     latentdeck_core::product_version()
@@ -75,6 +84,7 @@ const fn product_version() -> &'static str {
 async fn deck_save_diagnostics(
     app: AppHandle,
     generic: State<'_, GenericDeckAppState>,
+    app_local_data: State<'_, AppLocalDataDir>,
 ) -> Result<DiagnosticSaveResult, library_state::CommandError> {
     let suggested_name = format!("latentdeck-diagnostics-{}.zip", current_unix_ms()? / 1_000);
     let selected = app
@@ -101,16 +111,7 @@ async fn deck_save_diagnostics(
         .map_err(|error| diagnostic_command_error(&error))?;
     let snapshot = deck_snapshot(captured_at_unix_ms, diagnostics, last_error)
         .map_err(|error| diagnostic_command_error(&error))?;
-    let deck_log_root = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|_| {
-            library_state::CommandError::new(
-                "diagnostics.log_root_unavailable",
-                "LatentDeck could not resolve its installed diagnostic log folder.",
-            )
-        })?
-        .join("logs");
+    let deck_log_root = app_local_data.0.join("logs");
     let worker_log_root = std::env::temp_dir()
         .join("LatentDeck")
         .join("worker-diagnostics");
@@ -203,6 +204,11 @@ fn main() {
     let local_app_data = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .expect("LOCALAPPDATA is required for the LatentDeck extension roots");
+    assert!(
+        local_app_data.is_absolute(),
+        "LOCALAPPDATA must be an absolute path"
+    );
+    let app_local_data = app_local_data_dir(&local_app_data);
     let extension_roots = ExtensionRoots::from_local_app_data(local_app_data);
     let generic_app_data = extension_roots.base_root.clone();
     let bundled_deck_report = bundled_decks::provision_bundled_decks(&extension_roots)
@@ -213,8 +219,9 @@ fn main() {
         .manage(HostFullscreenController::new())
         .manage(ExtensionManagerState::new(extension_roots))
         .manage(GenericDeckAppState::new(generic_app_data))
+        .manage(AppLocalDataDir(app_local_data.clone()))
         .setup(move |app| {
-            let app_data_dir = app.path().app_local_data_dir()?;
+            let app_data_dir = app_local_data.clone();
             fs::create_dir_all(&app_data_dir)?;
             if initialize_global_json_log(&app_data_dir.join("logs"), "latentdeck").is_ok() {
                 record_global(LogLevel::Info, "app.started", None);
@@ -343,5 +350,24 @@ mod tests {
         let error = validate_diagnostic_destination(destination).expect_err("must reject");
         let value = serde_json::to_value(error).expect("serialize");
         assert_eq!(value["code"], "diagnostics.destination_invalid");
+    }
+
+    #[test]
+    fn app_data_dir_uses_the_same_explicit_local_root_as_extensions() {
+        let local_app_data = PathBuf::from("explicit-local-app-data-root");
+        assert_eq!(
+            app_local_data_dir(&local_app_data),
+            local_app_data.join(APP_LOCAL_DATA_DIRECTORY)
+        );
+    }
+
+    #[test]
+    fn app_data_directory_matches_the_tauri_identifier() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("Tauri config JSON");
+        assert_eq!(
+            config.get("identifier").and_then(serde_json::Value::as_str),
+            Some(APP_LOCAL_DATA_DIRECTORY)
+        );
     }
 }
