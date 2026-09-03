@@ -9,6 +9,16 @@ the state a new agent should act on, not the history of the milestone.
   Protocol 2 modular-runtime milestone with no known product defect remaining.
 - The accepted implementation checkpoint is clean `main` commit
   `3648e7c634c4310767165ce8975129323a5c09f2`.
+- On 2026-09-04 clean `main` documentation checkpoint
+  `0fd1303852727f26a643d95cd049bb7b845dd9ed` repeated the aggregate workspace
+  and public-tree gates and produced the unsigned first-install UAT artifact
+  sets. The application set contains both installers; the independent H3 set
+  contains setup plus the exact adjacent `.ldcodec`, and its archive and
+  isolated-installed CUDA runtime smokes passed.
+- The development installations and stale test profiles are removed. The exact
+  UAT artifact directories, their generated receipts, and their clean source
+  clone are retained locally; superseded development clones were moved to the
+  Recycle Bin.
 - Application version remains `0.1.0`. H3 Codec Pack and adapter are `0.2.0`.
   Bundled D2 and Q4 Deck packages are `0.2.1`.
 - `.lc` remains the codec-neutral data format. Installable Decks use only `.ld`;
@@ -66,24 +76,19 @@ source handoff.
 
 ## Current local delivery step
 
-The development installations and stale test profiles were removed before the
-new first-install pass. After this documentation commit, build one fresh
-unsigned set from a new clean short-path clone of the exact final `main` HEAD:
+The clean `0fd1303` build is complete. Its generated receipts and
+`SHA256SUMS.txt` identify the exact unsigned UAT bytes; keep every complete
+artifact directory with its SBOM and notices and never combine output from
+different commits. The current post-build documentation commit deliberately
+makes that binary set an older source snapshot under the repository rules. It
+is retained only for the owner's pending first-install UAT and must not be
+called a current publication candidate.
 
-1. Run `tools/Test-PublicTree.ps1` and `tools/Check-Workspace.ps1` in that clone.
-2. Run `tools/Build-ReleaseCandidate.ps1` for the two application installers.
-3. Run `tools/Build-H3CodecPack.ps1` with the pinned CPython archive,
-   `-PackVersion 0.2.0`, and `-RequireCuda` for the H3 setup plus adjacent
-   `.ldcodec`.
-4. Keep each complete artifact directory with its receipt, checksums, SBOM, and
-   notices. Never combine output from different commits.
-5. Preserve that exact clean clone as the sole current build clone; remove
-   superseded development clones only after exact path and process checks.
-
-The owner will perform the short first-install UAT using those generated
-installers. If it passes, the next agent owns final public documentation,
-repository presentation, release notes, legal/security review, signing
-preparation, and the publication checklist.
+The next action is the short owner first-install UAT on the clean current-user
+state. If it passes, the next agent owns final public documentation, repository
+presentation, release notes, legal/security review, signing preparation, and
+the publication checklist. Rebuild all release artifacts from the final
+accepted source/documentation commit before publication review.
 
 ## Next action for a fresh agent
 

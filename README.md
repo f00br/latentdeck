@@ -52,18 +52,24 @@ and publication preparation. The repository contains:
   strict registry equality, and isolated CPU visual acceptance;
 - a policy for local-only, non-binding interface references.
 
-The exact `3648e7c` clean clone passed the aggregate workspace gate: 172 Deck
-frontend tests, 49 Player frontend tests, 694 Rust tests, and 422 Python tests,
-with the expected private/child-process tests ignored. The owner then accepted
-Player, D2, Q4, realtime controls, smooth playback, roles, finite non-loop EOF,
-Snapshot, Live Capture and replay, MP4, fullscreen, Spout, external compatible
-and incompatible Deck lifecycle, four warm sessions, output-lease pinning, and
-the final compact declarative UI on the real CUDA/H3 runtime.
+The exact `3648e7c` implementation clone passed the aggregate workspace gate:
+172 Deck frontend tests, 49 Player frontend tests, 694 Rust tests, and 422 Python
+tests, with the expected private/child-process tests ignored. The owner then
+accepted Player, D2, Q4, realtime controls, smooth playback, roles, finite
+non-loop EOF, Snapshot, Live Capture and replay, MP4, fullscreen, Spout,
+external compatible and incompatible Deck lifecycle, four warm sessions,
+output-lease pinning, and the final compact declarative UI on the real CUDA/H3
+runtime.
 
-No current installer is a public release. Fresh unsigned application installers
-and H3 `0.2.0` setup/adjacent `.ldcodec` are built only after the final
-documentation commit. First-install UAT, authenticated signing, detailed
-publication review, and owner-authorized publication remain open. See the
+Clean `main` documentation checkpoint `0fd1303` repeated the full workspace and
+public-tree gates and produced an unsigned first-install UAT set: both
+application installers plus H3 `0.2.0` setup and its exact adjacent `.ldcodec`.
+Generated receipts and `SHA256SUMS.txt` are authoritative for those bytes. This
+post-build documentation update makes that set an older source snapshot; it
+remains valid for the owner's installer UAT, but it is not a public release or
+publication candidate. First-install UAT, authenticated signing, detailed
+publication review, and owner-authorized publication remain open. Rebuild from
+the final accepted commit before publication review. See the
 [0.1.0 acceptance status](docs/release/ACCEPTANCE_STATUS.md). There is no
 published release or supported bundled model in this repository.
 

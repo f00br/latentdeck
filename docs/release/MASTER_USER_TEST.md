@@ -433,5 +433,8 @@ The owner completed the Protocol 2 and final local functional pass on
 2026-09-03 and confirmed there are no remaining product defects. The all-nodes
 gallery is also accepted. That acceptance does not claim that the fresh
 first-install lifecycle, authenticated signing, clean-machine signed lifecycle,
-or publication review has passed. After this documentation is committed, build
-fresh artifacts from the exact final commit before those remaining gates.
+or publication review has passed. Unsigned first-install UAT artifacts were
+generated from clean `main` checkpoint `0fd1303`; their receipts and checksums
+are authoritative. Run the owner first-install UAT with that set. Because this
+post-build documentation update makes it an older source snapshot, build a new
+clean-clone RC from the final accepted commit before publication review.

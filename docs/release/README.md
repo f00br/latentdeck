@@ -34,6 +34,9 @@ acceptance. Authenticated signing and the offline clean Windows lifecycle remain
 release gates and do not authorize publication by themselves.
 
 The owner accepted the completed Protocol 2 modular runtime and final local
-functional pass on 2026-09-03 at implementation commit `3648e7c`. The current
-application installers and H3 Codec Pack must be rebuilt from the final clean
-documentation commit before the first-install UAT and publication review.
+functional pass on 2026-09-03 at implementation commit `3648e7c`. Clean `main`
+documentation checkpoint `0fd1303` then produced the unsigned first-install UAT
+sets, with exact identities retained in their generated receipts and
+`SHA256SUMS.txt`. Fresh-install UAT remains open. This post-build documentation
+update makes those artifacts an older UAT snapshot, so rebuild from the final
+accepted commit before publication review.

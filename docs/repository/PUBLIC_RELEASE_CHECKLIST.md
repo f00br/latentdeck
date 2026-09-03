@@ -6,8 +6,11 @@ explicitly approve every action in the Publication authority section.
 
 Current phase: the owner accepted the completed Protocol 2 modular runtime and
 final local `0.1.0` application pass on 2026-09-03 at implementation commit
-`3648e7c`. Fresh unsigned installers must be rebuilt from the final documentation
-commit for a first-install UAT. Every unchecked item below remains open.
+`3648e7c`. Clean `main` checkpoint `0fd1303` produced the unsigned application
+and H3 first-install UAT sets with generated receipts and checksums. The owner
+UAT remains open. This later documentation update makes those artifacts an older
+UAT snapshot; rebuild from the final accepted commit before publication review.
+Every unchecked item below remains open.
 
 ## Ownership and legal
 

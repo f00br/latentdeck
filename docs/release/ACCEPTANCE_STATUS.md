@@ -9,6 +9,11 @@ runtime and final manual application pass with no known product defect
 remaining. The accepted implementation checkpoint is clean `main` commit
 `3648e7c634c4310767165ce8975129323a5c09f2`.
 
+On 2026-09-04 clean `main` documentation checkpoint `0fd1303` repeated the
+aggregate workspace and public-tree gates and generated the unsigned
+first-install UAT sets for both applications and H3 `0.2.0`. Generated receipts
+and `SHA256SUMS.txt` identify the exact bytes. Fresh-install UAT remains open.
+
 ## Version and format baseline
 
 | Surface                         | Accepted identity |
@@ -28,7 +33,9 @@ uses a separately named ZIP payload.
 
 ## Current clean-clone engineering evidence
 
-The exact `3648e7c` clone passed the aggregate workspace and public-tree gates:
+The exact clean `0fd1303` clone, which contains the accepted implementation and
+the coordinated handoff documentation, passed the aggregate workspace and
+public-tree gates:
 
 - LatentDeck frontend: 172 passed;
 - LatentPlayer frontend: 49 passed;
@@ -138,9 +145,12 @@ final release candidate.
 
 The final manual pass used the current application implementation and the real
 H3/CUDA path. It is accepted product UAT, but it is not a signed clean-machine
-receipt. Fresh installer identities are generated after the final
-documentation commit, and their own receipts and `SHA256SUMS.txt` are the
-authority for exact bytes.
+receipt. Fresh unsigned installer identities were then generated from clean
+`main` checkpoint `0fd1303`; their receipts and `SHA256SUMS.txt` are the
+authority for exact bytes. This post-build documentation update makes that set
+an older source snapshot. It remains valid for the pending owner first-install
+UAT, but a new clean-clone RC must be built from the final accepted commit
+before publication review.
 
 ## Open release and publication gates
 

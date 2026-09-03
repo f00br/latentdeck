@@ -219,9 +219,13 @@ The owner accepted the Protocol 2 product surface through implementation commit
 `3648e7c634c4310767165ce8975129323a5c09f2` on 2026-09-03, including Player,
 generic Deck runtime, H3 `0.2.0`, D2/Q4 `0.2.1`, realtime controls, capture,
 MP4, fullscreen, Spout, extension lifecycle, warm sessions, and output leases.
-The final unsigned application and Codec Pack candidates must still be rebuilt
-from the documentation-complete commit in a new clean clone before the next
-first-install acceptance pass.
+Clean `main` documentation checkpoint `0fd1303` then produced the two unsigned
+application installers and the independent H3 setup/adjacent-payload set for
+owner first-install UAT. Their generated receipts and checksums identify the
+exact bytes. That UAT remains open. This later documentation update makes the
+set an older source snapshot that may be used for the owner UAT but not called a
+current publication candidate; rebuild from the final accepted commit before
+publication review.
 
 A real clean-machine install of the final signed artifacts, including the H3
 setup/adjacent-payload and exact-version uninstall path, NVIDIA runtime test,
