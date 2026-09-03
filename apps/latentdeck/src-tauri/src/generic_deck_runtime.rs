@@ -6,6 +6,7 @@
 //! window. Visibility is controlled only by the app-level foreground lease.
 
 use std::{
+    borrow::Cow,
     collections::VecDeque,
     path::PathBuf,
     sync::{
@@ -1035,7 +1036,7 @@ impl RuntimeActor {
                 self.dimensions.0,
                 self.dimensions.1,
                 layout.row_stride(),
-                &padded,
+                padded.as_ref(),
             )
             .map_err(|_| GenericDeckRuntimeError::output())?;
         self.presentation_diagnostics
@@ -1044,7 +1045,7 @@ impl RuntimeActor {
             self.dimensions.0,
             self.dimensions.1,
             layout.row_stride(),
-            &padded,
+            padded.as_ref(),
         );
         Ok(())
     }
@@ -2244,7 +2245,7 @@ fn pad_tight_rgba(
     width: u32,
     height: u32,
     row_stride: u32,
-) -> Result<Vec<u8>, GenericDeckRuntimeError> {
+) -> Result<Cow<'_, [u8]>, GenericDeckRuntimeError> {
     let tight_stride = width
         .checked_mul(4)
         .ok_or_else(GenericDeckRuntimeError::ring)?;
@@ -2252,6 +2253,9 @@ fn pad_tight_rgba(
         .map_err(|_| GenericDeckRuntimeError::ring())?;
     if bytes.len() != expected || row_stride < tight_stride {
         return Err(GenericDeckRuntimeError::ring());
+    }
+    if row_stride == tight_stride {
+        return Ok(Cow::Borrowed(bytes));
     }
     let output_len = usize::try_from(u64::from(row_stride) * u64::from(height))
         .map_err(|_| GenericDeckRuntimeError::ring())?;
@@ -2265,7 +2269,7 @@ fn pad_tight_rgba(
         output[target..target + tight_stride]
             .copy_from_slice(&bytes[source..source + tight_stride]);
     }
-    Ok(output)
+    Ok(Cow::Owned(output))
 }
 
 struct FrameClock {
@@ -2770,7 +2774,20 @@ mod tests {
     #[test]
     fn rgba_padding_preserves_rows_without_resize_or_crop() {
         let padded = pad_tight_rgba(&[1, 2, 3, 4, 5, 6, 7, 8], 1, 2, 8).expect("padded rgba");
-        assert_eq!(padded, [1, 2, 3, 4, 0, 0, 0, 0, 5, 6, 7, 8, 0, 0, 0, 0]);
+        assert!(matches!(padded, std::borrow::Cow::Owned(_)));
+        assert_eq!(
+            padded.as_ref(),
+            [1, 2, 3, 4, 0, 0, 0, 0, 5, 6, 7, 8, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn rgba_padding_borrows_an_already_aligned_frame() {
+        let bytes = [7_u8; 256];
+        let padded = pad_tight_rgba(&bytes, 64, 1, 256).expect("aligned rgba");
+
+        assert!(matches!(padded, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(padded.as_ptr(), bytes.as_ptr());
     }
 
     #[test]

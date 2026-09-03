@@ -365,6 +365,7 @@
 <section
   class="declarative-deck"
   class:fullscreen={fullscreenActive}
+  data-layout-density="compact"
   data-deck-exact-key={model.exactKey}
   aria-labelledby={`deck-title-${model.exactKey}`}
   aria-busy={runtimeBusy}
@@ -394,7 +395,7 @@
   </p>
 
   <div class="deck-workbench">
-    <aside class="output-column">
+    <aside class="output-column" data-output-persistence="sticky">
       <section
         class="output-stage"
         data-workbench-region="output"
@@ -830,9 +831,14 @@
     --accent: #93d7ab;
     --warning: #e0b477;
     --error: #ed8f98;
+    --control-height: 26px;
+    --control-font-size: 0.64rem;
+    --output-sticky-top: 6px;
     min-height: calc(100vh - 132px);
     border: 1px solid var(--line);
     color: #dce4e6;
+    font-size: 0.72rem;
+    line-height: 1.25;
     background:
       linear-gradient(135deg, rgb(255 255 255 / 2%), transparent 32%), #101416;
   }
@@ -843,9 +849,9 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
+    gap: 8px;
     border-bottom: 1px solid var(--line);
-    padding: 10px 14px;
+    padding: 7px 10px;
     background: var(--raised);
   }
 
@@ -880,8 +886,13 @@
     text-transform: uppercase;
   }
 
+  .deck-heading h2 {
+    font-size: 1rem;
+    line-height: 1.05;
+  }
+
   .deck-heading {
-    height: 72px;
+    height: 58px;
     overflow: hidden;
   }
 
@@ -892,10 +903,10 @@
 
   .runtime-state {
     display: grid;
-    min-width: 190px;
+    min-width: 160px;
     gap: 2px;
     border: 1px solid #4f6e5b;
-    padding: 8px 10px;
+    padding: 5px 7px;
   }
 
   .runtime-state span {
@@ -913,14 +924,14 @@
   }
 
   .surface-notice {
-    height: 34px;
+    height: 26px;
     margin: 0;
     border-bottom: 1px solid var(--line);
     overflow: hidden;
-    padding: 8px 14px;
+    padding: 5px 10px;
     color: var(--warning);
     background: #241e16;
-    font-size: 0.72rem;
+    font-size: 0.62rem;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -932,19 +943,19 @@
 
   .deck-workbench {
     display: grid;
-    grid-template-columns: minmax(440px, 1.15fr) minmax(360px, 0.85fr);
+    grid-template-columns: minmax(390px, 1.08fr) minmax(330px, 0.92fr);
     align-items: start;
-    gap: 10px;
-    padding: 10px;
+    gap: 7px;
+    padding: 7px;
   }
 
   .output-column {
     position: sticky;
     z-index: 20;
-    top: 0;
+    top: var(--output-sticky-top);
     display: grid;
     min-width: 0;
-    gap: 8px;
+    gap: 6px;
     align-self: start;
   }
 
@@ -963,37 +974,50 @@
 
   .output-actions {
     display: grid;
-    gap: 8px;
-    padding-bottom: 10px;
+    gap: 5px;
+    padding-bottom: 6px;
   }
 
   .output-actions > header,
   .faceplate-section > header {
-    min-height: 38px;
-    padding-block: 7px;
+    min-height: 30px;
+    padding-block: 4px;
   }
 
   .primary-actions,
   .capture-buttons,
   .captured-source-actions {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
-    gap: 6px;
-    padding-inline: 10px;
+    gap: 4px;
+  }
+
+  .primary-actions {
+    grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+    padding-inline: 6px;
+  }
+
+  .capture-buttons {
+    grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  }
+
+  .captured-source-actions {
+    grid-template-columns: repeat(auto-fit, minmax(78px, 1fr));
   }
 
   .capture-module,
   .output-connectors {
-    margin-inline: 10px;
+    margin-inline: 6px;
     border: 1px solid #354046;
-    padding: 9px;
+    padding: 5px;
     background: var(--panel);
   }
 
   .capture-controls {
     display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
     min-width: 0;
-    gap: 7px;
+    gap: 4px 6px;
   }
 
   .capture-buttons,
@@ -1002,14 +1026,17 @@
   }
 
   .capture-buttons button {
-    min-height: 34px;
+    min-height: var(--control-height);
     white-space: nowrap;
   }
 
   .capture-status {
     display: grid;
-    grid-template-rows: 1.25rem 2.5rem;
-    min-height: 3.75rem;
+    grid-column: 1 / -1;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 6px;
+    min-height: 1rem;
     color: #879297;
     font:
       0.62rem/1.25 ui-monospace,
@@ -1020,10 +1047,12 @@
 
   .capture-status small {
     overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .capture-reason {
-    min-height: 2.5rem;
+    min-height: 1rem;
     color: var(--warning);
   }
 
@@ -1031,10 +1060,14 @@
     visibility: hidden;
   }
 
+  .captured-source-actions {
+    grid-column: 1 / -1;
+  }
+
   .output-connectors {
     display: grid;
     grid-template-columns: minmax(0, 0.72fr) minmax(0, 1.28fr);
-    gap: 8px;
+    gap: 5px;
   }
 
   .mp4-output,
@@ -1042,46 +1075,85 @@
     display: grid;
     min-width: 0;
     align-content: start;
-    gap: 6px;
+    gap: 4px;
+  }
+
+  .mp4-output {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "title action"
+      "status status";
+    align-items: center;
+  }
+
+  .mp4-output strong {
+    grid-area: title;
+  }
+
+  .mp4-output button {
+    grid-area: action;
+  }
+
+  .mp4-output small {
+    grid-area: status;
   }
 
   .spout-output {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(64px, 1fr) auto;
+    grid-template-areas:
+      "title input apply"
+      "status status toggle";
+    align-items: center;
   }
 
-  .spout-output strong,
+  .spout-output strong {
+    grid-area: title;
+  }
+
+  .spout-output input {
+    grid-area: input;
+  }
+
+  .spout-output button:first-of-type {
+    grid-area: apply;
+  }
+
+  .spout-output button:last-of-type {
+    grid-area: toggle;
+  }
+
   .spout-output small {
-    grid-column: 1 / -1;
+    grid-area: status;
   }
 
   .output-connectors small,
   .deck-summary {
     overflow: hidden;
     color: #7f8a8f;
-    font-size: 0.61rem;
+    font-size: 0.56rem;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   .deck-summary {
-    padding-inline: 10px;
+    padding-inline: 6px;
   }
 
   .control-column {
     display: grid;
     min-width: 0;
-    gap: 8px;
+    gap: 6px;
   }
 
   .geometry-warning {
     display: grid;
-    gap: 3px;
+    gap: 2px;
     margin: 0;
     border: 1px solid #80672f;
-    padding: 9px 11px;
+    padding: 6px 8px;
     color: #d9c18a;
     background: #211b11;
-    font-size: 0.68rem;
+    font-size: 0.61rem;
   }
 
   .faceplate-section > header {
@@ -1091,14 +1163,14 @@
   .widget-grid {
     display: grid;
     grid-template-columns: repeat(var(--section-columns, 1), minmax(0, 1fr));
-    gap: 8px;
-    padding: 10px;
+    gap: 5px;
+    padding: 6px;
   }
 
   .widget {
     min-width: 0;
     border: 1px solid #384247;
-    padding: 9px;
+    padding: 6px;
     background: var(--panel);
   }
 
@@ -1107,7 +1179,7 @@
   .capture-controls {
     display: grid;
     min-width: 0;
-    gap: 6px;
+    gap: 3px;
     margin: 0;
   }
 
@@ -1115,16 +1187,17 @@
   .widget legend,
   .capture-controls strong {
     color: #9da8ad;
-    font-size: 0.68rem;
+    font-size: 0.6rem;
     font-weight: 700;
     text-transform: uppercase;
   }
 
   .source-detail {
-    min-height: 1.1rem;
+    grid-column: 1 / -1;
+    min-height: 0.85rem;
     overflow: hidden;
     color: #879297;
-    font-size: 0.62rem;
+    font-size: 0.56rem;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -1133,12 +1206,59 @@
   input,
   button {
     min-width: 0;
+    min-height: var(--control-height);
     border: 1px solid #58636a;
     border-radius: 2px;
-    padding: 6px 8px;
+    padding: 3px 5px;
     color: #e2e7e9;
     background: #0e1214;
-    font: inherit;
+    font-size: var(--control-font-size);
+    line-height: 1.15;
+  }
+
+  .widget-source_picker > label,
+  .widget-select > label {
+    grid-template-columns: minmax(44px, 0.5fr) minmax(0, 1fr);
+    align-items: center;
+  }
+
+  .widget-slider label {
+    grid-template-columns: minmax(44px, 0.52fr) minmax(56px, 1fr) auto;
+    align-items: center;
+  }
+
+  .widget-slider output {
+    min-width: 30px;
+    color: #aeb9bd;
+    font:
+      0.56rem/1 ui-monospace,
+      "Cascadia Mono",
+      Consolas,
+      monospace;
+    text-align: right;
+  }
+
+  .widget-number label {
+    grid-template-columns: minmax(62px, 0.75fr) minmax(50px, 1fr);
+    align-items: center;
+  }
+
+  .widget-number output {
+    display: none;
+  }
+
+  .widget-seed > label {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+  }
+
+  .widget fieldset {
+    border: 0;
+    padding: 0;
+  }
+
+  .widget legend {
+    padding: 0;
   }
 
   button:not(:disabled) {
@@ -1166,20 +1286,29 @@
   .role-grid,
   .transport-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-    gap: 6px;
+    grid-template-columns: repeat(auto-fit, minmax(78px, 1fr));
+    gap: 4px;
+  }
+
+  .role-grid label {
+    gap: 2px;
   }
 
   .transport-grid > div {
     display: grid;
-    gap: 5px;
+    gap: 2px;
     border: 1px solid #343d42;
-    padding: 7px;
+    padding: 4px;
+  }
+
+  .transport-grid small {
+    color: #7f8a8f;
+    font-size: 0.54rem;
   }
 
   .triangle {
     position: relative;
-    height: 130px;
+    height: 96px;
     clip-path: polygon(50% 0, 100% 100%, 0 100%);
     background:
       linear-gradient(150deg, #67536c, transparent 65%),
@@ -1219,7 +1348,7 @@
 
   .monitor {
     display: grid;
-    height: clamp(280px, 44vh, 560px);
+    height: clamp(240px, 38vh, 460px);
     min-height: 0;
     grid-template-rows: auto minmax(0, 1fr);
     background: #000;
@@ -1228,10 +1357,10 @@
   .monitor > header {
     display: flex;
     justify-content: space-between;
-    padding: 7px 10px;
+    padding: 4px 7px;
     color: #899496;
     background: #0b0f10;
-    font-size: 0.62rem;
+    font-size: 0.56rem;
   }
 
   .monitor-frame {
@@ -1320,7 +1449,7 @@
     height: 100%;
   }
 
-  @media (max-width: 1120px) {
+  @media (max-width: 820px) {
     .deck-workbench {
       grid-template-columns: minmax(0, 1fr);
     }

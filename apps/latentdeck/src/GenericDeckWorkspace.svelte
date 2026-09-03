@@ -8,6 +8,7 @@
     embeddedViewportFullyInsideClient,
     hiddenEmbeddedViewportBounds,
     nextEmbeddedViewportRevision,
+    sameEmbeddedViewportGeometry,
     type EmbeddedViewportBounds,
   } from "./embedded-viewport";
   import {
@@ -136,6 +137,7 @@
   let spout: SpoutStatus | null = null;
   let spoutName = "LatentDeck Generic Output";
   let spoutNameDirty = false;
+  let spoutStatusKnown = false;
   let outputFullscreen: boolean | null = null;
   let viewportAnchor: HTMLDivElement | null = null;
   let viewportEpoch: number | null = null;
@@ -143,6 +145,8 @@
   let viewportFrame: number | null = null;
   let viewportApplied: EmbeddedViewportBounds | null = null;
   let viewportBusy = false;
+  let viewportSyncRunning = false;
+  let viewportSyncPending = false;
   let viewportResizeObserver: ResizeObserver | null = null;
   let viewportRetryAttempt = 0;
   let viewportRetryTimer: ReturnType<typeof globalThis.setTimeout> | null =
@@ -347,8 +351,7 @@
       viewportResizeObserver?.disconnect();
       viewportResizeObserver = null;
       cancelViewportRetry();
-      if (viewportFrame !== null)
-        globalThis.cancelAnimationFrame(viewportFrame);
+      cancelViewportSyncSchedule();
       void hideViewport();
     };
   });
@@ -368,6 +371,7 @@
     capture = null;
     recording = null;
     spout = null;
+    spoutStatusKnown = false;
     outputFullscreen = null;
     draft = createDeckUiDraft(model);
     draftRevision += 1;
@@ -936,6 +940,7 @@
       capture = null;
       recording = null;
       spout = null;
+      spoutStatusKnown = false;
       outputFullscreen = null;
     }
   }
@@ -956,6 +961,7 @@
       capture = null;
       recording = null;
       spout = null;
+      spoutStatusKnown = false;
       outputFullscreen = null;
       acknowledgedControls = { ...draft.controls };
       sessionSnapshotValid = true;
@@ -1104,6 +1110,28 @@
     );
   }
 
+  function captureStatusNeedsPolling(): boolean {
+    if (captureActive(capture)) return true;
+    return (
+      capture === null &&
+      selectedSession !== undefined &&
+      selectedSession.runtime.status.capture_state !== "idle"
+    );
+  }
+
+  function recordingStatusNeedsPolling(): boolean {
+    return (
+      recordingActive(recording) ||
+      (recording === null && selectedSessionOutputPinKind() === "mp4")
+    );
+  }
+
+  function spoutStatusNeedsPolling(): boolean {
+    return (
+      !spoutStatusKnown || spout?.enabled === true || spout?.published === true
+    );
+  }
+
   async function pollForegroundState(): Promise<void> {
     const sessionId = selectedSessionId;
     if (sessionId === "" || busy || sessionPollToken !== null) return;
@@ -1115,16 +1143,45 @@
     sessionPollToken = token;
     try {
       const outputPinKindBeforePoll = activeOutputPinKind();
-      const nextSession = await genericDeckClient.statusGet(sessionId);
+      const pollCapture = captureStatusNeedsPolling();
+      const pollRecording = recordingStatusNeedsPolling();
+      const pollSpout = spoutStatusNeedsPolling();
+      const pollFullscreen =
+        outputFullscreen === null || outputFullscreen === true;
+      const [
+        nextSession,
+        nextCapture,
+        nextRecording,
+        nextSpout,
+        nextFullscreen,
+      ] = await Promise.all([
+        genericDeckClient.statusGet(sessionId),
+        pollCapture
+          ? genericDeckClient.captureStatusGet(sessionId)
+          : Promise.resolve(undefined),
+        pollRecording
+          ? genericDeckClient.recordingStatusGet(sessionId)
+          : Promise.resolve(undefined),
+        pollSpout
+          ? genericDeckClient.spoutStatusGet(sessionId)
+          : Promise.resolve(undefined),
+        pollFullscreen
+          ? genericDeckClient.fullscreenStatusGet(sessionId)
+          : Promise.resolve(undefined),
+      ]);
       if (!sessionPollIsCurrent(token)) return;
+
+      // Commit one staged polling snapshot so Svelte performs one UI flush.
       applySession(nextSession);
-      const nextCapture = await genericDeckClient.captureStatusGet(sessionId);
-      if (!sessionPollIsCurrent(token)) return;
-      capture = nextCapture;
-      const nextRecording =
-        await genericDeckClient.recordingStatusGet(sessionId);
-      if (!sessionPollIsCurrent(token)) return;
-      recording = nextRecording;
+      if (nextCapture !== undefined) capture = nextCapture;
+      if (nextRecording !== undefined) recording = nextRecording;
+      if (nextSpout !== undefined) {
+        spout = nextSpout;
+        spoutStatusKnown = true;
+      }
+      if (nextFullscreen !== undefined) outputFullscreen = nextFullscreen;
+      if (spout !== null && !spoutNameDirty) spoutName = spout.requestedName;
+
       const outputPinKindAfterPoll = activeOutputPinKind();
       if (
         outputPinKindBeforePoll !== outputPinKindAfterPoll ||
@@ -1135,14 +1192,6 @@
       }
       await publishCompletedCapture(capture);
       if (!sessionPollIsCurrent(token)) return;
-      const nextSpout = await genericDeckClient.spoutStatusGet(sessionId);
-      if (!sessionPollIsCurrent(token)) return;
-      spout = nextSpout;
-      const nextFullscreen =
-        await genericDeckClient.fullscreenStatusGet(sessionId);
-      if (!sessionPollIsCurrent(token)) return;
-      outputFullscreen = nextFullscreen;
-      if (spout !== null && !spoutNameDirty) spoutName = spout.requestedName;
     } catch (error) {
       if (!sessionPollIsCurrent(token)) return;
       if (commandErrorCode(error) === "session.not_found") {
@@ -1363,6 +1412,7 @@
           enabled,
         },
       );
+      spoutStatusKnown = true;
       if (name !== null) {
         spoutName = spout.requestedName;
         spoutNameDirty = false;
@@ -1455,6 +1505,7 @@
     viewportResizeObserver?.disconnect();
     if (element === null) {
       cancelViewportRetry();
+      cancelViewportSyncSchedule();
       viewportRetryAttempt = 0;
       viewportRetryExhausted = false;
       viewportApplied = null;
@@ -1538,10 +1589,7 @@
   }
 
   function resetViewportBootstrap(): void {
-    if (viewportFrame !== null) {
-      globalThis.cancelAnimationFrame(viewportFrame);
-      viewportFrame = null;
-    }
+    cancelViewportSyncSchedule();
     viewportEpoch = null;
     viewportRevision = 0;
     viewportApplied = null;
@@ -1566,35 +1614,55 @@
     viewportFailureCode = "";
   }
 
+  function cancelViewportSyncSchedule(): void {
+    viewportSyncPending = false;
+    if (viewportFrame === null) return;
+    globalThis.cancelAnimationFrame(viewportFrame);
+    viewportFrame = null;
+  }
+
   function scheduleViewportSync(): void {
-    if (viewportFrame !== null) return;
+    viewportSyncPending = true;
+    if (viewportSyncRunning || viewportFrame !== null) return;
     viewportFrame = globalThis.requestAnimationFrame(() => {
       viewportFrame = null;
+      if (!viewportSyncPending) return;
+      viewportSyncPending = false;
       void syncViewport();
     });
   }
 
   async function syncViewport(): Promise<void> {
+    if (viewportSyncRunning) {
+      viewportSyncPending = true;
+      return;
+    }
+    viewportSyncRunning = true;
     const epoch = viewportEpoch;
     const anchor = viewportAnchor;
-    if (epoch === null || anchor === null || !anchor.isConnected) return;
-    const revision = nextEmbeddedViewportRevision(viewportRevision);
-    if (revision === null) return;
-    const rect = anchor.getBoundingClientRect();
-    const scaleFactor = globalThis.devicePixelRatio;
-    const inside = embeddedViewportFullyInsideClient(
-      rect,
-      document.documentElement.clientWidth,
-      document.documentElement.clientHeight,
-      scaleFactor,
-    );
-    const visible = active && !viewportSuspended && inside;
-    const bounds = visible
-      ? buildEmbeddedViewportBounds(epoch, revision, rect, scaleFactor, true)
-      : hiddenEmbeddedViewportBounds(epoch, revision, scaleFactor);
-    if (bounds === null) return;
-    viewportRevision = revision;
+    let revision: number | null = null;
     try {
+      if (epoch === null || anchor === null || !anchor.isConnected) return;
+      revision = nextEmbeddedViewportRevision(viewportRevision);
+      if (revision === null) return;
+      const rect = anchor.getBoundingClientRect();
+      const scaleFactor = globalThis.devicePixelRatio;
+      const inside = embeddedViewportFullyInsideClient(
+        rect,
+        document.documentElement.clientWidth,
+        document.documentElement.clientHeight,
+        scaleFactor,
+      );
+      const visible = active && !viewportSuspended && inside;
+      const bounds = visible
+        ? buildEmbeddedViewportBounds(epoch, revision, rect, scaleFactor, true)
+        : hiddenEmbeddedViewportBounds(epoch, revision, scaleFactor);
+      if (
+        bounds === null ||
+        sameEmbeddedViewportGeometry(viewportApplied, bounds)
+      )
+        return;
+      viewportRevision = revision;
       await genericDeckClient.viewportSetBounds(bounds);
       if (
         viewportEpoch === epoch &&
@@ -1609,6 +1677,19 @@
         viewportAnchor === anchor
       )
         failViewportBootstrap(error);
+    } finally {
+      viewportSyncRunning = false;
+      if (
+        viewportSyncPending &&
+        active &&
+        !viewportSuspended &&
+        viewportAnchor !== null &&
+        viewportEpoch !== null
+      ) {
+        scheduleViewportSync();
+      } else {
+        viewportSyncPending = false;
+      }
     }
   }
 
@@ -1647,10 +1728,15 @@
   async function toggleFullscreen(): Promise<void> {
     if (selectedSession === undefined || outputFullscreen === null) return;
     await run(async () => {
-      outputFullscreen = await genericDeckClient.fullscreenSet(
-        selectedSession!.sessionId,
-        !outputFullscreen,
-      );
+      try {
+        outputFullscreen = await genericDeckClient.fullscreenSet(
+          selectedSession!.sessionId,
+          !outputFullscreen,
+        );
+      } catch (error) {
+        outputFullscreen = null;
+        throw error;
+      }
       scheduleViewportSync();
     });
   }

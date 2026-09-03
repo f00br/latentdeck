@@ -37,10 +37,30 @@ describe("LatentDeck minimum-window layout contract", () => {
     expect(workspaceSource).toContain("hiddenEmbeddedViewportBounds(");
     expect(rendererSource).toContain('data-workbench-region="output"');
     expect(rendererSource).toMatch(
-      /\.output-column\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s,
+      /\.output-column\s*\{[^}]*position:\s*sticky;[^}]*top:\s*var\(--output-sticky-top\);/s,
     );
+    expect(rendererSource).toContain('data-output-persistence="sticky"');
     expect(rendererSource).not.toMatch(
       /<canvas|<video|ImageData|createImageBitmap/i,
+    );
+  });
+
+  it("keeps the professional faceplate dense across both generic workbench columns", () => {
+    expect(rendererSource).toContain('data-layout-density="compact"');
+    expect(rendererSource).toMatch(
+      /\.declarative-deck\s*\{[^}]*--control-height:\s*26px;[^}]*--control-font-size:\s*0\.64rem;/s,
+    );
+    expect(rendererSource).toMatch(
+      /\.widget-slider label\s*\{[^}]*grid-template-columns:/s,
+    );
+    expect(rendererSource).toMatch(
+      /\.widget-seed > label\s*\{[^}]*grid-template-columns:/s,
+    );
+    expect(rendererSource).toMatch(
+      /\.transport-grid\s*\{[^}]*minmax\(78px, 1fr\)/s,
+    );
+    expect(rendererSource).toMatch(
+      /\.capture-status\s*\{[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\);[^}]*min-height:\s*1rem;/s,
     );
   });
 
@@ -62,9 +82,10 @@ describe("LatentDeck minimum-window layout contract", () => {
     );
     expect(rendererSource).toContain('class="capture-reason"');
     expect(rendererSource).toMatch(/\.capture-reason\s*\{[^}]*min-height:/s);
-    const responsive = mediaBlock(rendererSource, 1120);
+    const responsive = mediaBlock(rendererSource, 820);
     expect(responsive).toContain(".deck-workbench");
     expect(responsive).toContain("grid-template-columns: minmax(0, 1fr);");
+    expect(rendererSource).not.toContain("@media (max-width: 1120px)");
     expect(workspaceSource).toContain("viewportEpoch");
     expect(workspaceSource).toContain("viewportApplied = bounds");
   });

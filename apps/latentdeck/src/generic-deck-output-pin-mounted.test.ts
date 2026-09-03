@@ -19,6 +19,7 @@ import {
   type CartridgeView,
   type LibraryView,
 } from "./library-model";
+import type { SpoutStatus } from "./output-model";
 
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 
@@ -325,6 +326,9 @@ function installHost(state: {
   outputPin: GenericOutputPin | null;
   capture: GenericCaptureView;
   recording: GenericRecordingView;
+  spout?: SpoutStatus | null;
+  statusGet?: () => Promise<GenericDeckSessionView>;
+  viewportSetBounds?: (args: Record<string, unknown>) => Promise<void>;
   controlsSet?: (
     args: Record<string, unknown>,
   ) => Promise<GenericDeckSessionView["runtime"]>;
@@ -333,8 +337,23 @@ function installHost(state: {
   ) => Promise<GenericDeckSessionView>;
 }) {
   const runtimeSession = session();
+  const currentSession = (): GenericDeckSessionView => ({
+    ...runtimeSession,
+    runtime: {
+      ...runtimeSession.runtime,
+      status: {
+        ...runtimeSession.runtime.status,
+        capture_state:
+          state.capture.state === "finished"
+            ? "completed"
+            : state.capture.state === "error"
+              ? "faulted"
+              : state.capture.state,
+      },
+    },
+  });
   const snapshot = (): GenericDeckSessionsView => ({
-    sessions: [runtimeSession],
+    sessions: [currentSession()],
     foregroundOutput: { sessionId: SESSION_ID, generation: 1 },
     outputPin: state.outputPin,
     recentFaults: [],
@@ -347,17 +366,17 @@ function installHost(state: {
         case "deck_generic_sessions_get":
           return Promise.resolve(snapshot());
         case "deck_generic_status_get":
-          return Promise.resolve(runtimeSession);
+          return state.statusGet?.() ?? Promise.resolve(currentSession());
         case "deck_generic_viewport_session_begin":
           return Promise.resolve({ epoch: 1 });
         case "deck_generic_viewport_set_bounds":
-          return Promise.resolve();
+          return state.viewportSetBounds?.(args) ?? Promise.resolve();
         case "deck_generic_capture_status_get":
           return Promise.resolve(state.capture);
         case "deck_generic_recording_status_get":
           return Promise.resolve(state.recording);
         case "deck_generic_spout_status_get":
-          return Promise.resolve(null);
+          return Promise.resolve(state.spout ?? null);
         case "deck_generic_fullscreen_status_get":
           return Promise.resolve(false);
         case "deck_generic_controls_set":
@@ -459,7 +478,164 @@ describe("generic Deck foreground output pin refresh", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("keeps idle polling to one core status read and stages active capture reads in parallel", async () => {
+    const blockedStatus = deferred<GenericDeckSessionView>();
+    let holdStatus = false;
+    const state = {
+      outputPin: null as GenericOutputPin | null,
+      capture: idleCapture(),
+      recording: idleRecording(),
+      statusGet: () =>
+        holdStatus ? blockedStatus.promise : Promise.resolve(session()),
+    };
+    installHost(state);
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = await mountWorkspace(target);
+    expect(
+      invokeMock.mock.calls.filter(
+        ([command]) => command === "deck_generic_fullscreen_status_get",
+      ),
+    ).toHaveLength(1);
+
+    invokeMock.mockClear();
+    await vi.advanceTimersByTimeAsync(500);
+    await settleUi();
+    expect(invokeMock.mock.calls.map(([command]) => command)).toEqual([
+      "deck_generic_status_get",
+    ]);
+
+    clickButton(target, "Start Live Capture");
+    await settleUi();
+    holdStatus = true;
+    invokeMock.mockClear();
+    await vi.advanceTimersByTimeAsync(500);
+    await settleUi();
+    expect(invokeMock.mock.calls.map(([command]) => command)).toEqual([
+      "deck_generic_status_get",
+      "deck_generic_capture_status_get",
+    ]);
+
+    blockedStatus.resolve(session());
+    await settleUi();
+    await unmount(component);
+    target.remove();
+  });
+
+  it("does not keep polling a disabled Spout sender only because its last error remains visible", async () => {
+    const state = {
+      outputPin: null as GenericOutputPin | null,
+      capture: idleCapture(),
+      recording: idleRecording(),
+      spout: {
+        sdkBuilt: true,
+        ready: true,
+        enabled: false,
+        published: false,
+        requestedName: "LatentDeck Generic Output",
+        activeName: "",
+        width: 0,
+        height: 0,
+        format: "rgba8_unorm" as const,
+        submittedFrames: 0,
+        lastSequence: null,
+        spoutFrame: null,
+        lastErrorCode: "output.spout_publish_failed",
+      },
+    };
+    installHost(state);
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = await mountWorkspace(target);
+
+    invokeMock.mockClear();
+    await vi.advanceTimersByTimeAsync(500);
+    await settleUi();
+    expect(invokeMock.mock.calls.map(([command]) => command)).toEqual([
+      "deck_generic_status_get",
+    ]);
+
+    await unmount(component);
+    target.remove();
+  });
+
+  it("coalesces rapid viewport recovery while one bounds invoke is pending", async () => {
+    let left = 120;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      void Promise.resolve().then(() => callback(0));
+      return 1;
+    });
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
+      () =>
+        ({
+          x: left,
+          y: 160,
+          top: 160,
+          left,
+          right: left + 800,
+          bottom: 608,
+          width: 800,
+          height: 448,
+          toJSON: () => ({}),
+        }) as DOMRect,
+    );
+    vi.spyOn(document.documentElement, "clientWidth", "get").mockReturnValue(
+      1440,
+    );
+    vi.spyOn(document.documentElement, "clientHeight", "get").mockReturnValue(
+      1000,
+    );
+
+    const firstBounds = deferred<void>();
+    let boundsCalls = 0;
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const state = {
+      outputPin: null as GenericOutputPin | null,
+      capture: idleCapture(),
+      recording: idleRecording(),
+      viewportSetBounds: () => {
+        boundsCalls += 1;
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        const result =
+          boundsCalls === 1 ? firstBounds.promise : Promise.resolve();
+        return result.finally(() => {
+          inFlight -= 1;
+        });
+      },
+    };
+    installHost(state);
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = await mountWorkspace(target);
+    expect(boundsCalls).toBe(1);
+
+    left = 140;
+    for (let index = 0; index < 8; index += 1) {
+      globalThis.dispatchEvent(new Event("resize"));
+    }
+    await settleUi();
+    expect(boundsCalls).toBe(1);
+    expect(maxInFlight).toBe(1);
+
+    firstBounds.resolve();
+    await settleUi();
+    expect(boundsCalls).toBe(2);
+    expect(maxInFlight).toBe(1);
+
+    for (let index = 0; index < 8; index += 1) {
+      globalThis.dispatchEvent(new Event("resize"));
+    }
+    await settleUi();
+    expect(boundsCalls).toBe(2);
+
+    await unmount(component);
+    target.remove();
   });
 
   it("dispatches realtime controls latest-only without blocking live-capture stop", async () => {

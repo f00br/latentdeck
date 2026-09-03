@@ -115,6 +115,44 @@ function clickButton(target: HTMLElement, label: string): void {
 }
 
 describe("host-rendered declarative Deck faceplate", () => {
+  it("mounts generic compact-density and persistent-output workbench landmarks", async () => {
+    const model = parseDeckUiCatalog({
+      decks: [externalDeck()],
+      issues: [],
+    }).decks[0];
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(DeckFaceplateRenderer, {
+      target,
+      props: {
+        model,
+        initialDraft: createDeckUiDraft(model),
+        active: true,
+        runtimeAvailable: true,
+        runtimeLoaded: true,
+      },
+    });
+    flushSync();
+
+    const faceplate = target.querySelector<HTMLElement>(
+      '[data-layout-density="compact"]',
+    );
+    const outputColumn = target.querySelector<HTMLElement>(
+      '[data-output-persistence="sticky"]',
+    );
+    expect(faceplate).not.toBeNull();
+    expect(outputColumn).not.toBeNull();
+    expect(
+      outputColumn?.querySelector("[data-native-viewport]"),
+    ).not.toBeNull();
+    expect(
+      faceplate?.querySelector('[data-workbench-region="controls"]'),
+    ).not.toBeNull();
+
+    await unmount(component);
+    target.remove();
+  });
+
   it("mounts the actual bundled D2 faceplate and dispatches its host actions", async () => {
     const model = parseDeckUiCatalog({
       decks: [bundledD2Deck()],
