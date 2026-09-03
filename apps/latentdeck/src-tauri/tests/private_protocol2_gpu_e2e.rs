@@ -81,6 +81,61 @@ fn private_protocol2_gpu_runner_is_an_executable_evidence_producer() {
 }
 
 #[test]
+fn bundled_gpu_gate_loads_real_descriptor_defaults_in_declaration_order() {
+    let source = include_str!("../src/private_protocol2_gpu_e2e_main.rs");
+    let normalized = source.split_whitespace().collect::<Vec<_>>().join(" ");
+    for required in [
+        "let d2_load = d2_load(&d2_prepared)?; let mut d2 = start_deck(d2_prepared, d2_load).await?;",
+        "let q4_load = q4_load(&q4_prepared)?; let mut q4 = start_deck(q4_prepared, q4_load).await?;",
+        "let external_load = external_load(&external_prepared)?; let mut external = start_deck(external_prepared, external_load).await?;",
+        "controls: operator_default_controls_in_declaration_order(prepared)?",
+        ".operator_descriptor() .controls .iter()",
+        "\"controls\": []",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "bundled Deck load no longer uses descriptor defaults in declaration order: {required}"
+        );
+    }
+    assert!(
+        !source.contains("controls: Vec::new()"),
+        "the private GPU gate must not bypass real Deck controls with an empty load block"
+    );
+
+    for (deck, descriptor) in [
+        (
+            "D2",
+            include_str!("../../../../operators/builtin/d2/package/operator.json"),
+        ),
+        (
+            "Q4",
+            include_str!("../../../../operators/builtin/q4/package/operator.json"),
+        ),
+    ] {
+        let document: serde_json::Value =
+            serde_json::from_str(descriptor).expect("bundled operator descriptor JSON");
+        let controls = document["controls"]
+            .as_array()
+            .expect("bundled operator controls array");
+        let control_ids = controls
+            .iter()
+            .map(|control| {
+                control["control_id"]
+                    .as_str()
+                    .expect("bundled operator control ID")
+            })
+            .collect::<Vec<_>>();
+        assert!(!control_ids.is_empty(), "{deck} defaults must be non-empty");
+        let mut alphabetical = control_ids.clone();
+        alphabetical.sort_unstable();
+        assert_ne!(
+            control_ids, alphabetical,
+            "{deck} descriptor must exercise non-alphabetical control ordering"
+        );
+    }
+}
+
+#[test]
 #[ignore = "requires exact private H3 Codec Pack v2, LC corpus, TAEH3, CUDA, Media Foundation, and pinned Spout2 SDK"]
 fn h3_full_matrix_executes_and_emits_receipt() {
     #[cfg(not(feature = "private-protocol2-gpu-e2e"))]

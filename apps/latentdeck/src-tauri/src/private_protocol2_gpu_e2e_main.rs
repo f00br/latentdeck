@@ -23,11 +23,12 @@ use latentdeck_cartridge::{
 };
 use latentdeck_control::v2::{
     Ack, CaptureArtifact, CaptureIdentity, CaptureMode, CaptureStart, CaptureState,
-    CaptureStatusSnapshot, Command, ControlValue, DeckProcess, DeckReset, DeckState, EmptyPayload,
-    ExternalAssetBinding, MetricsSnapshot, PlayerReset, PlayerState, PlayerStep, ProvenanceEntry,
-    RoleBinding, ShutdownReason, SourceTransportBinding,
+    CaptureStatusSnapshot, Command, ControlBinding, ControlValue, DeckProcess, DeckReset,
+    DeckState, EmptyPayload, ExternalAssetBinding, MetricsSnapshot, PlayerReset, PlayerState,
+    PlayerStep, ProvenanceEntry, RoleBinding, ShutdownReason, SourceTransportBinding,
 };
 use latentdeck_core::{
+    deck_runtime_v2::{DeckOperatorControlDescriptor, DeckOperatorControlKind},
     deck_selection_v2::{
         DeckPackageSelectionV2, DeckSourceSelectionV2, PreparedDeckSelectionV2,
         prepare_exact_deck_selection,
@@ -325,10 +326,12 @@ async fn run_gate(app: tauri::AppHandle, config: GateConfig) -> GateResult<Value
     };
     let external_timing = d2_manifest.signal.timing.clone();
     let mut player = start_player(&config, &config.sources[0], player_host, &codec).await?;
-    let mut d2 = start_deck(d2_prepared, d2_load()).await?;
+    let d2_load = d2_load(&d2_prepared)?;
+    let mut d2 = start_deck(d2_prepared, d2_load).await?;
 
     let q4_prepared = prepare_deck(&config, Q4_ID, &config.sources, &codec)?;
-    let mut q4 = start_deck(q4_prepared, q4_load()).await?;
+    let q4_load = q4_load(&q4_prepared)?;
+    let mut q4 = start_deck(q4_prepared, q4_load).await?;
 
     let player_observation = exercise_player_surface(&app, &mut player).await?;
     let d2_observation = exercise_deck_surface(&app, &config, &codec, &mut d2, "d2").await?;
@@ -337,7 +340,8 @@ async fn run_gate(app: tauri::AppHandle, config: GateConfig) -> GateResult<Value
     let external_archive_sha256 =
         install_external_probe_deck(&config, &tensor, &profile, &external_timing)?;
     let external_prepared = prepare_deck(&config, EXTERNAL_DECK_ID, &config.sources[..2], &codec)?;
-    let mut external = start_deck(external_prepared, external_load()).await?;
+    let external_load = external_load(&external_prepared)?;
+    let mut external = start_deck(external_prepared, external_load).await?;
     let external_surface = exercise_external_deck(&mut external).await?;
     shutdown_deck(&mut external).await?;
     let player_after_external = player_status(&mut player).await?;
@@ -850,20 +854,31 @@ async fn start_deck(
     })
 }
 
-fn d2_load() -> DeckSessionV2LoadRequest {
-    deck_load(&["carrier", "donor"])
+fn d2_load(prepared: &PreparedDeckSelectionV2) -> GateResult<DeckSessionV2LoadRequest> {
+    let load = deck_load(prepared, &["carrier", "donor"])?;
+    if load.controls.is_empty() {
+        return Err("validated bundled D2 operator declared no controls");
+    }
+    Ok(load)
 }
 
-fn q4_load() -> DeckSessionV2LoadRequest {
-    deck_load(&["carrier", "donor_b", "donor_c", "donor_d"])
+fn q4_load(prepared: &PreparedDeckSelectionV2) -> GateResult<DeckSessionV2LoadRequest> {
+    let load = deck_load(prepared, &["carrier", "donor_b", "donor_c", "donor_d"])?;
+    if load.controls.is_empty() {
+        return Err("validated bundled Q4 operator declared no controls");
+    }
+    Ok(load)
 }
 
-fn external_load() -> DeckSessionV2LoadRequest {
-    deck_load(&["carrier", "donor"])
+fn external_load(prepared: &PreparedDeckSelectionV2) -> GateResult<DeckSessionV2LoadRequest> {
+    deck_load(prepared, &["carrier", "donor"])
 }
 
-fn deck_load(roles: &[&str]) -> DeckSessionV2LoadRequest {
-    DeckSessionV2LoadRequest {
+fn deck_load(
+    prepared: &PreparedDeckSelectionV2,
+    roles: &[&str],
+) -> GateResult<DeckSessionV2LoadRequest> {
+    Ok(DeckSessionV2LoadRequest {
         roles: roles
             .iter()
             .enumerate()
@@ -872,7 +887,7 @@ fn deck_load(roles: &[&str]) -> DeckSessionV2LoadRequest {
                 physical_slot: u8::try_from(index + 1).expect("closed Deck role bound"),
             })
             .collect(),
-        controls: Vec::new(),
+        controls: operator_default_controls_in_declaration_order(prepared)?,
         source_transport: roles
             .iter()
             .enumerate()
@@ -883,6 +898,58 @@ fn deck_load(roles: &[&str]) -> DeckSessionV2LoadRequest {
             })
             .collect(),
         seed: 0x5eed,
+    })
+}
+
+fn operator_default_controls_in_declaration_order(
+    prepared: &PreparedDeckSelectionV2,
+) -> GateResult<Vec<ControlBinding>> {
+    prepared
+        .deck_runtime
+        .operator_descriptor()
+        .controls
+        .iter()
+        .map(|control| {
+            Ok(ControlBinding {
+                name: control.control_id.clone(),
+                value: operator_default_control_value(control)?,
+            })
+        })
+        .collect()
+}
+
+fn operator_default_control_value(
+    control: &DeckOperatorControlDescriptor,
+) -> GateResult<ControlValue> {
+    let invalid = || "validated Deck operator default could not be represented";
+    match control.value_type {
+        DeckOperatorControlKind::Boolean => control
+            .default
+            .as_bool()
+            .map(ControlValue::Boolean)
+            .ok_or_else(invalid),
+        DeckOperatorControlKind::Integer => control
+            .default
+            .as_i64()
+            .or_else(|| {
+                control
+                    .default
+                    .as_u64()
+                    .and_then(|value| i64::try_from(value).ok())
+            })
+            .map(ControlValue::Integer)
+            .ok_or_else(invalid),
+        DeckOperatorControlKind::Number => control
+            .default
+            .as_f64()
+            .filter(|value| value.is_finite())
+            .map(ControlValue::Number)
+            .ok_or_else(invalid),
+        DeckOperatorControlKind::Enum | DeckOperatorControlKind::Text => control
+            .default
+            .as_str()
+            .map(|value| ControlValue::Text(value.to_owned()))
+            .ok_or_else(invalid),
     }
 }
 

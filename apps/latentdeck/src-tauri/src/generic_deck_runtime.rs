@@ -26,13 +26,16 @@ use latentdeck_core::{
     deck_runtime_v2::DeckLoadRequest,
     deck_selection_v2::PreparedDeckSelectionV2,
     deck_session_v2::{
-        DeckSessionV2, DeckSessionV2LoadRequest, start_deck_session_v2_with_retained_assets,
+        DeckSessionV2, DeckSessionV2Error, DeckSessionV2LoadRequest,
+        start_deck_session_v2_with_retained_assets,
     },
     realtime_diagnostics::{
         DiagnosticCodecIdentity, DiagnosticGpuIdentity, Protocol2DeckSessionIdentity,
         RealtimeSessionMetrics, SanitizedToken, Sha256Token,
     },
     worker_client_v2::WorkerClientV2Error,
+    worker_source_v2::WorkerSourceV2Error,
+    worker_supervisor::WorkerSupervisorError,
 };
 use latentdeck_gpu::{
     ring::RingLayout,
@@ -337,7 +340,7 @@ impl GenericDeckRuntime {
             load,
         )
         .await
-        .map_err(|_| GenericDeckRuntimeError::worker())?;
+        .map_err(map_startup_error)?;
         let worker_pid = session.client().worker_pid();
         let initial_status = session.initial_status().clone();
         validate_loaded_status(&initial_status, deck_session_id, &slot_counts)?;
@@ -2275,6 +2278,80 @@ fn map_client_error(error: WorkerClientV2Error) -> GenericDeckRuntimeError {
     }
 }
 
+fn map_startup_client_error(error: WorkerClientV2Error) -> GenericDeckRuntimeError {
+    match error {
+        WorkerClientV2Error::Supervisor(error) => map_supervisor_error(error),
+        WorkerClientV2Error::UnexpectedReply | WorkerClientV2Error::UnexpectedAck { .. } => {
+            GenericDeckRuntimeError::protocol()
+        }
+        other => map_client_error(other),
+    }
+}
+
+fn map_supervisor_error(error: WorkerSupervisorError) -> GenericDeckRuntimeError {
+    match error {
+        WorkerSupervisorError::ConnectTimeout
+        | WorkerSupervisorError::HandshakeTimeout
+        | WorkerSupervisorError::ReceiveTimeout
+        | WorkerSupervisorError::ShutdownTimeout => GenericDeckRuntimeError::timeout(),
+        WorkerSupervisorError::PeerProcessMismatch
+        | WorkerSupervisorError::AuthenticationFailed
+        | WorkerSupervisorError::UnexpectedHandshake
+        | WorkerSupervisorError::Framing(_)
+        | WorkerSupervisorError::Session(_)
+        | WorkerSupervisorError::Protocol2Codec(_)
+        | WorkerSupervisorError::Protocol2Session(_)
+        | WorkerSupervisorError::ShutdownRejected => GenericDeckRuntimeError::protocol(),
+        WorkerSupervisorError::ExtensionPackageKind
+        | WorkerSupervisorError::ExtensionPackageDisabled
+        | WorkerSupervisorError::ExtensionRuntimeUnavailable => GenericDeckRuntimeError::input(),
+        WorkerSupervisorError::UnsupportedPlatform
+        | WorkerSupervisorError::Random
+        | WorkerSupervisorError::BootstrapEncode
+        | WorkerSupervisorError::BootstrapTooLarge
+        | WorkerSupervisorError::PipeSecurity(_)
+        | WorkerSupervisorError::PipeCreate(_)
+        | WorkerSupervisorError::Spawn(_)
+        | WorkerSupervisorError::WorkerEnvironment(_)
+        | WorkerSupervisorError::Job(_)
+        | WorkerSupervisorError::BootstrapWrite(_)
+        | WorkerSupervisorError::ProcessHandleUnavailable
+        | WorkerSupervisorError::PipeIo(_)
+        | WorkerSupervisorError::WorkerExited(_)
+        | WorkerSupervisorError::Terminate(_) => GenericDeckRuntimeError::worker(),
+    }
+}
+
+fn map_source_error(error: WorkerSourceV2Error) -> GenericDeckRuntimeError {
+    match error {
+        WorkerSourceV2Error::Client(error) => map_startup_client_error(error),
+        WorkerSourceV2Error::Supervisor(error) => map_supervisor_error(error),
+        WorkerSourceV2Error::Receipt(_)
+        | WorkerSourceV2Error::CartridgeIdentity
+        | WorkerSourceV2Error::ReceiptEncoding
+        | WorkerSourceV2Error::Duplicate(_)
+        | WorkerSourceV2Error::UnsupportedPlatform => GenericDeckRuntimeError::input(),
+    }
+}
+
+fn map_startup_error(error: DeckSessionV2Error) -> GenericDeckRuntimeError {
+    match error {
+        DeckSessionV2Error::ProtocolMismatch => GenericDeckRuntimeError::protocol(),
+        DeckSessionV2Error::Client(error) => map_startup_client_error(error),
+        DeckSessionV2Error::Supervisor(error) => map_supervisor_error(error),
+        DeckSessionV2Error::Source(error) => map_source_error(error),
+        DeckSessionV2Error::Ring(_) => GenericDeckRuntimeError::ring(),
+        DeckSessionV2Error::InvalidHostContract(_)
+        | DeckSessionV2Error::IncompatiblePackage(_)
+        | DeckSessionV2Error::InvalidSource
+        | DeckSessionV2Error::CapabilityMismatch
+        | DeckSessionV2Error::ProfileMismatch
+        | DeckSessionV2Error::InvalidNativeTransfer
+        | DeckSessionV2Error::ExternalAssetInvalid
+        | DeckSessionV2Error::DeckRuntime(_) => GenericDeckRuntimeError::input(),
+    }
+}
+
 fn finish<T>(
     reply: oneshot::Sender<Result<T, GenericDeckRuntimeError>>,
     result: Result<T, GenericDeckRuntimeError>,
@@ -2286,9 +2363,55 @@ fn finish<T>(
 
 #[cfg(test)]
 mod tests {
-    use latentdeck_control::v2::{PlayheadSnapshot, RoleBinding};
+    use latentdeck_control::v2::{CommandName, PlayheadSnapshot, RoleBinding};
+    use latentdeck_core::worker_supervisor::WorkerExit;
 
     use super::*;
+
+    #[test]
+    fn startup_protocol_mismatch_is_not_reported_as_a_worker_exit() {
+        let error = map_startup_error(DeckSessionV2Error::ProtocolMismatch);
+
+        assert_eq!(error.code, "deck.protocol_fault");
+        assert!(error.fatal);
+    }
+
+    #[test]
+    fn startup_worker_exit_and_timeouts_keep_distinct_stable_codes() {
+        let worker_exit = map_startup_error(DeckSessionV2Error::Supervisor(
+            WorkerSupervisorError::WorkerExited(WorkerExit {
+                success: false,
+                code: Some(7),
+            }),
+        ));
+        let connect_timeout = map_startup_error(DeckSessionV2Error::Supervisor(
+            WorkerSupervisorError::ConnectTimeout,
+        ));
+        let command_timeout = map_startup_error(DeckSessionV2Error::Client(
+            WorkerClientV2Error::CommandTimeout(CommandName::DeckLoad),
+        ));
+
+        assert_eq!(worker_exit.code, "deck.worker_fault");
+        assert!(worker_exit.fatal);
+        assert_eq!(connect_timeout.code, "deck.worker_timeout");
+        assert!(connect_timeout.fatal);
+        assert_eq!(command_timeout.code, "deck.worker_timeout");
+        assert!(command_timeout.fatal);
+    }
+
+    #[test]
+    fn startup_package_state_errors_remain_sanitized_input_rejections() {
+        for supervisor in [
+            WorkerSupervisorError::ExtensionPackageKind,
+            WorkerSupervisorError::ExtensionPackageDisabled,
+            WorkerSupervisorError::ExtensionRuntimeUnavailable,
+        ] {
+            let error = map_startup_error(DeckSessionV2Error::Supervisor(supervisor));
+
+            assert_eq!(error.code, "deck.input_invalid");
+            assert!(!error.fatal);
+        }
+    }
 
     fn status(playhead: u64, generation: u64, sequence: u64) -> DeckStatusSnapshot {
         DeckStatusSnapshot {

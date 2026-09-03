@@ -984,7 +984,7 @@ class Protocol2Worker:
             ],
             "controls": [
                 {"name": name, "value": _control_value_wire(value)}
-                for name, value in sorted(deck.controls.items())
+                for name, value in deck.controls.items()
             ],
             "source_transport": [
                 {

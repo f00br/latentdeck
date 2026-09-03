@@ -1080,6 +1080,52 @@ def test_synthetic_non_h3_deck_processes_bounded_source_arities_exactly(
     assert second.provenance["history_present"] == [True] * source_count
 
 
+def test_deck_status_preserves_non_alphabetical_control_order_during_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker, _sink, harness, factory = _worker(tmp_path, monkeypatch)
+    _describe_codec(harness)
+    source = _bind_and_validate(worker, harness, factory, slot=1, seed=7)[2]
+    _load_codec(harness)
+    deck_id = uuid.uuid4()
+    controls = [
+        {"name": "algorithm", "value": {"kind": "text", "value": "linear"}},
+        {"name": "mix", "value": {"kind": "number", "value": 0.5}},
+        {"name": "mode", "value": {"kind": "text", "value": "hybridize"}},
+        {"name": "interaction", "value": {"kind": "number", "value": 0.0}},
+        {"name": "preserve", "value": {"kind": "number", "value": 0.55}},
+        {"name": "chaos", "value": {"kind": "number", "value": 0.0}},
+    ]
+    reply, _ = harness.command(
+        "deck.load",
+        {
+            "deck_session_id": str(deck_id),
+            "deck_id": "test.synthetic.deck",
+            "deck_version": "0.2.0",
+            "operator_id": "test.synthetic.average",
+            "operator_version": "0.2.0",
+            "sources": [source],
+            "roles": [{"role": "carrier", "physical_slot": 1}],
+            "controls": controls,
+            "seed": 123,
+            "stream_generation": 1,
+        },
+    )
+    _assert_ack(reply, "deck.load")
+    assert reply["message"]["body"]["ack"]["payload"]["controls"] == controls
+
+    reply, _ = harness.command(
+        "deck.transport.set",
+        {
+            "deck_session_id": str(deck_id),
+            "deck_revision": 1,
+            "sources": [{"physical_slot": 1, "playing": True, "loop_enabled": True}],
+        },
+    )
+    _assert_ack(reply, "deck.transport.set")
+    assert reply["message"]["body"]["ack"]["payload"]["controls"] == controls
+
+
 def test_deck_transport_and_causal_loop_reset_preserve_independent_physical_playheads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
