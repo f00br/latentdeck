@@ -3,8 +3,27 @@ from __future__ import annotations
 import pytest
 import torch
 from latentdeck_deck_sdk import DeckOperatorContext, RoleBinding
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from latentdeck_operator_q4 import Q4ContractError, process_sources, triangular_influence_weights
+from latentdeck_operator_q4.contract import Algorithm, ArtisticMode, Q4Controls
+from latentdeck_operator_q4.operator import _accumulate_routed
+
+
+class _OperationRecorder(TorchDispatchMode):
+    def __init__(self) -> None:
+        self.operations: list[str] = []
+
+    def __torch_dispatch__(
+        self,
+        function: object,
+        types: tuple[type, ...],
+        args: tuple[object, ...] = (),
+        kwargs: dict[str, object] | None = None,
+    ) -> object:
+        del types
+        self.operations.append(str(function))
+        return function(*args, **(kwargs or {}))  # type: ignore[operator]
 
 
 def _context() -> DeckOperatorContext:
@@ -56,3 +75,36 @@ def test_barycentric_controls_reject_outside_triangle_without_clamping() -> None
             {"influence_mode": "triangle", "triangle_x": 0.1, "triangle_y": 0.9},
             _context(),
         )
+
+
+def test_xs5_accumulator_converts_the_carrier_to_f32_once() -> None:
+    index = torch.arange(96, dtype=torch.float32).reshape(1, 8, 1, 3, 4)
+    carrier = torch.sin(index * 0.07).half()
+    donors = tuple(torch.cos(index * scale).half() for scale in (0.03, 0.05, 0.09))
+    routed = torch.stack([donor.squeeze(0).float() for donor in donors])
+    weights = (0.2, 0.3, 0.5)
+    controls = Q4Controls(
+        algorithm=Algorithm.XS5,
+        interaction=0.8,
+        mode=ArtisticMode.HYBRIDIZE,
+        preserve=0.35,
+    )
+
+    recorder = _OperationRecorder()
+    with recorder:
+        result = _accumulate_routed(carrier, donors, routed, weights, controls)
+
+    expected = carrier.float().clone()
+    structural = carrier.float()
+    for donor_index in range(3):
+        routed_donor = routed[donor_index].unsqueeze(0)
+        target = controls.preserve * structural + (1.0 - controls.preserve) * routed_donor
+        expected.add_(
+            target - structural,
+            alpha=controls.interaction * weights[donor_index],
+        )
+
+    assert torch.equal(result, expected)
+    # One carrier conversion plus one for each of the three donors. The former
+    # implementation converted the complete carrier twice.
+    assert recorder.operations.count("aten._to_copy.default") == 4

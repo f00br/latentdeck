@@ -9,7 +9,13 @@ from pathlib import Path
 from typing import Protocol
 
 from .cartridge import H3VideoSource, load_video_source
-from .decoder import DecodedCycle, H3Decoder, RuntimeInspection, inspect_runtime
+from .decoder import (
+    DecodedCycle,
+    H3Decoder,
+    RuntimeInspection,
+    configure_torch_cpu_threads,
+    inspect_runtime,
+)
 
 WORKER_VERSION = "0.1.0"
 ADAPTER_ID = "org.latentdeck.h3"
@@ -184,6 +190,8 @@ class H3WorkerState:
         }
         try:
             import torch
+
+            configure_torch_cpu_threads(torch)
 
             if self._codec_state == "ready" and self._device_ordinal is not None:
                 result["gpu_allocated_bytes"] = int(

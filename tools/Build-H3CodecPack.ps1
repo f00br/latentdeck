@@ -182,17 +182,30 @@ try {
         $localProjects.Count -ne (@($localProjects | Select-Object -Unique)).Count) {
         throw 'Codec Pack curation lock local_projects must be a non-empty unique set.'
     }
-    foreach ($project in $localProjects) {
-        $buildArguments = @(
-            'build', '--wheel', '--package', $project, '--out-dir', $wheels
-        )
-        if (-not $AllowNetwork) {
-            $buildArguments += '--offline'
+
+    $savedRustFlags = $env:RUSTFLAGS
+    $savedEncodedRustFlags = $env:CARGO_ENCODED_RUSTFLAGS
+    try {
+        $env:RUSTFLAGS = '-C link-arg=/Brepro'
+        if (Test-Path -LiteralPath 'Env:CARGO_ENCODED_RUSTFLAGS') {
+            Remove-Item -LiteralPath 'Env:CARGO_ENCODED_RUSTFLAGS' -ErrorAction Stop
         }
-        Invoke-Checked `
-            -Executable $uv.Source `
-            -Arguments $buildArguments `
-            -Context "local wheel build for $project"
+
+        foreach ($project in $localProjects) {
+            $buildArguments = @(
+                'build', '--wheel', '--package', $project, '--out-dir', $wheels
+            )
+            if (-not $AllowNetwork) {
+                $buildArguments += '--offline'
+            }
+            Invoke-Checked `
+                -Executable $uv.Source `
+                -Arguments $buildArguments `
+                -Context "local wheel build for $project"
+        }
+    } finally {
+        $env:RUSTFLAGS = $savedRustFlags
+        $env:CARGO_ENCODED_RUSTFLAGS = $savedEncodedRustFlags
     }
     $wheelPaths = @(Get-ChildItem -LiteralPath $wheels -Filter '*.whl' -File | Sort-Object Name)
     if ($wheelPaths.Count -ne $localProjects.Count) {

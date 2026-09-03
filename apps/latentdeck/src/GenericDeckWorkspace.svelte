@@ -28,6 +28,7 @@
   } from "./generic-deck-client";
   import {
     MAX_WARM_DECK_SESSIONS,
+    buildGenericControlBindings,
     buildGenericDeckOpenDraft,
     buildGenericDeckPreset,
     codecOptionsForExactDeck,
@@ -37,6 +38,7 @@
     retainExactSelection,
     sessionCapacityState,
     type GenericCodecOption,
+    type GenericControlBinding,
     type GenericDeckSourceIdentity,
   } from "./generic-deck-model";
   import {
@@ -63,6 +65,11 @@
     describeDecodedRecording,
   } from "./recording-model";
   import {
+    LatestValueDispatcher,
+    sameControlSnapshot,
+    type LatestValueDispatchState,
+  } from "./realtime-controls";
+  import {
     presetSlotIdentities,
     stagePresetLibraryLoad,
     type DeckPreset,
@@ -86,6 +93,14 @@
   };
   const PROFILE_SEPARATOR = "\u0000";
   const VIEWPORT_RETRY_DELAYS_MS = [100, 250, 500] as const;
+  const REALTIME_CONTROL_THROTTLE_MS = 75;
+
+  interface RealtimeControlsCommand {
+    sessionId: string;
+    epoch: number;
+    controls: GenericControlBinding[];
+    snapshot: Record<string, DeckUiScalar>;
+  }
 
   let extensions: ExtensionsSnapshot = EMPTY_EXTENSIONS_SNAPSHOT;
   let selectedCodecKey = "";
@@ -133,6 +148,11 @@
   let extensionsRefreshPending: Promise<void> | null = null;
   let extensionsRefreshRevision = 0;
   let extensionsAppliedRevision = 0;
+  let controlsEpoch = 0;
+  let controlsDispatchRunning = false;
+  let controlsDispatchPending = false;
+  let acknowledgedControls: Record<string, DeckUiScalar> | null = null;
+  let controlsDispatcher = createControlsDispatcher(controlsEpoch);
 
   let codecOptions: GenericCodecOption[] = [];
   let selectedCodec: GenericCodecOption | undefined;
@@ -153,10 +173,13 @@
   let loadAvailable = false;
   let loadUnavailableReason = "The native output viewport is not ready.";
   let captureAvailable = false;
+  let captureStartAvailable = false;
   let captureUnavailableReason = "Load and foreground an exact session first.";
   let recordingAvailable = false;
   let captureIsActive = false;
   let recordingIsActive = false;
+  let controlsDraftDirty = false;
+  let controlsUnsettled = false;
 
   $: codecOptions = codecOptionsForExactDeck(model.exactKey, extensions.matrix);
   $: selectedCodec = codecOptions.find(
@@ -216,11 +239,20 @@
     !recordingIsActive &&
     model.requiredCapabilities.includes("snapshot_capture") &&
     model.requiredCapabilities.includes("live_capture");
+  $: controlsDraftDirty =
+    selectedSessionReady &&
+    (acknowledgedControls === null ||
+      !sameControlSnapshot(draft.controls, acknowledgedControls));
+  $: controlsUnsettled =
+    controlsDraftDirty || controlsDispatchRunning || controlsDispatchPending;
+  $: captureStartAvailable = captureAvailable && !controlsUnsettled;
   $: captureUnavailableReason = recordingIsActive
     ? "MP4 recording pins the foreground output lease."
-    : selectedSession?.foreground !== true
-      ? "Capture requires this exact session to own the foreground output lease."
-      : "This exact Deck and Codec profile does not expose both capture capabilities.";
+    : controlsUnsettled
+      ? "Wait for the latest realtime controls to reach the runtime before starting capture."
+      : selectedSession?.foreground !== true
+        ? "Capture requires this exact session to own the foreground output lease."
+        : "This exact Deck and Codec profile does not expose both capture capabilities.";
   $: recordingAvailable =
     selectedSessionReady &&
     selectedSession?.foreground === true &&
@@ -269,6 +301,7 @@
       if (active) void pollForegroundState();
     }, 500);
     return () => {
+      disposeControlsDispatcher();
       viewportSuspended = true;
       registerLeave(async () => undefined);
       globalThis.clearInterval(poll);
@@ -284,6 +317,7 @@
   });
 
   function resetForExactDeck(): void {
+    resetControlsScope();
     viewportSuspended = false;
     viewportRetryAttempt = 0;
     viewportRetryExhausted = false;
@@ -576,6 +610,80 @@
     }));
   }
 
+  function createControlsDispatcher(
+    epoch: number,
+  ): LatestValueDispatcher<RealtimeControlsCommand> {
+    return new LatestValueDispatcher<RealtimeControlsCommand>({
+      throttleMs: REALTIME_CONTROL_THROTTLE_MS,
+      apply: applyRealtimeControls,
+      onError: fail,
+      onStateChange: (state: LatestValueDispatchState) => {
+        if (epoch !== controlsEpoch) return;
+        controlsDispatchRunning = state.running;
+        controlsDispatchPending = state.pending;
+      },
+    });
+  }
+
+  function resetControlsScope(): void {
+    controlsEpoch += 1;
+    controlsDispatcher.dispose();
+    controlsDispatchRunning = false;
+    controlsDispatchPending = false;
+    acknowledgedControls = null;
+    controlsDispatcher = createControlsDispatcher(controlsEpoch);
+  }
+
+  function disposeControlsDispatcher(): void {
+    controlsEpoch += 1;
+    controlsDispatcher.dispose();
+    controlsDispatchRunning = false;
+    controlsDispatchPending = false;
+    acknowledgedControls = null;
+  }
+
+  function controlsCommandIsCurrent(command: RealtimeControlsCommand): boolean {
+    return (
+      command.epoch === controlsEpoch &&
+      command.sessionId === selectedSessionId &&
+      command.sessionId === hydratedSessionId &&
+      sessionSnapshotValid
+    );
+  }
+
+  async function applyRealtimeControls(
+    command: RealtimeControlsCommand,
+  ): Promise<void> {
+    try {
+      const next = await genericDeckClient.controlsSet(
+        command.sessionId,
+        command.controls,
+      );
+      if (!controlsCommandIsCurrent(command)) return;
+      applyRuntimeForSession(command.sessionId, next);
+      acknowledgedControls = { ...command.snapshot };
+    } catch (error) {
+      if (controlsCommandIsCurrent(command)) throw error;
+    }
+  }
+
+  function queueControls(
+    controls: Record<string, DeckUiScalar>,
+    immediate: boolean,
+  ): void {
+    const sessionId = selectedSession?.sessionId;
+    if (!selectedSessionReady || sessionId === undefined) return;
+    controlsDispatcher.push(
+      {
+        sessionId,
+        epoch: controlsEpoch,
+        controls: buildGenericControlBindings(model, controls),
+        snapshot: { ...controls },
+      },
+      immediate,
+    );
+  }
+
   function updateDraft(next: DeckUiDraft): void {
     const sourcesChanged = next.sourceArchiveSha256s.some(
       (archiveSha256, index) =>
@@ -675,6 +783,7 @@
         deviceOrdinal,
         ...wire,
       });
+      if (opened.sessionId !== selectedSessionId) resetControlsScope();
       selectedSessionId = opened.sessionId;
       sessions = await genericDeckClient.foregroundSet(opened.sessionId);
       message = `Warm session ${opened.sessionId} owns foreground output.`;
@@ -703,13 +812,16 @@
             session.deck.packageVersion,
           ) === model.exactKey,
       );
-      selectedSessionId = foreground?.sessionId ?? "";
+      const nextSelectedSessionId = foreground?.sessionId ?? "";
+      if (nextSelectedSessionId !== selectedSessionId) resetControlsScope();
+      selectedSessionId = nextSelectedSessionId;
       hydratedSessionId = "";
       sessionSnapshotValid = false;
     }
   }
 
   function hydrateSelectedSession(session: GenericDeckSessionView): void {
+    resetControlsScope();
     hydratedSessionId = session.sessionId;
     sessionSnapshotValid = false;
     try {
@@ -725,6 +837,7 @@
       recording = null;
       spout = null;
       outputFullscreen = null;
+      acknowledgedControls = { ...draft.controls };
       sessionSnapshotValid = true;
     } catch (error) {
       draft = createDeckUiDraft(model);
@@ -745,10 +858,17 @@
 
   function applyRuntime(next: GenericDeckRuntimeView): void {
     if (selectedSessionId === "") return;
+    applyRuntimeForSession(selectedSessionId, next);
+  }
+
+  function applyRuntimeForSession(
+    sessionId: string,
+    next: GenericDeckRuntimeView,
+  ): void {
     sessions = {
       ...sessions,
       sessions: sessions.sessions.map((session) =>
-        session.sessionId === selectedSessionId
+        session.sessionId === sessionId
           ? { ...session, runtime: next }
           : session,
       ),
@@ -760,6 +880,7 @@
   ): Promise<void> {
     await run(async () => {
       sessions = await genericDeckClient.foregroundSet(session.sessionId);
+      if (session.sessionId !== selectedSessionId) resetControlsScope();
       selectedSessionId = session.sessionId;
       hydratedSessionId = "";
       sessionSnapshotValid = false;
@@ -789,13 +910,12 @@
     });
   }
 
-  async function commitControls(
-    _controls: Record<string, DeckUiScalar>,
-  ): Promise<void> {
-    const wire = buildGenericDeckOpenDraft(model, draft, library.cartridges);
-    await runSessionAction((sessionId) =>
-      genericDeckClient.controlsSet(sessionId, wire.controls),
-    );
+  function changeControls(controls: Record<string, DeckUiScalar>): void {
+    queueControls(controls, false);
+  }
+
+  function commitControls(controls: Record<string, DeckUiScalar>): void {
+    queueControls(controls, true);
   }
 
   async function commitRoles(_roles: Record<string, number>): Promise<void> {
@@ -862,20 +982,17 @@
     mode: "snapshot" | "live_capture",
   ): Promise<void> {
     if (!captureAvailable || selectedSession === undefined) return;
+    const sessionId = selectedSession.sessionId;
+    const stoppingLiveCapture =
+      mode === "live_capture" &&
+      capture?.mode === "live_capture" &&
+      capture.state === "capturing";
+    if (!stoppingLiveCapture && controlsUnsettled) return;
     await run(async () => {
-      if (
-        mode === "live_capture" &&
-        capture?.mode === "live_capture" &&
-        capture.state === "capturing"
-      ) {
-        capture = await genericDeckClient.captureStop(
-          selectedSession!.sessionId,
-        );
+      if (stoppingLiveCapture) {
+        capture = await genericDeckClient.captureStop(sessionId);
       } else {
-        capture = await genericDeckClient.captureStart(
-          selectedSession!.sessionId,
-          mode,
-        );
+        capture = await genericDeckClient.captureStart(sessionId, mode);
       }
       if (capture !== null) await refreshSessions();
       await publishCompletedCapture(capture);
@@ -1618,6 +1735,7 @@
       {playheads}
       captureState={captureState()}
       {captureAvailable}
+      {captureStartAvailable}
       captureActive={captureIsActive}
       liveCaptureActive={capture?.mode === "live_capture" &&
         capture.state === "capturing"}
@@ -1628,6 +1746,7 @@
       onRestart={restart}
       onProcessOnce={processOnce}
       onControlsCommit={commitControls}
+      onControlsChange={changeControls}
       onRolesCommit={commitRoles}
       onTransportCommit={commitTransport}
       onSeedCommit={commitSeed}

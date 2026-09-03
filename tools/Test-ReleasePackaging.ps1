@@ -816,6 +816,25 @@ try {
     $fullPackBuilder = Get-Content -Raw -LiteralPath (
         Join-Path $PSScriptRoot 'Build-H3CodecPack.ps1'
     )
+    $reproducibleWheelBuildContract = @'
+(?sx)
+\$savedRustFlags\s*=\s*\$env:RUSTFLAGS
+.*?\$savedEncodedRustFlags\s*=\s*\$env:CARGO_ENCODED_RUSTFLAGS
+.*?try\s*\{
+.*?\$env:RUSTFLAGS\s*=\s*'-C\s+link-arg=/Brepro'
+.*?Remove-Item\s+-LiteralPath\s+'Env:CARGO_ENCODED_RUSTFLAGS'
+.*?foreach\s*\(\$project\s+in\s+\$localProjects\)
+.*?\}\s*finally\s*\{
+.*?\$env:RUSTFLAGS\s*=\s*\$savedRustFlags
+.*?\$env:CARGO_ENCODED_RUSTFLAGS\s*=\s*\$savedEncodedRustFlags
+\s*\}
+'@
+    if ($fullPackBuilder -cnotmatch $reproducibleWheelBuildContract) {
+        throw (
+            'Build-H3CodecPack.ps1 must force /Brepro for local wheels, suppress ' +
+            'CARGO_ENCODED_RUSTFLAGS precedence, and restore both process variables in finally.'
+        )
+    }
     foreach ($removedAuthorizationArgument in @(
         '--expected-sha256',
         '--expected-length',

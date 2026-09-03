@@ -95,7 +95,7 @@ def test_q4_package_is_closed_and_faceplate_exposes_the_exact_contract() -> None
         "kind": "python_operator_stream_v1",
         "operator_descriptor_path": "operator.json",
         "python_root": "python",
-        "entrypoint": "latentdeck_operator_q4.operator:process_sources",
+        "entrypoint": "latentdeck_operator_q4.operator:process_sources_host",
     }
     signal = manifest["signal"]
     assert isinstance(signal, dict)

@@ -13,8 +13,8 @@
     },
     {
       "path": "operator.json",
-      "byte_length": 2738,
-      "sha256": "b553c4afbab340e56664118be0585f0c298ffac6b92447774ad35f7cb27e0c2e"
+      "byte_length": 2743,
+      "sha256": "2e51f6c6bf5061445bbb4746291cd0fb70285e50dfce0f9434b4895eb2ab763c"
     },
     {
       "path": "python/latentdeck_operator_q4/__init__.py",
@@ -28,8 +28,8 @@
     },
     {
       "path": "python/latentdeck_operator_q4/operator.py",
-      "byte_length": 13779,
-      "sha256": "7f9ce6c5ef6999adb75828cd77cf799aedd9f83e21c41d0b6481ea84f49a52f6"
+      "byte_length": 13941,
+      "sha256": "a83127b8793817189e256075c30832d6b393cdff0a2b89bc9b774edbe5b39e1d"
     }
   ]
 }

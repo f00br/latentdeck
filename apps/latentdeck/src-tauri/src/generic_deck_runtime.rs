@@ -244,7 +244,7 @@ impl GenericDeckRuntime {
             prepared.host.signal_geometry.decoded_width,
             prepared.host.signal_geometry.decoded_height,
         );
-        let frame_duration = frame_duration(
+        let frame_clock = FrameClock::new(
             prepared.host.signal_geometry.frame_rate_numerator,
             prepared.host.signal_geometry.frame_rate_denominator,
         )?;
@@ -407,7 +407,7 @@ impl GenericDeckRuntime {
             ring_id,
             dimensions,
             slot_counts,
-            frame_duration,
+            frame_clock,
             command_timeout,
             capture_status: Arc::clone(&capture_status),
             app_local_data,
@@ -730,7 +730,7 @@ struct RuntimeActor {
     ring_id: Uuid,
     dimensions: (u32, u32),
     slot_counts: Vec<(u8, u64)>,
-    frame_duration: Duration,
+    frame_clock: FrameClock,
     command_timeout: Duration,
     capture_status: Arc<Mutex<GenericCaptureView>>,
     app_local_data: PathBuf,
@@ -762,19 +762,56 @@ struct ActiveCapture {
 
 impl RuntimeActor {
     async fn run(mut self, mut receiver: mpsc::Receiver<RuntimeCommand>) {
-        let mut next_frame = Instant::now();
         loop {
-            let command = if transport_active(&self.status) || self.capture_drives_processing() {
+            if self.processing_active() && self.pending_frames.is_empty() {
+                // Give one already-queued mutation priority before a comparatively
+                // long worker/GPU call.  Once the command lane is clear, decode
+                // the next bounded batch immediately instead of waiting until the
+                // presentation deadline and making decode time visible as a hitch.
+                match receiver.try_recv() {
+                    Ok(command) => {
+                        let was_processing = self.processing_active();
+                        if self.handle(command).await {
+                            break;
+                        }
+                        self.restart_clock_on_resume(was_processing);
+                        continue;
+                    }
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        let _ = self.stop(ShutdownReason::HostExit).await;
+                        break;
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => {}
+                }
+                if let Err(error) = self.process_once().await {
+                    self.fail(error);
+                    break;
+                }
+                continue;
+            }
+
+            let command = if self.processing_active() {
+                let frame_deadline = match self.frame_clock.next_deadline() {
+                    Ok(deadline) => deadline,
+                    Err(error) => {
+                        self.fail(error);
+                        break;
+                    }
+                };
                 tokio::select! {
-                    command = receiver.recv() => command,
-                    () = sleep_until(next_frame) => {
-                        if let Err(error) = self.tick().await {
+                    biased;
+                    () = sleep_until(frame_deadline) => {
+                        if let Err(error) = self.frame_clock.advance_past(Instant::now()) {
                             self.fail(error);
                             break;
                         }
-                        next_frame = Instant::now() + self.frame_duration;
+                        if let Err(error) = self.present_once() {
+                            self.fail(error);
+                            break;
+                        }
                         continue;
-                    }
+                    },
+                    command = receiver.recv() => command,
                 }
             } else {
                 receiver.recv().await
@@ -783,10 +820,11 @@ impl RuntimeActor {
                 let _ = self.stop(ShutdownReason::HostExit).await;
                 break;
             };
+            let was_processing = self.processing_active();
             if self.handle(command).await {
                 break;
             }
-            next_frame = Instant::now();
+            self.restart_clock_on_resume(was_processing);
         }
         if !self.worker_stopped {
             let _ = self.stop(ShutdownReason::ProtocolFault).await;
@@ -795,6 +833,17 @@ impl RuntimeActor {
         let _ = self.output.hide();
         let _ = self.output.destroy();
         self.output_visible.store(false, Ordering::Release);
+    }
+
+    fn processing_active(&self) -> bool {
+        transport_active(&self.status) || self.capture_drives_processing()
+    }
+
+    fn restart_clock_on_resume(&mut self, was_processing: bool) {
+        if !was_processing && self.processing_active() {
+            self.frame_clock.restart();
+            self.presentation_diagnostics.cut_interval();
+        }
     }
 
     async fn handle(&mut self, command: RuntimeCommand) -> bool {
@@ -879,6 +928,10 @@ impl RuntimeActor {
         if self.pending_frames.is_empty() {
             self.process_once().await?;
         }
+        self.present_once()
+    }
+
+    fn present_once(&mut self) -> Result<(), GenericDeckRuntimeError> {
         let frame = self
             .pending_frames
             .pop_front()
@@ -976,6 +1029,8 @@ impl RuntimeActor {
         self.session
             .adopt_ring_generation(generation)
             .map_err(|_| GenericDeckRuntimeError::ring())?;
+        self.frame_clock.restart();
+        self.presentation_diagnostics.cut_interval();
         self.status = *status;
         Ok(())
     }
@@ -1155,6 +1210,8 @@ impl RuntimeActor {
             .adopt_ring_generation(generation)
             .map_err(|_| GenericDeckRuntimeError::ring())?;
         self.pending_frames.clear();
+        self.frame_clock.restart();
+        self.presentation_diagnostics.cut_interval();
         self.status = *status;
         self.publish_status()?;
         self.view()
@@ -2091,13 +2148,82 @@ fn pad_tight_rgba(
     Ok(output)
 }
 
-fn frame_duration(numerator: u32, denominator: u32) -> Result<Duration, GenericDeckRuntimeError> {
-    if numerator == 0 || denominator == 0 {
+struct FrameClock {
+    numerator: u64,
+    denominator: u64,
+    epoch: Instant,
+    next_tick: u64,
+}
+
+impl FrameClock {
+    fn new(numerator: u32, denominator: u32) -> Result<Self, GenericDeckRuntimeError> {
+        let numerator = u64::from(numerator);
+        let denominator = u64::from(denominator);
+        if numerator == 0 || denominator == 0 || frame_offset_ns(numerator, denominator, 1)? == 0 {
+            return Err(GenericDeckRuntimeError::input());
+        }
+        Ok(Self {
+            numerator,
+            denominator,
+            epoch: Instant::now(),
+            next_tick: 1,
+        })
+    }
+
+    fn restart(&mut self) {
+        self.epoch = Instant::now();
+        self.next_tick = 1;
+    }
+
+    fn next_deadline(&self) -> Result<Instant, GenericDeckRuntimeError> {
+        let offset = frame_offset_ns(self.numerator, self.denominator, self.next_tick)?;
+        self.epoch
+            .checked_add(Duration::from_nanos(offset))
+            .ok_or_else(GenericDeckRuntimeError::protocol)
+    }
+
+    fn advance_past(&mut self, now: Instant) -> Result<(), GenericDeckRuntimeError> {
+        let elapsed_ns = now
+            .checked_duration_since(self.epoch)
+            .unwrap_or_default()
+            .as_nanos();
+        let period_scale = u128::from(self.denominator)
+            .checked_mul(1_000_000_000)
+            .ok_or_else(GenericDeckRuntimeError::protocol)?;
+        let scaled = elapsed_ns
+            .checked_add(1)
+            .and_then(|value| value.checked_mul(u128::from(self.numerator)))
+            .ok_or_else(GenericDeckRuntimeError::protocol)?;
+        let first_future_tick = scaled
+            .checked_add(period_scale - 1)
+            .ok_or_else(GenericDeckRuntimeError::protocol)?
+            / period_scale;
+        let first_future_tick = u64::try_from(first_future_tick)
+            .map_err(|_| GenericDeckRuntimeError::protocol())?
+            .max(1);
+        let following_tick = self
+            .next_tick
+            .checked_add(1)
+            .ok_or_else(GenericDeckRuntimeError::protocol)?;
+        self.next_tick = following_tick.max(first_future_tick);
+        Ok(())
+    }
+}
+
+fn frame_offset_ns(
+    numerator: u64,
+    denominator: u64,
+    tick: u64,
+) -> Result<u64, GenericDeckRuntimeError> {
+    if numerator == 0 || denominator == 0 || tick == 0 {
         return Err(GenericDeckRuntimeError::input());
     }
-    Ok(Duration::from_secs_f64(
-        f64::from(denominator) / f64::from(numerator),
-    ))
+    let value = u128::from(tick)
+        .checked_mul(u128::from(denominator))
+        .and_then(|value| value.checked_mul(1_000_000_000))
+        .ok_or_else(GenericDeckRuntimeError::protocol)?
+        / u128::from(numerator);
+    u64::try_from(value).map_err(|_| GenericDeckRuntimeError::protocol())
 }
 
 fn transport_active(status: &DeckStatusSnapshot) -> bool {
@@ -2525,6 +2651,50 @@ mod tests {
     fn rgba_padding_preserves_rows_without_resize_or_crop() {
         let padded = pad_tight_rgba(&[1, 2, 3, 4, 5, 6, 7, 8], 1, 2, 8).expect("padded rgba");
         assert_eq!(padded, [1, 2, 3, 4, 0, 0, 0, 0, 5, 6, 7, 8, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn frame_clock_keeps_absolute_rational_cadence_and_skips_late_ticks() {
+        let mut clock = FrameClock::new(24, 1).expect("24 fps clock");
+        let epoch = clock.epoch;
+
+        assert_eq!(
+            clock
+                .next_deadline()
+                .expect("first deadline")
+                .duration_since(epoch)
+                .as_nanos(),
+            41_666_666
+        );
+        // Re-reading status or handling another non-causal command does not
+        // mutate the clock phase.
+        assert_eq!(
+            clock
+                .next_deadline()
+                .expect("stable deadline")
+                .duration_since(epoch)
+                .as_nanos(),
+            41_666_666
+        );
+
+        clock
+            .advance_past(epoch + Duration::from_millis(100))
+            .expect("late tick skip");
+        assert_eq!(
+            clock
+                .next_deadline()
+                .expect("deadline after a late presentation")
+                .duration_since(epoch)
+                .as_nanos(),
+            125_000_000
+        );
+    }
+
+    #[test]
+    fn frame_clock_rejects_invalid_rates_without_float_rounding() {
+        assert!(FrameClock::new(0, 1).is_err());
+        assert!(FrameClock::new(24, 0).is_err());
+        assert_eq!(frame_offset_ns(30_000, 1_001, 3).unwrap(), 100_100_000);
     }
 
     #[test]

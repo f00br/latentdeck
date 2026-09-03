@@ -33,7 +33,7 @@ from latentdeck_codec_h3.adapter import (
     H3CodecAdapter,
     make_adapter,
 )
-from latentdeck_codec_h3.decoder import H3Decoder
+from latentdeck_codec_h3.decoder import DecodedRgbaBatch, H3Decoder
 
 
 class MemoryAccess:
@@ -89,11 +89,14 @@ class FakeDecoder:
     def reset(self) -> None:
         self.reset_count += 1
 
-    def decode_slot(self, tensor: torch.Tensor) -> tuple[bytes, ...]:
+    def decode_slot(self, tensor: torch.Tensor) -> DecodedRgbaBatch:
         self.decode_count += 1
         height = int(tensor.shape[3]) * 16
         width = int(tensor.shape[4]) * 16
-        return (bytes([7, 8, 9, 255]) * (height * width),)
+        return DecodedRgbaBatch(
+            pixels=memoryview(bytes([7, 8, 9, 255]) * (height * width)),
+            batch=1,
+        )
 
 
 def _make_access(
@@ -107,7 +110,7 @@ def _make_access(
     cartridge_id = uuid.uuid4()
     frame_count = 5 + 17 * ((temporal - 2) // 5)
     video_values = [
-        float(channel * 10 + slot)
+        float(channel * 10 + slot) + _height * 0.25 + _width * 0.03125
         for channel in range(24)
         for slot in range(temporal)
         for _height in range(latent_height)
@@ -235,6 +238,7 @@ def _adapter_harness(
         decoder_factory=decoder_factory,
         tensor_transfer=lambda cpu, _torch, _ordinal: cpu.to(dtype=torch.float16).contiguous(),
         asset_validator=asset_validator,
+        torch_configurator=lambda _torch: 1,
     )
     asset = ExternalAsset(
         asset_id="taeh3",
@@ -306,7 +310,7 @@ def test_h3_pack_keeps_only_the_player_p1_bridge_and_generic_v2_adapter() -> Non
 
 
 @pytest.mark.parametrize("storage_dtype", ["F16", "F32"])
-def test_path_free_profile_receipt_and_streamed_slot_read(
+def test_path_free_profile_receipt_and_resident_slot_read(
     tmp_path: Path,
     storage_dtype: str,
 ) -> None:
@@ -332,7 +336,9 @@ def test_path_free_profile_receipt_and_streamed_slot_read(
     assert receipt.tensor_abi.shape == (1, 24, 1, 1, 1)
     assert receipt.tensor_abi.dtype == "float16"
     assert receipt.tensor_abi.device == "cuda"
-    assert receipt.estimated_device_bytes == 24 * 1 * 1 * 2 + TAEH3_ASSET_BYTE_LENGTH
+    storage_bytes = 2 if storage_dtype == "F16" else 4
+    assert receipt.estimated_host_bytes == 24 * 7 * storage_bytes
+    assert receipt.estimated_device_bytes == 24 * 7 * 2 + TAEH3_ASSET_BYTE_LENGTH
 
     adapter.load(load_request)
     assert torch_loads == [str(torch.__version__)]
@@ -348,10 +354,9 @@ def test_path_free_profile_receipt_and_streamed_slot_read(
     assert tuple(slot.shape) == (1, 24, 1, 1, 1)
     assert slot[0, 0, 0, 0, 0].item() == 3
     assert slot[0, 23, 0, 0, 0].item() == 233
-    assert all(
-        name == "video" and offset >= 0 and byte_length > 0
-        for name, offset, byte_length in access.reads
-    )
+    assert access.reads == [("video", 0, 24 * 7 * storage_bytes)]
+    adapter.read_slot(source, 4)
+    assert access.reads == [("video", 0, 24 * 7 * storage_bytes)]
     assert not hasattr(access, "read_payload_range")
     assert not hasattr(source, "path")
     decoded = adapter.decode_slot(slot, 1)
@@ -383,6 +388,54 @@ def test_repeat_protocol2_sessions_do_not_rehash_the_host_retained_decoder(
         assert len(decoder_loads) == 1
 
     assert worker_full_hashes == []
+
+
+def test_full_video_residency_is_shared_and_released_by_exact_source_identity(
+    tmp_path: Path,
+) -> None:
+    adapter, request, _decoder_loads, _torch_loads, _asset_preflights = _adapter_harness(
+        tmp_path,
+        FakeDecoder(),
+    )
+    transfers: list[tuple[tuple[int, ...], torch.dtype, bool]] = []
+
+    def record_transfer(cpu: torch.Tensor, _torch: object, _ordinal: int) -> torch.Tensor:
+        transfers.append((tuple(cpu.shape), cpu.dtype, cpu.is_contiguous()))
+        return cpu.clone()
+
+    adapter._tensor_transfer = record_transfer
+    access = _make_access(storage_dtype="F16", temporal=7, latent_height=2, latent_width=3)
+    inspection = adapter.inspect(access)
+    receipt = adapter.validate_profile(access, inspection)
+    adapter.load(request)
+
+    first = adapter.open_source(access, receipt, uuid.uuid4())
+    second = adapter.open_source(access, receipt, uuid.uuid4())
+    assert access.reads == [("video", 0, 1 * 24 * 7 * 2 * 3 * 2)]
+    assert transfers == [((1, 7, 24, 2, 3), torch.float16, True)]
+    assert first.resident_video is second.resident_video
+    first_slot = adapter.read_slot(first, 3)
+    assert first_slot[0, 0, 0, 1, 2].item() == pytest.approx(3.3125)
+    first_slot.fill_(0)
+    assert adapter.read_slot(first, 3)[0, 0, 0, 1, 2].item() == pytest.approx(3.3125)
+    assert adapter.read_slot(second, 3)[0, 0, 0, 1, 2].item() == pytest.approx(3.3125)
+    assert adapter.read_slot(second, 4)[0, 23, 0, 0, 0].item() == 234
+    assert len(adapter._resident_videos) == 1
+
+    first.close()
+    assert len(adapter._resident_videos) == 1
+    assert adapter.read_slot(second, 3).is_contiguous()
+    second.close()
+    second.close()
+    assert adapter._resident_videos == {}
+
+    third = adapter.open_source(access, receipt, uuid.uuid4())
+    assert access.reads == [
+        ("video", 0, 1 * 24 * 7 * 2 * 3 * 2),
+        ("video", 0, 1 * 24 * 7 * 2 * 3 * 2),
+    ]
+    assert len(transfers) == 2
+    third.close()
 
 
 def test_protocol2_decoder_factory_uses_the_host_validated_loader(
@@ -533,6 +586,70 @@ def test_capture_writer_stages_only_codec_payload_and_cleans_abort(tmp_path: Pat
     assert not payload_path.exists()
     assert sentinel.read_text(encoding="utf-8") == "keep"
     assert staging_root.is_dir()
+
+
+def test_capture_writer_has_one_standalone_finite_gate_and_a_trusted_host_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _decoder_loads = _loaded_adapter(tmp_path, FakeDecoder())
+    slot = torch.ones((1, 24, 1, 1, 1), dtype=torch.float16).contiguous()
+    original_isfinite = torch.isfinite
+    finite_calls = 0
+
+    def recording_isfinite(value: torch.Tensor) -> torch.Tensor:
+        nonlocal finite_calls
+        finite_calls += 1
+        return original_isfinite(value)
+
+    monkeypatch.setattr(torch, "isfinite", recording_isfinite)
+
+    standalone_root = tmp_path / "standalone-capture"
+    standalone_root.mkdir()
+    standalone = adapter.create_capture_writer(
+        CaptureRequest(
+            capture_id=uuid.uuid4(),
+            mode="snapshot",
+            staging_root=str(standalone_root.resolve()),
+            maximum_latent_slots=7,
+            maximum_visual_bytes=1024 * 1024,
+        )
+    )
+    standalone.append(slot)
+    assert finite_calls == 1
+    standalone.abort()
+
+    trusted_root = tmp_path / "trusted-capture"
+    trusted_root.mkdir()
+    trusted = adapter.create_capture_writer(
+        CaptureRequest(
+            capture_id=uuid.uuid4(),
+            mode="snapshot",
+            staging_root=str(trusted_root.resolve()),
+            maximum_latent_slots=7,
+            maximum_visual_bytes=1024 * 1024,
+        )
+    )
+    trusted.append_validated(slot)
+    assert finite_calls == 1
+    trusted.abort()
+
+    rejected_root = tmp_path / "rejected-capture"
+    rejected_root.mkdir()
+    rejected = adapter.create_capture_writer(
+        CaptureRequest(
+            capture_id=uuid.uuid4(),
+            mode="snapshot",
+            staging_root=str(rejected_root.resolve()),
+            maximum_latent_slots=7,
+            maximum_visual_bytes=1024 * 1024,
+        )
+    )
+    non_finite = slot.clone()
+    non_finite[0, 0, 0, 0, 0] = torch.inf
+    with pytest.raises(CodecSdkError, match="capture.write_failed"):
+        rejected.append(non_finite)
+    assert finite_calls == 2
 
 
 def test_capture_writer_rejects_non_h3_boundary_and_removes_partials(tmp_path: Path) -> None:

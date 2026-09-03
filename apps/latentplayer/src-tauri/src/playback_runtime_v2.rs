@@ -143,7 +143,7 @@ mod windows {
             let generation = config.host.stream_generation;
             let command_timeout = config.host.command_timeout;
             let initial_loop_enabled = config.host.loop_enabled;
-            let frame_duration = frame_duration(
+            let frame_clock = FrameClock::new(
                 config.host.signal_geometry.frame_rate_numerator,
                 config.host.signal_geometry.frame_rate_denominator,
             )?;
@@ -200,7 +200,7 @@ mod windows {
                 dimensions,
                 latent_slot_count: config.latent_slot_count,
                 decoded_frame_count: config.cartridge_summary.frame_count,
-                frame_duration,
+                frame_clock,
                 pending_frames: VecDeque::new(),
                 presented_frames: 0,
                 last_playhead_slot: 0,
@@ -370,7 +370,7 @@ mod windows {
         dimensions: (u32, u32),
         latent_slot_count: u64,
         decoded_frame_count: u64,
-        frame_duration: Duration,
+        frame_clock: FrameClock,
         pending_frames: VecDeque<Vec<u8>>,
         presented_frames: u64,
         last_playhead_slot: u64,
@@ -382,19 +382,53 @@ mod windows {
 
     impl RuntimeActor {
         async fn run(mut self, mut rx: mpsc::Receiver<RuntimeCommand>) {
-            let mut next_frame = Instant::now();
             loop {
+                if should_refill_now(self.playing, self.pending_frames.is_empty()) {
+                    // Let an already-queued control mutation win before the
+                    // comparatively long worker/GPU step. Once that lane is
+                    // clear, refill immediately so decode time stays outside
+                    // the next presentation interval.
+                    match rx.try_recv() {
+                        Ok(command) => {
+                            let was_playing = self.playing;
+                            if self.handle(command).await {
+                                break;
+                            }
+                            self.restart_clock_on_resume(was_playing);
+                            continue;
+                        }
+                        Err(mpsc::error::TryRecvError::Disconnected) => break,
+                        Err(mpsc::error::TryRecvError::Empty) => {}
+                    }
+                    if let Err(error) = self.refill_once().await {
+                        record_error(&self.player, error);
+                        break;
+                    }
+                    continue;
+                }
+
                 let command = if self.playing {
+                    let frame_deadline = match self.frame_clock.next_deadline() {
+                        Ok(deadline) => deadline,
+                        Err(error) => {
+                            record_error(&self.player, error);
+                            break;
+                        }
+                    };
                     tokio::select! {
-                        command = rx.recv() => command,
-                        () = sleep_until(next_frame) => {
-                            if let Err(error) = self.tick().await {
+                        biased;
+                        () = sleep_until(frame_deadline) => {
+                            if let Err(error) = self.present_once() {
                                 record_error(&self.player, error);
                                 break;
                             }
-                            next_frame = Instant::now() + self.frame_duration;
+                            if let Err(error) = self.frame_clock.advance_past(Instant::now()) {
+                                record_error(&self.player, error);
+                                break;
+                            }
                             continue;
-                        }
+                        },
+                        command = rx.recv() => command,
                     }
                 } else {
                     rx.recv().await
@@ -402,22 +436,29 @@ mod windows {
                 let Some(command) = command else {
                     break;
                 };
+                let was_playing = self.playing;
                 if self.handle(command).await {
                     break;
                 }
-                next_frame = Instant::now();
+                self.restart_clock_on_resume(was_playing);
             }
             let _ = self.output.hide();
             let _ = self.output.destroy();
+        }
+
+        fn restart_clock_on_resume(&mut self, was_playing: bool) {
+            if should_restart_frame_clock(was_playing, self.playing) {
+                self.frame_clock.restart();
+            }
         }
 
         async fn handle(&mut self, command: RuntimeCommand) -> bool {
             match command {
                 RuntimeCommand::Play(reply) => {
                     let result = self.status().await.and_then(|()| {
+                        with_player(&self.player, |state| state.set_playing_protocol2(true))?;
                         self.playing = true;
-                        with_player(&self.player, |state| state.set_playing_protocol2(true))
-                            .map(|_| ())
+                        Ok(())
                     });
                     let _ = reply.send(result);
                 }
@@ -500,22 +541,26 @@ mod windows {
             )
         }
 
-        async fn tick(&mut self) -> Result<(), PlaybackRuntimeError> {
-            if self.pending_frames.is_empty() {
-                if self.last_playhead_slot >= self.latent_slot_count || self.end_of_stream {
-                    if self.loop_enabled {
-                        self.reset().await?;
-                        self.playing = true;
-                    } else {
-                        self.playing = false;
-                        self.end_of_stream = true;
-                        let _ =
-                            with_player(&self.player, |state| state.set_playing_protocol2(false))?;
-                        return Ok(());
-                    }
-                }
-                self.step().await?;
+        async fn refill_once(&mut self) -> Result<(), PlaybackRuntimeError> {
+            if !self.pending_frames.is_empty() {
+                return Ok(());
             }
+            if self.last_playhead_slot >= self.latent_slot_count || self.end_of_stream {
+                if self.loop_enabled {
+                    self.reset().await?;
+                    with_player(&self.player, |state| state.set_playing_protocol2(true))?;
+                    self.playing = true;
+                } else {
+                    self.playing = false;
+                    self.end_of_stream = true;
+                    let _ = with_player(&self.player, |state| state.set_playing_protocol2(false))?;
+                    return Ok(());
+                }
+            }
+            self.step().await
+        }
+
+        fn present_once(&mut self) -> Result<(), PlaybackRuntimeError> {
             let frame = self
                 .pending_frames
                 .pop_front()
@@ -635,8 +680,9 @@ mod windows {
             with_player(
                 &self.player,
                 latentdeck_core::player::PlayerCoordinator::reset_to_start_protocol2,
-            )
-            .map(|_| ())
+            )?;
+            self.frame_clock.restart();
+            Ok(())
         }
 
         fn viewport(
@@ -764,13 +810,86 @@ mod windows {
         Ok(padded)
     }
 
-    fn frame_duration(numerator: u32, denominator: u32) -> Result<Duration, PlaybackRuntimeError> {
-        if numerator == 0 || denominator == 0 {
+    struct FrameClock {
+        numerator: u64,
+        denominator: u64,
+        epoch: Instant,
+        next_tick: u64,
+    }
+
+    impl FrameClock {
+        fn new(numerator: u32, denominator: u32) -> Result<Self, PlaybackRuntimeError> {
+            let numerator = u64::from(numerator);
+            let denominator = u64::from(denominator);
+            if numerator == 0
+                || denominator == 0
+                || frame_offset_ns(numerator, denominator, 1)? == 0
+            {
+                return Err(PlaybackRuntimeError::protocol());
+            }
+            Ok(Self {
+                numerator,
+                denominator,
+                epoch: Instant::now(),
+                next_tick: 1,
+            })
+        }
+
+        fn restart(&mut self) {
+            self.epoch = Instant::now();
+            self.next_tick = 1;
+        }
+
+        fn next_deadline(&self) -> Result<Instant, PlaybackRuntimeError> {
+            let offset = frame_offset_ns(self.numerator, self.denominator, self.next_tick)?;
+            self.epoch
+                .checked_add(Duration::from_nanos(offset))
+                .ok_or_else(PlaybackRuntimeError::protocol)
+        }
+
+        fn advance_past(&mut self, now: Instant) -> Result<(), PlaybackRuntimeError> {
+            let next_sequential_tick = self
+                .next_tick
+                .checked_add(1)
+                .ok_or_else(PlaybackRuntimeError::protocol)?;
+            let frame_period_numerator = u128::from(self.denominator)
+                .checked_mul(1_000_000_000)
+                .ok_or_else(PlaybackRuntimeError::protocol)?;
+            let elapsed_ns = now.saturating_duration_since(self.epoch).as_nanos();
+            let first_future_tick = elapsed_ns
+                .checked_add(1)
+                .and_then(|elapsed| elapsed.checked_mul(u128::from(self.numerator)))
+                .ok_or_else(PlaybackRuntimeError::protocol)?
+                .div_ceil(frame_period_numerator);
+            let first_future_tick =
+                u64::try_from(first_future_tick).map_err(|_| PlaybackRuntimeError::protocol())?;
+            self.next_tick = next_sequential_tick.max(first_future_tick);
+            Ok(())
+        }
+    }
+
+    fn frame_offset_ns(
+        numerator: u64,
+        denominator: u64,
+        tick: u64,
+    ) -> Result<u64, PlaybackRuntimeError> {
+        if numerator == 0 || denominator == 0 || tick == 0 {
             return Err(PlaybackRuntimeError::protocol());
         }
-        Ok(Duration::from_secs_f64(
-            f64::from(denominator) / f64::from(numerator),
-        ))
+        let value = u128::from(tick)
+            .checked_mul(u128::from(denominator))
+            .and_then(|value| value.checked_mul(1_000_000_000))
+            .ok_or_else(PlaybackRuntimeError::protocol)?
+            / u128::from(numerator);
+        u64::try_from(value).map_err(|_| PlaybackRuntimeError::protocol())
+    }
+
+    const fn should_refill_now(playing: bool, pending_frames_empty: bool) -> bool {
+        playing && pending_frames_empty
+    }
+
+    const fn should_restart_frame_clock(was_playing: bool, playing: bool) -> bool {
+        !was_playing && playing
     }
 
     fn map_client_error(_error: WorkerClientV2Error) -> PlaybackRuntimeError {
@@ -824,6 +943,60 @@ mod windows {
         fn malformed_protocol2_rgba_is_rejected_before_native_output() {
             let error = pad_tight_rgba(&[0; 23], 3, 2, 16).expect_err("short frame");
             assert_eq!(error.code, "output.runtime_failed");
+        }
+
+        #[test]
+        fn frame_clock_keeps_absolute_rational_cadence_without_float_rounding() {
+            assert_eq!(frame_offset_ns(24, 1, 1).expect("first"), 41_666_666);
+            assert_eq!(frame_offset_ns(24, 1, 2).expect("second"), 83_333_333);
+            assert_eq!(frame_offset_ns(24, 1, 3).expect("third"), 125_000_000);
+            assert_eq!(
+                frame_offset_ns(30_000, 1_001, 3).expect("fractional rate"),
+                100_100_000
+            );
+        }
+
+        #[test]
+        fn frame_clock_skips_late_ticks_without_reanchoring() {
+            let mut clock = FrameClock::new(24, 1).expect("24 fps clock");
+            let epoch = clock.epoch;
+            let first = clock.next_deadline().expect("first deadline");
+
+            assert_eq!(clock.next_deadline().expect("stable deadline"), first);
+            clock
+                .advance_past(epoch + Duration::from_millis(100))
+                .expect("skip missed deadlines");
+            assert_eq!(clock.epoch, epoch);
+            assert_eq!(
+                clock
+                    .next_deadline()
+                    .expect("first future deadline")
+                    .duration_since(epoch),
+                Duration::from_millis(125)
+            );
+        }
+
+        #[test]
+        fn frame_clock_rejects_zero_and_subnanosecond_rates() {
+            assert!(FrameClock::new(0, 1).is_err());
+            assert!(FrameClock::new(24, 0).is_err());
+            assert!(FrameClock::new(u32::MAX, 1).is_err());
+        }
+
+        #[test]
+        fn runtime_refills_only_while_playing_with_an_empty_queue() {
+            assert!(should_refill_now(true, true));
+            assert!(!should_refill_now(false, true));
+            assert!(!should_refill_now(true, false));
+            assert!(!should_refill_now(false, false));
+        }
+
+        #[test]
+        fn frame_clock_restarts_only_on_resume_transition() {
+            assert!(should_restart_frame_clock(false, true));
+            assert!(!should_restart_frame_clock(false, false));
+            assert!(!should_restart_frame_clock(true, true));
+            assert!(!should_restart_frame_clock(true, false));
         }
     }
 }

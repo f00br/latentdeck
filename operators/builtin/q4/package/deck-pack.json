@@ -32,7 +32,7 @@
     "kind": "python_operator_stream_v1",
     "operator_descriptor_path": "operator.json",
     "python_root": "python",
-    "entrypoint": "latentdeck_operator_q4.operator:process_sources"
+    "entrypoint": "latentdeck_operator_q4.operator:process_sources_host"
   },
   "signal": {
     "slots": 4,
@@ -99,6 +99,6 @@
   "faceplate_path": "faceplate.json",
   "integrity": {
     "catalog_path": "integrity.json",
-    "catalog_sha256": "405644374aae4cf72a38bef57b73ca8dcd841b55a0b49a4978f4b084dc6ed470"
+    "catalog_sha256": "53e165ea42f5afa96ba84a4ddc81cdb3faca8ca43a289b9bd7308316585017b6"
   }
 }

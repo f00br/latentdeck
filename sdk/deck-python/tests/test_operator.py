@@ -63,6 +63,10 @@ class FakeTorch:
     def isfinite(value: FakeTensor) -> FakeFinite:
         return FakeFinite(value.finite)
 
+    @staticmethod
+    def stack(values: tuple[FakeScalar, ...]) -> FakeFinite:
+        return FakeFinite(all(value._value for value in values))
+
 
 def context(source_count: int = 2) -> DeckOperatorContext:
     return DeckOperatorContext(
@@ -122,6 +126,20 @@ def test_invalid_tensor_contracts_fail_without_repair(source: FakeTensor, code: 
             (source, FakeTensor()),
             {},
             context(),
+            torch_module=FakeTorch,
+        )
+
+
+def test_non_finite_history_is_rejected_by_the_aggregate_input_gate() -> None:
+    invalid = replace(
+        context(),
+        previous_sources=(FakeTensor(finite=False), FakeTensor()),
+    )
+    with pytest.raises(DeckContractError, match="tensor.non_finite"):
+        validate_process_call(
+            (FakeTensor(), FakeTensor()),
+            {},
+            invalid,
             torch_module=FakeTorch,
         )
 

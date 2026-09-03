@@ -1645,7 +1645,15 @@ class Protocol2Worker:
                     ErrorCode.SOURCE_NOT_LOADED, "a Deck source playhead is outside its handle"
                 )
             tensor = adapter.read_slot(handle, playhead)
-            _validate_tensor(tensor, source_receipt, self._loaded_codec_request())
+            # Exact ABI validation belongs to the host. The Deck SDK wrapper
+            # performs the single finite-value gate for the complete current
+            # source set immediately below.
+            _validate_tensor(
+                tensor,
+                source_receipt,
+                self._loaded_codec_request(),
+                check_finite=False,
+            )
             tensors.append(tensor)
         assert receipt is not None
         deck.sequence += 1
@@ -1671,7 +1679,14 @@ class Protocol2Worker:
             deck.controls,
             context,
         )
-        _validate_tensor(result.output, receipt, self._loaded_codec_request())
+        # process_sources_checked already performed the one post-operator
+        # finite scan. Keep only the stricter receipt/device cross-check here.
+        _validate_tensor(
+            result.output,
+            receipt,
+            self._loaded_codec_request(),
+            check_finite=False,
+        )
         # Capture is deliberately before decode: the adapter receives the exact
         # post-operator latent tensor and Core later finalizes the LC container.
         self._capture_append(deck, result.output)
@@ -1899,7 +1914,16 @@ class Protocol2Worker:
                 ErrorCode.CAPTURE_LIMIT_EXCEEDED, "capture latent-slot bound was reached"
             )
         try:
-            capture.writer.append(tensor, reset_event=capture.pending_reset_event)
+            append_validated = getattr(capture.writer, "append_validated", None)
+            if callable(append_validated):
+                # The Deck SDK has already completed the one post-operator
+                # finite-value gate. Codec writers may opt into this trusted
+                # host path to avoid synchronizing the same GPU tensor again.
+                append_validated(tensor, reset_event=capture.pending_reset_event)
+            else:
+                # Preserve compatibility with Codec SDK writers that expose
+                # only the original independently-safe append contract.
+                capture.writer.append(tensor, reset_event=capture.pending_reset_event)
         except Exception as error:
             self._capture_fault(deck, capture)
             details = {"extension_code": error.code} if isinstance(error, CodecSdkError) else None
@@ -2656,7 +2680,11 @@ def _device_matches_codec_load(
 
 
 def _validate_tensor(
-    tensor: object, receipt: ProfileReceipt, load_request: CodecLoadRequest
+    tensor: object,
+    receipt: ProfileReceipt,
+    load_request: CodecLoadRequest,
+    *,
+    check_finite: bool = True,
 ) -> None:
     try:
         torch = importlib.import_module("torch")
@@ -2679,7 +2707,7 @@ def _validate_tensor(
             load_request.device_ordinal,
         )
         or not tensor.is_contiguous()
-        or not bool(torch.isfinite(tensor).all().item())
+        or (check_finite and not bool(torch.isfinite(tensor).all().item()))
     ):
         raise WorkerRuntimeError(
             ErrorCode.SOURCE_INVALID,

@@ -5,7 +5,7 @@
   "deck_version": "0.2.0",
   "operator_id": "org.latentdeck.builtin.ld_q4",
   "operator_version": "0.2.0",
-  "entrypoint": "latentdeck_operator_q4.operator:process_sources",
+  "entrypoint": "latentdeck_operator_q4.operator:process_sources_host",
   "source_count": 4,
   "role_ids": ["carrier", "donor_b", "donor_c", "donor_d"],
   "controls": [

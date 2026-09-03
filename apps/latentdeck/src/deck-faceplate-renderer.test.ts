@@ -94,6 +94,7 @@ describe("host-rendered declarative Deck faceplate", () => {
     const sourceHashes = ["a".repeat(64), "b".repeat(64)];
     const onDraftChange = vi.fn();
     const onLoad = vi.fn();
+    const onControlsChange = vi.fn();
     const onControlsCommit = vi.fn();
     const onRolesCommit = vi.fn();
     const onTransportCommit = vi.fn();
@@ -122,6 +123,7 @@ describe("host-rendered declarative Deck faceplate", () => {
         outputFullscreen: false,
         onDraftChange,
         onLoad,
+        onControlsChange,
         onControlsCommit,
         onRolesCommit,
         onTransportCommit,
@@ -188,7 +190,10 @@ describe("host-rendered declarative Deck faceplate", () => {
     mix!.value = "0.75";
     mix!.dispatchEvent(new Event("input", { bubbles: true }));
     flushSync();
-    clickButton(target, "Apply controls");
+    expect(onControlsChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ algorithm: "xs5", mix: 0.75 }),
+    );
+    clickButton(target, "Apply now");
     expect(onControlsCommit).toHaveBeenCalledWith(
       expect.objectContaining({ algorithm: "xs5", mix: 0.75 }),
     );
@@ -324,6 +329,7 @@ describe("host-rendered declarative Deck faceplate", () => {
     draft.sourceArchiveSha256s = [0, 1, 2, 3].map((slot) =>
       `${slot}`.repeat(64),
     );
+    const onControlsChange = vi.fn();
     const target = document.createElement("div");
     document.body.append(target);
     const component = mount(DeckFaceplateRenderer, {
@@ -346,6 +352,7 @@ describe("host-rendered declarative Deck faceplate", () => {
         runtimeLoaded: true,
         captureAvailable: true,
         outputFullscreen: false,
+        onControlsChange,
       },
     });
     flushSync();
@@ -357,7 +364,7 @@ describe("host-rendered declarative Deck faceplate", () => {
       "Snapshot",
       "Start Live Capture",
       "Fullscreen output",
-      "Apply controls",
+      "Apply now",
       "Process once",
     ]) {
       const button = Array.from(target.querySelectorAll("button")).find(
@@ -366,6 +373,16 @@ describe("host-rendered declarative Deck faceplate", () => {
       expect(button, label).toBeDefined();
       expect(button!.disabled, label).toBe(false);
     }
+    const triangleY = target.querySelector<HTMLInputElement>(
+      '[data-control-id="triangle_y"]',
+    );
+    expect(triangleY).toBeInstanceOf(HTMLInputElement);
+    triangleY!.value = "0.5";
+    triangleY!.dispatchEvent(new Event("input", { bubbles: true }));
+    flushSync();
+    expect(onControlsChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ triangle_x: 0.5, triangle_y: 0.5 }),
+    );
     const load = Array.from(target.querySelectorAll("button")).find(
       (candidate) => candidate.textContent?.trim() === "Load exact Deck draft",
     );

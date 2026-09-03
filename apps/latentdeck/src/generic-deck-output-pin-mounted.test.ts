@@ -221,6 +221,17 @@ function findButton(target: HTMLElement, label: string): HTMLButtonElement {
   return button;
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((accept) => {
+    resolve = accept;
+  });
+  return { promise, resolve };
+}
+
 async function settleUi(): Promise<void> {
   for (let index = 0; index < 8; index += 1) {
     await Promise.resolve();
@@ -233,6 +244,9 @@ function installHost(state: {
   outputPin: GenericOutputPin | null;
   capture: GenericCaptureView;
   recording: GenericRecordingView;
+  controlsSet?: (
+    args: Record<string, unknown>,
+  ) => Promise<GenericDeckSessionView["runtime"]>;
 }) {
   const runtimeSession = session();
   const snapshot = (): GenericDeckSessionsView => ({
@@ -241,56 +255,62 @@ function installHost(state: {
     outputPin: state.outputPin,
     recentFaults: [],
   });
-  invokeMock.mockImplementation((command: string) => {
-    switch (command) {
-      case "extensions_snapshot":
-        return Promise.resolve({ packages: [], matrix: [] });
-      case "deck_generic_sessions_get":
-        return Promise.resolve(snapshot());
-      case "deck_generic_status_get":
-        return Promise.resolve(runtimeSession);
-      case "deck_generic_viewport_session_begin":
-        return Promise.resolve({ epoch: 1 });
-      case "deck_generic_viewport_set_bounds":
-        return Promise.resolve();
-      case "deck_generic_capture_status_get":
-        return Promise.resolve(state.capture);
-      case "deck_generic_recording_status_get":
-        return Promise.resolve(state.recording);
-      case "deck_generic_spout_status_get":
-        return Promise.resolve(null);
-      case "deck_generic_fullscreen_status_get":
-        return Promise.resolve(false);
-      case "deck_generic_capture_start":
-        state.capture = capture("capturing");
-        state.outputPin = {
-          session_id: SESSION_ID,
-          lease_generation: 1,
-          pin_generation: 1,
-          kind: "capture",
-        };
-        return Promise.resolve(state.capture);
-      case "deck_generic_capture_stop":
-        state.capture = capture("finished");
-        return Promise.resolve(state.capture);
-      case "deck_generic_recording_start":
-        state.recording = recording("recording");
-        state.outputPin = {
-          session_id: SESSION_ID,
-          lease_generation: 1,
-          pin_generation: 2,
-          kind: "mp4",
-        };
-        return Promise.resolve(state.recording);
-      case "deck_generic_recording_stop":
-        state.recording = recording("finished");
-        return Promise.resolve(state.recording);
-      case "library_snapshot":
-        return Promise.resolve(EMPTY_LIBRARY_VIEW);
-      default:
-        return Promise.reject(new Error(`unexpected command: ${command}`));
-    }
-  });
+  invokeMock.mockImplementation(
+    (command: string, args: Record<string, unknown> = {}) => {
+      switch (command) {
+        case "extensions_snapshot":
+          return Promise.resolve({ packages: [], matrix: [] });
+        case "deck_generic_sessions_get":
+          return Promise.resolve(snapshot());
+        case "deck_generic_status_get":
+          return Promise.resolve(runtimeSession);
+        case "deck_generic_viewport_session_begin":
+          return Promise.resolve({ epoch: 1 });
+        case "deck_generic_viewport_set_bounds":
+          return Promise.resolve();
+        case "deck_generic_capture_status_get":
+          return Promise.resolve(state.capture);
+        case "deck_generic_recording_status_get":
+          return Promise.resolve(state.recording);
+        case "deck_generic_spout_status_get":
+          return Promise.resolve(null);
+        case "deck_generic_fullscreen_status_get":
+          return Promise.resolve(false);
+        case "deck_generic_controls_set":
+          return (
+            state.controlsSet?.(args) ?? Promise.resolve(runtimeSession.runtime)
+          );
+        case "deck_generic_capture_start":
+          state.capture = capture("capturing");
+          state.outputPin = {
+            session_id: SESSION_ID,
+            lease_generation: 1,
+            pin_generation: 1,
+            kind: "capture",
+          };
+          return Promise.resolve(state.capture);
+        case "deck_generic_capture_stop":
+          state.capture = capture("finished");
+          return Promise.resolve(state.capture);
+        case "deck_generic_recording_start":
+          state.recording = recording("recording");
+          state.outputPin = {
+            session_id: SESSION_ID,
+            lease_generation: 1,
+            pin_generation: 2,
+            kind: "mp4",
+          };
+          return Promise.resolve(state.recording);
+        case "deck_generic_recording_stop":
+          state.recording = recording("finished");
+          return Promise.resolve(state.recording);
+        case "library_snapshot":
+          return Promise.resolve(EMPTY_LIBRARY_VIEW);
+        default:
+          return Promise.reject(new Error(`unexpected command: ${command}`));
+      }
+    },
+  );
 }
 
 async function mountWorkspace(target: HTMLElement) {
@@ -335,6 +355,79 @@ describe("generic Deck foreground output pin refresh", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it("dispatches realtime controls latest-only without blocking live-capture stop", async () => {
+    const first = deferred<GenericDeckSessionView["runtime"]>();
+    const third = deferred<GenericDeckSessionView["runtime"]>();
+    const controlRequests: Record<string, unknown>[] = [];
+    const state = {
+      outputPin: null as GenericOutputPin | null,
+      capture: idleCapture(),
+      recording: idleRecording(),
+      controlsSet: async (args: Record<string, unknown>) => {
+        controlRequests.push(args);
+        if (controlRequests.length === 1) return first.promise;
+        if (controlRequests.length === 3) return third.promise;
+        return session().runtime;
+      },
+    };
+    installHost(state);
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = await mountWorkspace(target);
+    const mix = target.querySelector<HTMLInputElement>(
+      'input[data-control-id="mix"]',
+    );
+    expect(mix).toBeInstanceOf(HTMLInputElement);
+
+    mix!.value = "0.2";
+    mix!.dispatchEvent(new Event("input", { bubbles: true }));
+    flushSync();
+    expect(findButton(target, "Start Live Capture").disabled).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    await settleUi();
+    expect(controlRequests).toHaveLength(1);
+    expect(mix!.disabled).toBe(false);
+
+    for (const value of ["0.4", "0.7"]) {
+      mix!.value = value;
+      mix!.dispatchEvent(new Event("input", { bubbles: true }));
+      flushSync();
+    }
+    expect(controlRequests).toHaveLength(1);
+    first.resolve(session().runtime);
+    await settleUi();
+    await vi.advanceTimersByTimeAsync(75);
+    await settleUi();
+
+    expect(controlRequests).toHaveLength(2);
+    const latestBindings = controlRequests[1].controls as Array<{
+      name: string;
+      value: { value: unknown };
+    }>;
+    expect(
+      latestBindings.find((binding) => binding.name === "mix")?.value,
+    ).toEqual({ kind: "number", value: 0.7 });
+    expect(findButton(target, "Start Live Capture").disabled).toBe(false);
+
+    clickButton(target, "Start Live Capture");
+    await settleUi();
+    mix!.value = "0.9";
+    mix!.dispatchEvent(new Event("input", { bubbles: true }));
+    flushSync();
+    await vi.advanceTimersByTimeAsync(75);
+    await settleUi();
+    expect(controlRequests).toHaveLength(3);
+    expect(mix!.disabled).toBe(false);
+    expect(findButton(target, "Stop Live Capture").disabled).toBe(false);
+    clickButton(target, "Stop Live Capture");
+    await settleUi();
+
+    third.resolve(session().runtime);
+    await settleUi();
+    await unmount(component);
+    target.remove();
   });
 
   it("shows capture pin/unpin after actions and refreshes a terminal transition once", async () => {

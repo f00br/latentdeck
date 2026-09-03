@@ -5,6 +5,7 @@ import d2Faceplate from "../../../operators/builtin/d2/package/faceplate.json";
 import d2Operator from "../../../operators/builtin/d2/package/operator.json";
 import {
   MAX_WARM_DECK_SESSIONS,
+  buildGenericControlBindings,
   buildGenericDeckOpenDraft,
   buildGenericDeckPreset,
   codecOptionsForExactDeck,
@@ -189,6 +190,25 @@ describe("generic exact Deck frontend model", () => {
     expect(
       open.controls.find((binding) => binding.name === "algorithm")?.value,
     ).toEqual({ kind: "text", value: "linear" });
+  });
+
+  it("serializes an exact realtime control snapshot without source state", () => {
+    const deck = model();
+    const controls = {
+      ...createDeckUiDraft(deck).controls,
+      algorithm: "xs5",
+      mix: 0.75,
+    };
+
+    const bindings = buildGenericControlBindings(deck, controls);
+
+    expect(
+      bindings.find((binding) => binding.name === "algorithm")?.value,
+    ).toEqual({ kind: "text", value: "xs5" });
+    expect(bindings.find((binding) => binding.name === "mix")?.value).toEqual({
+      kind: "number",
+      value: 0.75,
+    });
   });
 
   it("writes generic preset v2 with exact Deck and immutable source identities", () => {

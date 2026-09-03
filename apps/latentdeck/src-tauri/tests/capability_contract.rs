@@ -138,6 +138,19 @@ fn production_generic_actor_is_exact_protocol2_without_h3_or_p1_fallback() {
 }
 
 #[test]
+fn generic_deck_prefetches_on_an_absolute_clock_without_command_reanchoring() {
+    let actor = include_str!("../src/generic_deck_runtime.rs");
+
+    assert!(actor.contains("frame_clock: FrameClock"));
+    assert!(actor.contains("self.processing_active() && self.pending_frames.is_empty()"));
+    assert!(actor.contains("self.process_once().await"));
+    assert!(actor.contains("self.frame_clock.advance_past(Instant::now())"));
+    assert!(actor.contains("self.restart_clock_on_resume(was_processing)"));
+    assert!(!actor.contains("next_frame = Instant::now()"));
+    assert!(!actor.contains("Duration::from_secs_f64"));
+}
+
+#[test]
 fn production_core_does_not_export_hardcoded_deck_worker_clients() {
     let core = include_str!("../../../../crates/core/src/lib.rs");
     assert!(!core.contains("d2_worker_client"));

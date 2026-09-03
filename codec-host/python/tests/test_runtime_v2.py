@@ -129,6 +129,10 @@ class Writer:
         if reset_event is not None:
             self.reset_events.append(dict(reset_event))
 
+    def append_validated(self, tensor, *, reset_event=None):
+        EVENTS.append("capture.append_validated")
+        self.append(tensor, reset_event=reset_event)
+
     def finish(self):
         if self.finished:
             raise RuntimeError("writer is already finalized")
@@ -1291,7 +1295,7 @@ def test_synthetic_non_h3_runtime_executes_exact_bundled_deck_operators(
     first_call, second_call, replay_call = operator_calls
     operator = first_call["operator"]
     assert operator.__module__ == module_name
-    assert operator.__name__ == "process_sources"
+    assert operator.__name__ == "process_sources_host"
     assert first_call["control_names"] == tuple(control_names)
 
     first_context = first_call["context"]
@@ -1639,6 +1643,7 @@ def test_snapshot_and_live_capture_receive_post_operator_latent_before_decode(
         },
     )
     _assert_ack(reply, "deck.process")
+    assert "capture.append_validated" in synthetic.EVENTS
     assert synthetic.EVENTS.index("capture.append") < synthetic.EVENTS.index("decode")
     assert reply["message"]["body"]["ack"]["payload"]["status"]["capture_state"] == ("capturing")
     reply, _ = harness.command(

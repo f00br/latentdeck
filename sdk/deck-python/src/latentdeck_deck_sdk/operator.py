@@ -135,7 +135,13 @@ def _torch(torch_module: object | None) -> object:
         ) from error
 
 
-def _validate_tensor(value: object, label: str, torch_module: object) -> None:
+def _validate_tensor(
+    value: object,
+    label: str,
+    torch_module: object,
+    *,
+    check_finite: bool = True,
+) -> None:
     if not torch_module.is_tensor(value):
         raise DeckContractError("tensor.type", f"{label} must be a torch.Tensor")
     shape = tuple(value.shape)
@@ -160,7 +166,7 @@ def _validate_tensor(value: object, label: str, torch_module: object) -> None:
         raise DeckContractError("tensor.device", f"{label} device is outside the tensor ABI")
     if not value.is_contiguous():
         raise DeckContractError("tensor.non_contiguous", f"{label} must be contiguous")
-    if not bool(torch_module.isfinite(value).all().item()):
+    if check_finite and not bool(torch_module.isfinite(value).all().item()):
         raise DeckContractError("tensor.non_finite", f"{label} contains NaN or Inf")
 
 
@@ -240,8 +246,10 @@ def validate_process_call(
         )
     torch_runtime = _torch(torch_module)
     context.validate(len(sources))
+    finite_checks: list[object] = []
     for index, source in enumerate(sources, start=1):
-        _validate_tensor(source, f"source {index}", torch_runtime)
+        _validate_tensor(source, f"source {index}", torch_runtime, check_finite=False)
+        finite_checks.append(torch_runtime.isfinite(source).all())
     reference = sources[0]
     for index, source in enumerate(sources[1:], start=2):
         if (
@@ -255,7 +263,17 @@ def validate_process_call(
     for index, previous in enumerate(context.previous_sources, start=1):
         if previous is None:
             continue
-        _validate_tensor(previous, f"previous source {index}", torch_runtime)
+        _validate_tensor(
+            previous,
+            f"previous source {index}",
+            torch_runtime,
+            check_finite=False,
+        )
+        # An independently supplied operator may mutate a tensor retained as
+        # history. Include history in the same asynchronous aggregate gate as
+        # current sources so modular operators remain untrusted without adding
+        # another host synchronization per slot.
+        finite_checks.append(torch_runtime.isfinite(previous).all())
         if (
             tuple(previous.shape) != tuple(reference.shape)
             or previous.dtype != reference.dtype
@@ -265,6 +283,14 @@ def validate_process_call(
                 "tensor.previous_incompatible",
                 f"previous source {index} does not match current sources",
             )
+    # All tensors share one device by contract. Kernel launches remain
+    # asynchronous; the complete current+history set crosses the host boundary
+    # exactly once here.
+    finite_sources = torch_runtime.stack(tuple(finite_checks))
+    if not bool(finite_sources.all().item()):
+        raise DeckContractError(
+            "tensor.non_finite", "a current or previous source contains NaN or Inf"
+        )
     return _validate_controls(controls)
 
 

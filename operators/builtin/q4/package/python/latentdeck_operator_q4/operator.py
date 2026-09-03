@@ -152,8 +152,8 @@ def _accumulate_routed(
     weights: tuple[float, float, float],
     controls: Q4Controls,
 ) -> torch.Tensor:
-    accumulator = carrier.float().clone()
     structural = carrier.float()
+    accumulator = structural.clone()
     for donor_index in range(3):
         donor = donors[donor_index].float()
         routed_donor = routed[donor_index].unsqueeze(0)
@@ -312,8 +312,6 @@ def _process_quad(
 
     output = _chaos(processed.float(), parsed.chaos, parsed_context.seed).to(carrier.dtype)
     output = output.contiguous()
-    if not bool(torch.isfinite(output).all().item()):
-        raise Q4ContractError("tensor.non_finite_output", "operator produced NaN or Inf")
     return DeckOperatorResult(
         output=output,
         provenance=_provenance(parsed, parsed_context, carrier, weights),
@@ -321,18 +319,17 @@ def _process_quad(
 
 
 @torch.inference_mode()
-def process_sources(
+def process_sources_host(
     sources: tuple[torch.Tensor, ...],
     controls: dict[str, object],
     context: DeckOperatorContext,
 ) -> DeckOperatorResult:
-    """Authoritative Deck SDK 0.2 entrypoint over four negotiated sources."""
+    """Host entrypoint over an already Deck-SDK-validated call."""
 
-    parsed_mapping = validate_process_call(sources, controls, context)
     if len(sources) != 4:
         raise Q4ContractError("tensor.source_count", "Q4 requires exactly four sources")
     role_slots = _generic_role_slots(context)
-    normalized_controls = dict(parsed_mapping)
+    normalized_controls = dict(controls)
     # Host-rendered package controls are canonical lower-case identifiers;
     # the mathematical enums remain upper-case internally.
     for name in ("algorithm", "mode", "influence_mode", "xs5_routing"):
@@ -373,7 +370,7 @@ def process_sources(
         donor_d_playhead=context.playheads[role_indices["donor_d"]],
         seed=context.seed,
     )
-    result = _process_quad(
+    return _process_quad(
         sources[role_indices["carrier"]],
         sources[role_indices["donor_b"]],
         sources[role_indices["donor_c"]],
@@ -381,4 +378,16 @@ def process_sources(
         parsed,
         parsed_context,
     )
+
+
+@torch.inference_mode()
+def process_sources(
+    sources: tuple[torch.Tensor, ...],
+    controls: dict[str, object],
+    context: DeckOperatorContext,
+) -> DeckOperatorResult:
+    """Checked standalone entrypoint used by tests and direct SDK callers."""
+
+    parsed_mapping = validate_process_call(sources, controls, context)
+    result = process_sources_host(sources, parsed_mapping, context)
     return validate_process_result(result, sources)

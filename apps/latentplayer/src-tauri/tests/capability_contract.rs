@@ -147,4 +147,43 @@ fn player_loop_is_a_host_controlled_generation_reset() {
     assert!(runtime.contains("if self.loop_enabled"));
     assert!(runtime.contains("self.reset().await?"));
     assert!(runtime.contains("adopt_ring_generation(new_generation)"));
+
+    let refill = runtime
+        .split("async fn refill_once(")
+        .nth(1)
+        .expect("Protocol 2 refill loop exists")
+        .split("fn present_once(")
+        .next()
+        .expect("refill loop closes before presentation");
+    let reset = refill.find("self.reset().await?").expect("causal reset");
+    let coordinator_resume = refill
+        .find("state.set_playing_protocol2(true)")
+        .expect("coordinator resumes after loop reset");
+    let actor_resume = refill
+        .find("self.playing = true")
+        .expect("actor resumes after coordinator");
+    assert!(reset < coordinator_resume);
+    assert!(coordinator_resume < actor_resume);
+}
+
+#[test]
+fn protocol2_player_uses_absolute_prefetched_cadence_without_command_reanchoring() {
+    let runtime = include_str!("../src/playback_runtime_v2.rs");
+
+    assert!(runtime.contains("frame_clock: FrameClock"));
+    assert!(runtime.contains("should_refill_now(self.playing, self.pending_frames.is_empty())"));
+    assert!(runtime.contains("self.refill_once().await"));
+    assert!(runtime.contains("self.frame_clock.advance_past(Instant::now())"));
+    assert!(runtime.contains("self.restart_clock_on_resume(was_playing)"));
+    assert!(!runtime.contains("next_frame = Instant::now()"));
+    assert!(!runtime.contains("Duration::from_secs_f64"));
+
+    let command_handler = runtime
+        .split("async fn handle(&mut self, command: RuntimeCommand)")
+        .nth(1)
+        .expect("Protocol 2 command handler exists")
+        .split("async fn status(")
+        .next()
+        .expect("command handler closes before status");
+    assert!(!command_handler.contains("frame_clock.restart"));
 }

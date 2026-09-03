@@ -8,6 +8,7 @@ import pytest
 import latentdeck_codec_h3.decoder as decoder_module
 from latentdeck_codec_h3.decoder import (
     CodecRuntimeError,
+    configure_torch_cpu_threads,
     host_validated_decoder_path,
     validate_decoder_asset,
 )
@@ -48,3 +49,40 @@ def test_host_validated_decoder_path_does_not_repeat_the_payload_hash(
 
     monkeypatch.setattr(decoder_module.hashlib, "sha256", unexpected_hash)
     assert host_validated_decoder_path(asset, digest, asset.stat().st_size) == asset
+
+
+def test_pack_local_torch_thread_limits_are_exact_and_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeTorch:
+        intra = 20
+        inter = 8
+        calls: list[tuple[str, int]] = []
+
+        @classmethod
+        def get_num_threads(cls) -> int:
+            return cls.intra
+
+        @classmethod
+        def get_num_interop_threads(cls) -> int:
+            return cls.inter
+
+        @classmethod
+        def set_num_threads(cls, value: int) -> None:
+            cls.calls.append(("intra", value))
+            cls.intra = value
+
+        @classmethod
+        def set_num_interop_threads(cls, value: int) -> None:
+            cls.calls.append(("inter", value))
+            cls.inter = value
+
+    for name in decoder_module.TORCH_ENVIRONMENT:
+        monkeypatch.setenv(name, "inherited")
+
+    assert configure_torch_cpu_threads(FakeTorch) == 1
+    assert configure_torch_cpu_threads(FakeTorch) == 1
+    assert FakeTorch.calls == [("inter", 1), ("intra", 1)]
+    assert {
+        name: decoder_module.os.environ[name] for name in decoder_module.TORCH_ENVIRONMENT
+    } == decoder_module.TORCH_ENVIRONMENT

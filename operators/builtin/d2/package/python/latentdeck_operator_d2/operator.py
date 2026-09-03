@@ -53,14 +53,19 @@ def _linear(a: torch.Tensor, b: torch.Tensor, mix: float) -> torch.Tensor:
 
 
 def _xs1(donor: torch.Tensor, controls: D2Controls) -> torch.Tensor:
-    output = donor.float().clone()
+    # Keep one private F32 materialization for both the output and the rotated
+    # channel reads. ``copy=True`` also preserves the source for generic F32
+    # profiles, where ``donor.float()`` alone would alias the caller's tensor.
+    output = donor.to(dtype=torch.float32, copy=True)
     angle = math.radians(controls.xs1_angle_degrees)
     cosine = math.cos(angle)
     sine = math.sin(angle)
-    first = donor[:, controls.xs1_channel_a].float()
-    second = donor[:, controls.xs1_channel_b].float()
-    output[:, controls.xs1_channel_a] = cosine * first - sine * second
-    output[:, controls.xs1_channel_b] = sine * first + cosine * second
+    first = output[:, controls.xs1_channel_a]
+    second = output[:, controls.xs1_channel_b]
+    rotated_first = cosine * first - sine * second
+    rotated_second = sine * first + cosine * second
+    output[:, controls.xs1_channel_a] = rotated_first
+    output[:, controls.xs1_channel_b] = rotated_second
     return output
 
 
@@ -332,26 +337,28 @@ def _process_pair(
         dtype=slot_a.dtype
     )
     output = output.contiguous()
-    if not bool(torch.isfinite(output).all().item()):
-        raise D2ContractError("tensor.non_finite_output", "operator produced NaN or Inf")
     return DeckOperatorResult(
         output=output, provenance=_provenance(parsed_controls, parsed_context, output)
     )
 
 
 @torch.inference_mode()
-def process_sources(
+def process_sources_host(
     sources: tuple[torch.Tensor, ...],
     controls: dict[str, object],
     context: DeckOperatorContext,
 ) -> DeckOperatorResult:
-    """Authoritative Deck SDK 0.2 entrypoint over two negotiated sources."""
+    """Host entrypoint over an already Deck-SDK-validated call.
 
-    parsed_mapping = validate_process_call(sources, controls, context)
+    Protocol 2 invokes this function through ``process_sources_checked``. Keep
+    operator-specific role/control bounds here, while the shared SDK owns the
+    single tensor finite gate before and after the operator.
+    """
+
     if len(sources) != 2:
         raise D2ContractError("tensor.source_count", "D2 requires exactly two sources")
     role_slots = _generic_role_slots(context)
-    parsed_controls = _generic_controls(parsed_mapping, role_slots)
+    parsed_controls = _generic_controls(controls, role_slots)
     source_index_by_slot = {
         physical_slot: index for index, physical_slot in enumerate(context.physical_slots)
     }
@@ -375,5 +382,17 @@ def process_sources(
         previous_a=previous_a if isinstance(previous_a, torch.Tensor) else None,
         previous_b=previous_b if isinstance(previous_b, torch.Tensor) else None,
     )
-    result = _process_pair(slot_a, slot_b, parsed_controls, parsed_context)
+    return _process_pair(slot_a, slot_b, parsed_controls, parsed_context)
+
+
+@torch.inference_mode()
+def process_sources(
+    sources: tuple[torch.Tensor, ...],
+    controls: dict[str, object],
+    context: DeckOperatorContext,
+) -> DeckOperatorResult:
+    """Checked standalone entrypoint used by tests and direct SDK callers."""
+
+    parsed_mapping = validate_process_call(sources, controls, context)
+    result = process_sources_host(sources, parsed_mapping, context)
     return validate_process_result(result, sources)

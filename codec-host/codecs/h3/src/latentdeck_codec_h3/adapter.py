@@ -47,7 +47,13 @@ from latentdeck_codec_sdk import (
     validate_profile_receipt,
 )
 
-from .decoder import H3Decoder, validate_decoder_asset
+from .decoder import (
+    DecodedRgbaBatch,
+    H3Decoder,
+    configure_torch_cpu_threads,
+    configure_torch_environment,
+    validate_decoder_asset,
+)
 
 PACK_ID = "org.latentdeck.h3"
 PACK_VERSION = "0.2.0"
@@ -88,6 +94,21 @@ class _H3Profile:
     audio: TensorAccessDescriptor | None
 
 
+@dataclass(frozen=True, slots=True)
+class _ResidentVideoKey:
+    archive_sha256: str
+    payload_sha256: str
+    storage_dtype: str
+    shape: tuple[int, ...]
+    byte_length: int
+
+
+@dataclass(slots=True)
+class _ResidentVideo:
+    tensor: Any
+    references: int
+
+
 @dataclass(slots=True)
 class _H3RawImport:
     source_path: Path
@@ -97,17 +118,21 @@ class _H3RawImport:
 
 
 class H3SourceHandle:
-    """One path-free, streaming view of an integrity-validated H3 payload."""
+    """One path-free view of an integrity-validated, GPU-resident H3 payload."""
 
     def __init__(
         self,
         source_id: uuid.UUID,
         cartridge: CartridgeAccess,
         profile: _H3Profile,
+        resident_video: Any,
+        release_resident_video: Callable[[], None],
     ) -> None:
         self._source_id = source_id
         self.cartridge = cartridge
         self.profile = profile
+        self.resident_video: Any | None = resident_video
+        self._release_resident_video: Callable[[], None] | None = release_resident_video
         self.closed = False
 
     @property
@@ -119,7 +144,14 @@ class H3SourceHandle:
         return self.profile.video.shape[2]
 
     def close(self) -> None:
+        if self.closed:
+            return
         self.closed = True
+        self.resident_video = None
+        release = self._release_resident_video
+        self._release_resident_video = None
+        if release is not None:
+            release()
 
 
 class _H3CaptureWriter:
@@ -153,6 +185,27 @@ class _H3CaptureWriter:
         *,
         reset_event: Mapping[str, object] | None = None,
     ) -> None:
+        """Validate an independently supplied slot, then append it once."""
+
+        self._append(tensor, reset_event=reset_event, values_validated=False)
+
+    def append_validated(
+        self,
+        tensor: object,
+        *,
+        reset_event: Mapping[str, object] | None = None,
+    ) -> None:
+        """Append a slot whose finite-value gate already passed in the host."""
+
+        self._append(tensor, reset_event=reset_event, values_validated=True)
+
+    def _append(
+        self,
+        tensor: object,
+        *,
+        reset_event: Mapping[str, object] | None,
+        values_validated: bool,
+    ) -> None:
         if self._aborted or self._payload is not None:
             raise CodecSdkError("capture.invalid_state", "capture writer is not appendable")
         torch = _torch_module()
@@ -162,11 +215,10 @@ class _H3CaptureWriter:
             or tuple(tensor.shape[:3]) != (1, H3_CHANNELS, 1)
             or tensor.dtype != torch.float16
             or not tensor.is_contiguous()
-            or not bool(torch.isfinite(tensor).all().item())
         ):
             raise CodecSdkError(
                 "capture.tensor_invalid",
-                "H3 capture slots must be finite contiguous F16 [1,24,1,H,W]",
+                "H3 capture slots must be contiguous F16 [1,24,1,H,W]",
             )
         if reset_event is not None:
             _bounded_json_object(reset_event, "reset_event")
@@ -188,7 +240,7 @@ class _H3CaptureWriter:
                 max_visual_bytes=self._request.maximum_visual_bytes,
             )
         try:
-            self._spool.append_slot(tensor)
+            self._spool.append_slot(tensor, values_validated=values_validated)
         except Exception as error:
             self.abort()
             raise CodecSdkError(
@@ -246,10 +298,12 @@ class H3CodecAdapter:
         decoder_factory: Callable[[ExternalAsset, int], Any] | None = None,
         tensor_transfer: Callable[[Any, Any, int], Any] | None = None,
         asset_validator: Callable[[str, str, int], Path] = validate_decoder_asset,
+        torch_configurator: Callable[[Any], int] | None = None,
     ) -> None:
         self._torch_loader = torch_loader or _torch_module
         self._decoder_factory = decoder_factory or self._load_decoder
         self._tensor_transfer = tensor_transfer or self._transfer_to_cuda
+        self._torch_configurator = torch_configurator or configure_torch_cpu_threads
         # Kept as a compatibility-only injection seam for pack-local tests.
         # Protocol 2 Core is the sole full-hash authority, so this callback must
         # never run in the authenticated adapter path.
@@ -258,6 +312,7 @@ class H3CodecAdapter:
         self._torch: Any | None = None
         self._asset: ExternalAsset | None = None
         self._decoder: Any | None = None
+        self._resident_videos: dict[_ResidentVideoKey, _ResidentVideo] = {}
         self._last_reset_generation = 0
         self._raw_imports: dict[uuid.UUID, _H3RawImport] = {}
 
@@ -303,8 +358,12 @@ class H3CodecAdapter:
                 "profile.inspection_mismatch",
                 "H3 inspection no longer binds the retained cartridge",
             )
-        slot_bytes = (
-            H3_CHANNELS * profile.geometry.latent_height * profile.geometry.latent_width * 2
+        resident_bytes = (
+            H3_CHANNELS
+            * profile.video.shape[2]
+            * profile.geometry.latent_height
+            * profile.geometry.latent_width
+            * 2
         )
         receipt = ProfileReceipt(
             # The identity fields below bind the exact bytes.  The receipt ID
@@ -335,8 +394,8 @@ class H3CodecAdapter:
             ),
             decoded_abi=DecodedAbi(maximum_batch=24),
             capabilities=CAPABILITIES,
-            estimated_host_bytes=slot_bytes,
-            estimated_device_bytes=slot_bytes + TAEH3_ASSET_BYTE_LENGTH,
+            estimated_host_bytes=profile.video.byte_length,
+            estimated_device_bytes=resident_bytes + TAEH3_ASSET_BYTE_LENGTH,
         )
         return validate_profile_receipt(receipt, self.descriptor())
 
@@ -366,6 +425,13 @@ class H3CodecAdapter:
                 "codec.asset_incompatible",
                 "external taeh3 identity does not match the H3 pack declaration",
             )
+        try:
+            self._torch_configurator(torch)
+        except (RuntimeError, TypeError, ValueError) as error:
+            raise CodecSdkError(
+                "codec.torch_threads",
+                "H3 Codec Pack could not configure Torch CPU threads",
+            ) from error
         # Do not construct the decoder here: source profile semantics must be
         # validated and receipted before any codec-owned GPU allocation.
         self._request = request
@@ -394,7 +460,17 @@ class H3CodecAdapter:
         if not isinstance(source_id, uuid.UUID) or source_id.int == 0:
             raise CodecSdkError("source.id_invalid", "source_id must be a non-nil UUID")
         self._ensure_decoder()
-        return H3SourceHandle(source_id, cartridge, profile)
+        resident_video, release_resident_video = self._acquire_resident_video(
+            cartridge,
+            profile,
+        )
+        return H3SourceHandle(
+            source_id,
+            cartridge,
+            profile,
+            resident_video,
+            release_resident_video,
+        )
 
     def read_slot(self, source: H3SourceHandle, slot_index: int) -> object:
         _request, torch = self._loaded_runtime()
@@ -407,40 +483,25 @@ class H3CodecAdapter:
         ):
             raise CodecSdkError("source.slot_invalid", "H3 slot index is outside the source")
         video = source.profile.video
-        _, channels, temporal, height, width = video.shape
-        storage_dtype = torch.float16 if video.dtype == "F16" else torch.float32
-        byte_width = 2 if video.dtype == "F16" else 4
-        plane_values = height * width
-        plane_bytes = plane_values * byte_width
-        cpu = torch.empty((1, channels, 1, height, width), dtype=storage_dtype, device="cpu")
-        for channel in range(channels):
-            element_offset = (channel * temporal + slot_index) * plane_values
-            tensor_offset = element_offset * byte_width
-            encoded = source.cartridge.read_tensor_range("video", tensor_offset, plane_bytes)
-            if (
-                not isinstance(encoded, memoryview)
-                or encoded.nbytes != plane_bytes
-                or not encoded.c_contiguous
-                or not encoded.readonly
-            ):
-                raise CodecSdkError(
-                    "source.range_invalid", "retained H3 tensor range is incomplete"
-                )
-            plane = torch.frombuffer(bytearray(encoded), dtype=storage_dtype).reshape(height, width)
-            cpu[0, channel, 0].copy_(plane)
-        if video.dtype == "F32":
-            cpu = cpu.to(dtype=torch.float16)
-        tensor = self._tensor_transfer(cpu, torch, self._request.device_ordinal)  # type: ignore[union-attr]
+        _, _channels, _temporal, height, width = video.shape
+        resident_video = source.resident_video
+        if resident_video is None:
+            raise CodecSdkError("source.closed", "H3 source handle is closed")
+        # Operators are replaceable and may accidentally mutate their input.
+        # Keep the shared resident source immutable by exposing one small
+        # device-to-device slot clone instead of its backing storage view.
+        tensor = (
+            resident_video[:, slot_index].unsqueeze(2).clone(memory_format=torch.contiguous_format)
+        )
         if (
             not torch.is_tensor(tensor)
             or tuple(tensor.shape) != (1, H3_CHANNELS, 1, height, width)
             or tensor.dtype != torch.float16
             or not tensor.is_contiguous()
-            or not bool(torch.isfinite(tensor).all().item())
         ):
             raise CodecSdkError(
                 "source.tensor_invalid",
-                "H3 runtime slot violates shape, dtype, contiguity, or finite bounds",
+                "H3 resident slot violates shape, dtype, or contiguity bounds",
             )
         return tensor
 
@@ -462,20 +523,35 @@ class H3CodecAdapter:
             raise CodecSdkError("decode.tensor_invalid", "decoded H3 slot violates tensor ABI")
         decoder = self._ensure_decoder()
         try:
-            frames = tuple(decoder.decode_slot(tensor))
+            decoded = decoder.decode_slot(tensor)
         except Exception as error:
             raise CodecSdkError("decode.failed", "TAEH3 failed to decode the H3 slot") from error
-        if not frames or len(frames) > maximum_frames:
+        if (
+            not isinstance(decoded, DecodedRgbaBatch)
+            or not isinstance(decoded.batch, int)
+            or isinstance(decoded.batch, bool)
+            or not 1 <= decoded.batch <= maximum_frames
+        ):
             raise CodecSdkError(
                 "decode.batch_exceeded", "TAEH3 frame count exceeds the negotiated batch"
             )
         height = int(tensor.shape[3]) * 16
         width = int(tensor.shape[4]) * 16
         frame_bytes = height * width * 4
-        if any(not isinstance(frame, bytes) or len(frame) != frame_bytes for frame in frames):
+        if (
+            not isinstance(decoded.pixels, memoryview)
+            or decoded.pixels.format != "B"
+            or not decoded.pixels.readonly
+            or not decoded.pixels.c_contiguous
+            or decoded.pixels.nbytes != decoded.batch * frame_bytes
+        ):
             raise CodecSdkError("decode.rgba_invalid", "TAEH3 returned an invalid RGBA8 frame")
-        pixels = memoryview(bytearray().join(frames)).toreadonly()
-        batch = DecodedBatch(pixels=pixels, batch=len(frames), height=height, width=width)
+        batch = DecodedBatch(
+            pixels=decoded.pixels,
+            batch=decoded.batch,
+            height=height,
+            width=width,
+        )
         batch.validate()
         return batch
 
@@ -635,6 +711,87 @@ class H3CodecAdapter:
         if self._request is None or self._torch is None or self._asset is None:
             raise CodecSdkError("codec.not_loaded", "H3 codec has not been loaded")
         return self._request, self._torch
+
+    @staticmethod
+    def _resident_video_key(profile: _H3Profile) -> _ResidentVideoKey:
+        return _ResidentVideoKey(
+            archive_sha256=profile.archive_sha256,
+            payload_sha256=profile.payload_sha256,
+            storage_dtype=profile.video.dtype,
+            shape=profile.video.shape,
+            byte_length=profile.video.byte_length,
+        )
+
+    def _acquire_resident_video(
+        self,
+        cartridge: CartridgeAccess,
+        profile: _H3Profile,
+    ) -> tuple[Any, Callable[[], None]]:
+        key = self._resident_video_key(profile)
+        cached = self._resident_videos.get(key)
+        if cached is None:
+            cached = _ResidentVideo(
+                tensor=self._load_resident_video(cartridge, profile),
+                references=0,
+            )
+            self._resident_videos[key] = cached
+        cached.references += 1
+        return cached.tensor, lambda: self._release_resident_video(key)
+
+    def _load_resident_video(self, cartridge: CartridgeAccess, profile: _H3Profile) -> Any:
+        request, torch = self._loaded_runtime()
+        video = profile.video
+        encoded = cartridge.read_tensor_range("video", 0, video.byte_length)
+        if (
+            not isinstance(encoded, memoryview)
+            or encoded.nbytes != video.byte_length
+            or not encoded.c_contiguous
+            or not encoded.readonly
+        ):
+            raise CodecSdkError(
+                "source.range_invalid",
+                "retained H3 tensor range is incomplete",
+            )
+        try:
+            owned_buffer = bytearray(encoded)
+        finally:
+            encoded.release()
+        storage_dtype = torch.float16 if video.dtype == "F16" else torch.float32
+        expected_shape = (1, video.shape[2], H3_CHANNELS, video.shape[3], video.shape[4])
+        try:
+            channel_major = torch.frombuffer(owned_buffer, dtype=storage_dtype).reshape(video.shape)
+            slot_major = torch.empty(
+                expected_shape,
+                dtype=torch.float16,
+                device="cpu",
+            )
+            slot_major.copy_(channel_major.permute(0, 2, 1, 3, 4))
+            resident = self._tensor_transfer(slot_major, torch, request.device_ordinal)
+        except Exception as error:
+            raise CodecSdkError(
+                "source.residency_failed",
+                "validated H3 tensor could not become GPU resident",
+            ) from error
+        if (
+            not torch.is_tensor(resident)
+            or tuple(resident.shape) != expected_shape
+            or resident.dtype != torch.float16
+            or not resident.is_contiguous()
+        ):
+            raise CodecSdkError(
+                "source.tensor_invalid",
+                "resident H3 tensor violates slot-major runtime bounds",
+            )
+        return resident
+
+    def _release_resident_video(self, key: _ResidentVideoKey) -> None:
+        cached = self._resident_videos.get(key)
+        if cached is None:
+            return
+        if cached.references <= 1:
+            del self._resident_videos[key]
+        else:
+            cached.references -= 1
 
     def _ensure_decoder(self) -> Any:
         request, _torch = self._loaded_runtime()
@@ -916,6 +1073,7 @@ def _bounded_json_object(value: Mapping[str, object], label: str) -> None:
 
 
 def _torch_module() -> Any:
+    configure_torch_environment()
     try:
         import torch
     except ImportError as error:

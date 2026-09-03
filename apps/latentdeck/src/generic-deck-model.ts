@@ -141,7 +141,6 @@ export function buildGenericDeckOpenDraft(
     };
   });
 
-  const serializedControls = serializeDeckControls(model, draft.controls);
   const serializedRoles = serializeRoleBindings(model, draft.roleBindings);
   if (!Number.isSafeInteger(draft.seed) || draft.seed < 0) {
     throw new Error("Seed must be a non-negative safe integer.");
@@ -153,13 +152,7 @@ export function buildGenericDeckOpenDraft(
       role: role.roleId,
       physical_slot: serializedRoles[role.roleId] + 1,
     })),
-    controls: model.controls.map((control) => ({
-      name: control.controlId,
-      value: genericControlValue(
-        control.valueType,
-        serializedControls[control.controlId],
-      ),
-    })),
+    controls: buildGenericControlBindings(model, draft.controls),
     sourceTransport: draft.playing.map((playing, index) => ({
       physical_slot: index + 1,
       playing,
@@ -167,6 +160,24 @@ export function buildGenericDeckOpenDraft(
     })),
     seed: draft.seed,
   };
+}
+
+/**
+ * Serialize only the closed control snapshot. Realtime control dispatch must
+ * not revalidate or depend on the current source-picker draft.
+ */
+export function buildGenericControlBindings(
+  model: DeckUiModel,
+  controls: Record<string, DeckUiScalar>,
+): GenericControlBinding[] {
+  const serialized = serializeDeckControls(model, controls);
+  return model.controls.map((control) => ({
+    name: control.controlId,
+    value: genericControlValue(
+      control.valueType,
+      serialized[control.controlId],
+    ),
+  }));
 }
 
 /**

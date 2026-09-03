@@ -35,6 +35,7 @@
   export let playheads: readonly number[] = [];
   export let captureState = "idle";
   export let captureAvailable = false;
+  export let captureStartAvailable = true;
   export let captureActive = false;
   export let liveCaptureActive = false;
   export let captureUnavailableReason =
@@ -46,6 +47,9 @@
   export let onRestart: () => void | Promise<void> = () => undefined;
   export let onProcessOnce: () => void | Promise<void> = () => undefined;
   export let onControlsCommit: (
+    controls: Record<string, DeckUiScalar>,
+  ) => void | Promise<void> = () => undefined;
+  export let onControlsChange: (
     controls: Record<string, DeckUiScalar>,
   ) => void | Promise<void> = () => undefined;
   export let onRolesCommit: (
@@ -105,24 +109,27 @@
   function setNumericControl(widget: NumericWidget, event: Event): void {
     const value = (event.currentTarget as HTMLInputElement).valueAsNumber;
     draft.controls[widget.control_id] = value;
-    validateDraft();
+    const valid = validateDraft();
     emitDraft();
+    if (runtimeLoaded && valid) emitRealtimeControls();
   }
 
   function setToggleControl(widget: ToggleWidget, event: Event): void {
     draft.controls[widget.control_id] = (
       event.currentTarget as HTMLInputElement
     ).checked;
-    validateDraft();
+    const valid = validateDraft();
     emitDraft();
+    if (runtimeLoaded && valid) emitRealtimeControls();
   }
 
   function setSelectControl(widget: SelectWidget, event: Event): void {
     draft.controls[widget.control_id] = (
       event.currentTarget as HTMLSelectElement
     ).value;
-    validateDraft();
+    const valid = validateDraft();
     emitDraft();
+    if (runtimeLoaded && valid) emitRealtimeControls();
   }
 
   function setBarycentricControl(
@@ -134,8 +141,9 @@
     draft.controls[controlId] = (
       event.currentTarget as HTMLInputElement
     ).valueAsNumber;
-    validateDraft();
+    const valid = validateDraft();
     emitDraft();
+    if (runtimeLoaded && valid) emitRealtimeControls();
   }
 
   function setRole(roleId: string, event: Event): void {
@@ -193,6 +201,10 @@
   function commitControls(): void {
     if (!runtimeLoaded || !validateDraft()) return;
     void onControlsCommit(serializeDeckControls(model, draft.controls));
+  }
+
+  function emitRealtimeControls(): void {
+    void onControlsChange(serializeDeckControls(model, draft.controls));
   }
 
   function commitRoles(): void {
@@ -520,6 +532,7 @@
                     <button
                       type="button"
                       disabled={!captureAvailable ||
+                        !captureStartAvailable ||
                         captureActive ||
                         !runtimeLoaded ||
                         runtimeBusy}
@@ -531,6 +544,7 @@
                     <button
                       type="button"
                       disabled={!captureAvailable ||
+                        (!liveCaptureActive && !captureStartAvailable) ||
                         (captureActive && !liveCaptureActive) ||
                         !runtimeLoaded ||
                         runtimeBusy}
@@ -541,7 +555,7 @@
                     >
                   {/if}
                   <small>{captureState}</small>
-                  {#if !captureAvailable}
+                  {#if !captureAvailable || (!captureStartAvailable && !liveCaptureActive)}
                     <small class="capability-unavailable"
                       >{captureUnavailableReason}</small
                     >
@@ -607,7 +621,7 @@
     <button
       type="button"
       disabled={!runtimeLoaded || runtimeBusy || draftError !== ""}
-      onclick={commitControls}>Apply controls</button
+      onclick={commitControls}>Apply now</button
     >
     <button
       type="button"

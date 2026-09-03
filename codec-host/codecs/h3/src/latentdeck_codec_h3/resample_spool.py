@@ -142,7 +142,7 @@ class H3ResampleSpool:
 
         return self._latent_slots >= 2 and (self._latent_slots - 2) % 5 == 0
 
-    def append_slot(self, slot: torch.Tensor) -> None:
+    def append_slot(self, slot: torch.Tensor, *, values_validated: bool = False) -> None:
         """Append one exact finite F16 operator output without retaining it."""
 
         raw = self._require_open()
@@ -153,7 +153,7 @@ class H3ResampleSpool:
             raise ResampleSpoolError(f"post-operator slot shape must be {expected_shape}")
         if slot.dtype != torch.float16:
             raise ResampleSpoolError("post-operator slot storage dtype must remain F16")
-        if not bool(torch.isfinite(slot).all().item()):
+        if not values_validated and not bool(torch.isfinite(slot).all().item()):
             raise ResampleSpoolError("post-operator slot must contain only finite values")
 
         next_slots = self._latent_slots + 1
