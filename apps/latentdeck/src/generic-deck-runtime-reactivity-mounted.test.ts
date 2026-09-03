@@ -187,6 +187,50 @@ function changeSelect(select: HTMLSelectElement, value: string): void {
   flushSync();
 }
 
+function findLoadButton(target: HTMLElement): HTMLButtonElement {
+  const button = Array.from(target.querySelectorAll("button")).find(
+    (candidate) => candidate.textContent?.trim() === "Load exact Deck draft",
+  );
+  if (!(button instanceof HTMLButtonElement)) {
+    throw new Error("Missing Load exact Deck draft button");
+  }
+  return button;
+}
+
+async function configureReadyDraft(target: HTMLElement): Promise<void> {
+  const selects = target.querySelectorAll<HTMLSelectElement>(
+    ".runtime-config .config-grid select",
+  );
+  changeSelect(selects[0], `${CODEC_ID}@${CODEC_VERSION}`);
+  await settleUi();
+  changeSelect(selects[1], "cuda");
+  await settleUi();
+  changeSelect(
+    selects[2],
+    [PROFILE.codecFamily, PROFILE.profile, PROFILE.profileVersion].join(
+      "\u0000",
+    ),
+  );
+  await settleUi();
+  target
+    .querySelectorAll<HTMLSelectElement>(
+      '[data-widget-kind="source_picker"] select',
+    )
+    .forEach((select) => changeSelect(select, SOURCE_HASH));
+  await settleUi();
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((accept) => {
+    resolve = accept;
+  });
+  return { promise, resolve };
+}
+
 describe("generic Deck runtime negotiation reactivity", () => {
   beforeEach(() => {
     invokeMock.mockReset();
@@ -197,11 +241,35 @@ describe("generic Deck runtime negotiation reactivity", () => {
         disconnect(): void {}
       },
     );
-    vi.stubGlobal("requestAnimationFrame", () => 1);
+    let nextFrame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      const frame = ++nextFrame;
+      void Promise.resolve().then(() => callback(0));
+      return frame;
+    });
     vi.stubGlobal("cancelAnimationFrame", () => undefined);
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      x: 120,
+      y: 160,
+      top: 160,
+      left: 120,
+      right: 920,
+      bottom: 608,
+      width: 800,
+      height: 448,
+      toJSON: () => ({}),
+    } as DOMRect);
+    vi.spyOn(document.documentElement, "clientWidth", "get").mockReturnValue(
+      1440,
+    );
+    vi.spyOn(document.documentElement, "clientHeight", "get").mockReturnValue(
+      1000,
+    );
   });
 
   afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
@@ -264,6 +332,10 @@ describe("generic Deck runtime negotiation reactivity", () => {
               sha256: null,
               byteLength: null,
             });
+          case "deck_generic_viewport_session_begin":
+            return Promise.resolve({ epoch: 1 });
+          case "deck_generic_viewport_set_bounds":
+            return Promise.resolve();
           case "deck_generic_viewport_hide":
             return Promise.resolve();
           default:
@@ -281,7 +353,7 @@ describe("generic Deck runtime negotiation reactivity", () => {
         model: deck,
         models: [deck],
         library: library(),
-        active: false,
+        active: true,
         registerLeave: () => undefined,
       },
     });
@@ -415,6 +487,374 @@ describe("generic Deck runtime negotiation reactivity", () => {
           ),
       ),
     ).toBe(true);
+
+    await unmount(component);
+    target.remove();
+  });
+
+  it("bootstraps visible native bounds before enabling or opening the first Deck session", async () => {
+    const viewportBegin = deferred<{ epoch: number }>();
+    const firstBounds = deferred<void>();
+    let boundsCalls = 0;
+    invokeMock.mockImplementation(
+      (command: string, args?: Record<string, unknown>) => {
+        switch (command) {
+          case "extensions_snapshot":
+            return Promise.resolve({
+              packages: [],
+              matrix: [
+                {
+                  deck: {
+                    kind: "deck_pack",
+                    packageId: d2DeckPack.deck_id,
+                    packageVersion: d2DeckPack.deck_version,
+                  },
+                  codec: {
+                    kind: "codec_pack",
+                    packageId: CODEC_ID,
+                    packageVersion: CODEC_VERSION,
+                  },
+                  reason: "compatible",
+                  compatibleProfile: PROFILE,
+                },
+              ],
+            });
+          case "deck_generic_sessions_get":
+            return Promise.resolve({
+              sessions: [],
+              foregroundOutput: null,
+              outputPin: null,
+              recentFaults: [],
+            });
+          case "deck_generic_runtime_options": {
+            const request = args?.request as
+              { profileKey: GenericProfileKey | null } | undefined;
+            return Promise.resolve(
+              runtimeOptions(request?.profileKey ?? null, true),
+            );
+          }
+          case "deck_generic_viewport_session_begin":
+            return viewportBegin.promise;
+          case "deck_generic_viewport_set_bounds":
+            boundsCalls += 1;
+            return boundsCalls === 1 ? firstBounds.promise : Promise.resolve();
+          case "deck_generic_open":
+            return Promise.resolve({ sessionId: "session-bootstrap" });
+          case "deck_generic_foreground_set":
+            return Promise.resolve({
+              sessions: [],
+              foregroundOutput: null,
+              outputPin: null,
+              recentFaults: [],
+            });
+          default:
+            return Promise.reject(new Error(`unexpected command: ${command}`));
+        }
+      },
+    );
+
+    const deck = model();
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(GenericDeckWorkspace, {
+      target,
+      props: {
+        model: deck,
+        models: [deck],
+        library: library(),
+        active: true,
+        registerLeave: () => undefined,
+      },
+    });
+    await settleUi();
+
+    const loadButton = Array.from(target.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Load exact Deck draft",
+    );
+    expect(loadButton).toBeInstanceOf(HTMLButtonElement);
+    expect(loadButton?.disabled).toBe(true);
+
+    const selects = target.querySelectorAll<HTMLSelectElement>(
+      ".runtime-config .config-grid select",
+    );
+    changeSelect(selects[0], `${CODEC_ID}@${CODEC_VERSION}`);
+    await settleUi();
+    changeSelect(selects[1], "cuda");
+    await settleUi();
+    changeSelect(
+      selects[2],
+      [PROFILE.codecFamily, PROFILE.profile, PROFILE.profileVersion].join(
+        "\u0000",
+      ),
+    );
+    await settleUi();
+    target
+      .querySelectorAll<HTMLSelectElement>(
+        '[data-widget-kind="source_picker"] select',
+      )
+      .forEach((select) => changeSelect(select, SOURCE_HASH));
+    await settleUi();
+
+    expect(loadButton?.disabled).toBe(true);
+    expect(
+      invokeMock.mock.calls.filter(
+        ([command]) => command === "deck_generic_open",
+      ),
+    ).toHaveLength(0);
+
+    viewportBegin.resolve({ epoch: 7 });
+    await settleUi();
+    const firstBoundsCall = invokeMock.mock.calls.find(
+      ([command]) => command === "deck_generic_viewport_set_bounds",
+    );
+    expect(firstBoundsCall?.[1]).toEqual({
+      bounds: expect.objectContaining({ epoch: 7, visible: true }),
+    });
+    expect(loadButton?.disabled).toBe(true);
+
+    firstBounds.resolve();
+    await settleUi();
+    expect(loadButton?.disabled).toBe(false);
+    loadButton!.click();
+    await settleUi();
+
+    const commandOrder = invokeMock.mock.calls.map(([command]) => command);
+    expect(
+      commandOrder.indexOf("deck_generic_viewport_session_begin"),
+    ).toBeLessThan(commandOrder.indexOf("deck_generic_viewport_set_bounds"));
+    expect(
+      commandOrder.indexOf("deck_generic_viewport_set_bounds"),
+    ).toBeLessThan(commandOrder.indexOf("deck_generic_open"));
+
+    await unmount(component);
+    target.remove();
+  });
+
+  it("re-establishes after transient begin and bounds failures before enabling Load", async () => {
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"],
+    });
+    let beginCalls = 0;
+    let boundsCalls = 0;
+    invokeMock.mockImplementation(
+      (command: string, args?: Record<string, unknown>) => {
+        switch (command) {
+          case "extensions_snapshot":
+            return Promise.resolve({
+              packages: [],
+              matrix: [
+                {
+                  deck: {
+                    kind: "deck_pack",
+                    packageId: d2DeckPack.deck_id,
+                    packageVersion: d2DeckPack.deck_version,
+                  },
+                  codec: {
+                    kind: "codec_pack",
+                    packageId: CODEC_ID,
+                    packageVersion: CODEC_VERSION,
+                  },
+                  reason: "compatible",
+                  compatibleProfile: PROFILE,
+                },
+              ],
+            });
+          case "deck_generic_sessions_get":
+            return Promise.resolve({
+              sessions: [],
+              foregroundOutput: null,
+              outputPin: null,
+              recentFaults: [],
+            });
+          case "deck_generic_runtime_options": {
+            const request = args?.request as
+              { profileKey: GenericProfileKey | null } | undefined;
+            return Promise.resolve(
+              runtimeOptions(request?.profileKey ?? null, true),
+            );
+          }
+          case "deck_generic_viewport_session_begin":
+            beginCalls += 1;
+            return beginCalls === 1
+              ? Promise.reject({
+                  code: "output.viewport_begin_transient",
+                  message: "Transient viewport begin failure.",
+                })
+              : Promise.resolve({ epoch: beginCalls + 10 });
+          case "deck_generic_viewport_set_bounds":
+            boundsCalls += 1;
+            return boundsCalls === 1
+              ? Promise.reject({
+                  code: "output.viewport_bounds_transient",
+                  message: "Transient viewport bounds failure.",
+                })
+              : Promise.resolve();
+          case "deck_generic_open":
+            return Promise.resolve({ sessionId: "session-recovered" });
+          case "deck_generic_foreground_set":
+            return Promise.resolve({
+              sessions: [],
+              foregroundOutput: null,
+              outputPin: null,
+              recentFaults: [],
+            });
+          default:
+            return Promise.reject(new Error(`unexpected command: ${command}`));
+        }
+      },
+    );
+
+    const deck = model();
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(GenericDeckWorkspace, {
+      target,
+      props: {
+        model: deck,
+        models: [deck],
+        library: library(),
+        active: true,
+        registerLeave: () => undefined,
+      },
+    });
+    await settleUi();
+    await configureReadyDraft(target);
+    const loadButton = findLoadButton(target);
+
+    expect(beginCalls).toBe(1);
+    expect(boundsCalls).toBe(0);
+    expect(loadButton.disabled).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(99);
+    await settleUi();
+    expect(beginCalls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await settleUi();
+    expect(beginCalls).toBe(2);
+    expect(boundsCalls).toBe(1);
+    expect(loadButton.disabled).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(249);
+    await settleUi();
+    expect(beginCalls).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
+    await settleUi();
+    expect(beginCalls).toBe(3);
+    expect(boundsCalls).toBe(2);
+    expect(loadButton.disabled).toBe(false);
+    expect(target.textContent).not.toContain(
+      "Transient viewport bounds failure.",
+    );
+
+    loadButton.click();
+    await settleUi();
+    const commands = invokeMock.mock.calls.map(([command]) => command);
+    const openIndex = commands.indexOf("deck_generic_open");
+    expect(openIndex).toBeGreaterThan(-1);
+    expect(
+      commands
+        .slice(0, openIndex)
+        .filter((command) => command === "deck_generic_viewport_set_bounds"),
+    ).toHaveLength(2);
+
+    await unmount(component);
+    target.remove();
+  });
+
+  it("stops a failed retry burst and lets resize start a fresh bounded recovery", async () => {
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"],
+    });
+    let beginCalls = 0;
+    let boundsCalls = 0;
+    invokeMock.mockImplementation(
+      (command: string, args?: Record<string, unknown>) => {
+        switch (command) {
+          case "extensions_snapshot":
+            return Promise.resolve({
+              packages: [],
+              matrix: [
+                {
+                  deck: {
+                    kind: "deck_pack",
+                    packageId: d2DeckPack.deck_id,
+                    packageVersion: d2DeckPack.deck_version,
+                  },
+                  codec: {
+                    kind: "codec_pack",
+                    packageId: CODEC_ID,
+                    packageVersion: CODEC_VERSION,
+                  },
+                  reason: "compatible",
+                  compatibleProfile: PROFILE,
+                },
+              ],
+            });
+          case "deck_generic_sessions_get":
+            return Promise.resolve({
+              sessions: [],
+              foregroundOutput: null,
+              outputPin: null,
+              recentFaults: [],
+            });
+          case "deck_generic_runtime_options": {
+            const request = args?.request as
+              { profileKey: GenericProfileKey | null } | undefined;
+            return Promise.resolve(
+              runtimeOptions(request?.profileKey ?? null, true),
+            );
+          }
+          case "deck_generic_viewport_session_begin":
+            beginCalls += 1;
+            return beginCalls <= 4
+              ? Promise.reject({
+                  code: "output.viewport_begin_transient",
+                  message: "Transient viewport begin failure.",
+                })
+              : Promise.resolve({ epoch: 40 + beginCalls });
+          case "deck_generic_viewport_set_bounds":
+            boundsCalls += 1;
+            return Promise.resolve();
+          default:
+            return Promise.reject(new Error(`unexpected command: ${command}`));
+        }
+      },
+    );
+
+    const deck = model();
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(GenericDeckWorkspace, {
+      target,
+      props: {
+        model: deck,
+        models: [deck],
+        library: library(),
+        active: true,
+        registerLeave: () => undefined,
+      },
+    });
+    await settleUi();
+    await configureReadyDraft(target);
+    const loadButton = findLoadButton(target);
+
+    for (const delay of [100, 250, 500]) {
+      await vi.advanceTimersByTimeAsync(delay);
+      await settleUi();
+    }
+    expect(beginCalls).toBe(4);
+    expect(boundsCalls).toBe(0);
+    expect(loadButton.disabled).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await settleUi();
+    expect(beginCalls).toBe(4);
+
+    globalThis.dispatchEvent(new Event("resize"));
+    await settleUi();
+    expect(beginCalls).toBe(5);
+    expect(boundsCalls).toBeGreaterThanOrEqual(1);
+    expect(loadButton.disabled).toBe(false);
 
     await unmount(component);
     target.remove();

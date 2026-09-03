@@ -84,6 +84,7 @@
     recentFaults: [],
   };
   const PROFILE_SEPARATOR = "\u0000";
+  const VIEWPORT_RETRY_DELAYS_MS = [100, 250, 500] as const;
 
   let extensions: ExtensionsSnapshot = EMPTY_EXTENSIONS_SNAPSHOT;
   let selectedCodecKey = "";
@@ -115,10 +116,16 @@
   let viewportEpoch: number | null = null;
   let viewportRevision = 0;
   let viewportFrame: number | null = null;
-  let viewportSessionId = "";
   let viewportApplied: EmbeddedViewportBounds | null = null;
   let viewportBusy = false;
   let viewportResizeObserver: ResizeObserver | null = null;
+  let viewportRetryAttempt = 0;
+  let viewportRetryTimer: ReturnType<typeof globalThis.setTimeout> | null =
+    null;
+  let viewportRetryExhausted = false;
+  let viewportFailureCode = "";
+  let viewportSuspended = false;
+  let viewportObservedActive = active;
   let observedModels = models;
   let publishedCaptureKey = "";
   let extensionsRefreshPending: Promise<void> | null = null;
@@ -140,7 +147,9 @@
   }> = [];
   let runtimeAvailable = false;
   let runtimeUnavailableReason = "Choose an exact compatible Codec version.";
-  let loadAvailable = true;
+  let sessionCapacityAvailable = true;
+  let loadAvailable = false;
+  let loadUnavailableReason = "The native output viewport is not ready.";
   let captureAvailable = false;
   let captureUnavailableReason = "Load and foreground an exact session first.";
   let recordingAvailable = false;
@@ -188,7 +197,14 @@
     selectedProfile,
     runtimeOptions,
   );
-  $: loadAvailable = sessionCapacityState(sessions.sessions.length).canOpen;
+  $: sessionCapacityAvailable = sessionCapacityState(
+    sessions.sessions.length,
+  ).canOpen;
+  $: loadAvailable =
+    sessionCapacityAvailable && viewportApplied?.visible === true;
+  $: loadUnavailableReason = !sessionCapacityAvailable
+    ? `${SESSION_CAPACITY_CODE}: close one of the four warm sessions explicitly.`
+    : "LatentDeck is waiting for the visible embedded video area.";
   $: captureIsActive = captureActive(capture);
   $: recordingIsActive = recordingActive(recording);
   $: captureAvailable =
@@ -213,29 +229,45 @@
     observedModels = models;
     void refreshExtensions();
   }
-  $: if (active && selectedSession?.sessionId !== viewportSessionId) {
-    void establishViewport();
+  $: if (active !== viewportObservedActive) {
+    viewportObservedActive = active;
+    if (active) {
+      viewportSuspended = false;
+      viewportRetryAttempt = 0;
+      viewportRetryExhausted = false;
+    }
+  }
+  $: if (active && !viewportSuspended && viewportAnchor !== null) {
+    if (viewportEpoch === null) {
+      if (viewportRetryTimer === null && !viewportRetryExhausted)
+        void establishViewport();
+    } else scheduleViewportSync();
   }
 
   onMount(() => {
     registerLeave(leaveSurface);
     void refreshExtensions();
     void refreshSessions();
-    viewportResizeObserver = new ResizeObserver(() => scheduleViewportSync());
+    viewportResizeObserver = new ResizeObserver(() =>
+      requestViewportRecovery(),
+    );
     if (viewportAnchor !== null) viewportResizeObserver.observe(viewportAnchor);
-    const resize = () => scheduleViewportSync();
+    void establishViewport();
+    const resize = () => requestViewportRecovery();
     globalThis.addEventListener("resize", resize);
     globalThis.addEventListener("scroll", resize, true);
     const poll = globalThis.setInterval(() => {
       if (active) void pollForegroundState();
     }, 500);
     return () => {
+      viewportSuspended = true;
       registerLeave(async () => undefined);
       globalThis.clearInterval(poll);
       globalThis.removeEventListener("resize", resize);
       globalThis.removeEventListener("scroll", resize, true);
       viewportResizeObserver?.disconnect();
       viewportResizeObserver = null;
+      cancelViewportRetry();
       if (viewportFrame !== null)
         globalThis.cancelAnimationFrame(viewportFrame);
       void hideViewport();
@@ -243,6 +275,9 @@
   });
 
   function resetForExactDeck(): void {
+    viewportSuspended = false;
+    viewportRetryAttempt = 0;
+    viewportRetryExhausted = false;
     configuredDeckKey = model.exactKey;
     selectedCodecKey = "";
     selectedDevice = "";
@@ -565,6 +600,16 @@
       profile === undefined ||
       device === ""
     ) {
+      return;
+    }
+    if (
+      viewportApplied?.visible !== true ||
+      viewportAnchor === null ||
+      !viewportAnchor.isConnected
+    ) {
+      errorCode = "output.viewport_not_ready";
+      message = "LatentDeck is waiting for the visible embedded video area.";
+      scheduleViewportSync();
       return;
     }
     draft = nextDraft;
@@ -930,32 +975,117 @@
   function monitorAnchor(element: HTMLDivElement | null): void {
     viewportAnchor = element;
     viewportResizeObserver?.disconnect();
-    if (element !== null) viewportResizeObserver?.observe(element);
-    scheduleViewportSync();
+    if (element === null) {
+      cancelViewportRetry();
+      viewportRetryAttempt = 0;
+      viewportRetryExhausted = false;
+      viewportApplied = null;
+      return;
+    }
+    viewportResizeObserver?.observe(element);
+    if (active && !viewportSuspended && viewportRetryTimer === null)
+      void establishViewport();
   }
 
   async function establishViewport(): Promise<void> {
-    const sessionId = selectedSession?.sessionId;
-    if (!active || sessionId === undefined || viewportBusy) return;
-    if (viewportSessionId === sessionId && viewportEpoch !== null) {
+    if (!active || viewportSuspended || viewportAnchor === null || viewportBusy)
+      return;
+    if (viewportEpoch !== null) {
       scheduleViewportSync();
       return;
     }
+    const anchor = viewportAnchor;
     viewportBusy = true;
-    const requested = sessionId;
     try {
-      const viewport = await genericDeckClient.viewportSessionBegin(requested);
-      if (selectedSession?.sessionId !== requested) return;
-      viewportSessionId = requested;
+      const viewport = await genericDeckClient.viewportSessionBegin();
+      if (
+        !active ||
+        viewportSuspended ||
+        viewportAnchor !== anchor ||
+        !anchor.isConnected
+      ) {
+        resetViewportBootstrap();
+        if (active && !viewportSuspended && viewportAnchor !== null)
+          scheduleViewportRetry();
+        return;
+      }
       viewportEpoch = viewport.epoch;
       viewportRevision = 0;
       viewportApplied = null;
       scheduleViewportSync();
     } catch (error) {
-      fail(error);
+      failViewportBootstrap(error);
     } finally {
       viewportBusy = false;
     }
+  }
+
+  function scheduleViewportRetry(): void {
+    if (
+      !active ||
+      viewportSuspended ||
+      viewportAnchor === null ||
+      viewportRetryTimer !== null
+    )
+      return;
+    const delay = VIEWPORT_RETRY_DELAYS_MS[viewportRetryAttempt];
+    if (delay === undefined) {
+      viewportRetryExhausted = true;
+      return;
+    }
+    viewportRetryAttempt += 1;
+    viewportRetryTimer = globalThis.setTimeout(() => {
+      viewportRetryTimer = null;
+      if (active && !viewportSuspended && viewportAnchor !== null)
+        void establishViewport();
+    }, delay);
+  }
+
+  function cancelViewportRetry(): void {
+    if (viewportRetryTimer === null) return;
+    globalThis.clearTimeout(viewportRetryTimer);
+    viewportRetryTimer = null;
+  }
+
+  function requestViewportRecovery(): void {
+    if (!active || viewportSuspended || viewportAnchor === null) return;
+    if (viewportEpoch !== null) {
+      scheduleViewportSync();
+      return;
+    }
+    if (viewportBusy || viewportRetryTimer !== null) return;
+    viewportRetryAttempt = 0;
+    viewportRetryExhausted = false;
+    void establishViewport();
+  }
+
+  function resetViewportBootstrap(): void {
+    if (viewportFrame !== null) {
+      globalThis.cancelAnimationFrame(viewportFrame);
+      viewportFrame = null;
+    }
+    viewportEpoch = null;
+    viewportRevision = 0;
+    viewportApplied = null;
+  }
+
+  function failViewportBootstrap(error: unknown): void {
+    resetViewportBootstrap();
+    viewportFailureCode = commandErrorCode(error);
+    fail(error);
+    scheduleViewportRetry();
+  }
+
+  function confirmViewportBounds(bounds: EmbeddedViewportBounds): void {
+    cancelViewportRetry();
+    viewportRetryAttempt = 0;
+    viewportRetryExhausted = false;
+    viewportApplied = bounds;
+    if (viewportFailureCode !== "" && errorCode === viewportFailureCode) {
+      errorCode = "";
+      message = "Native output viewport ready.";
+    }
+    viewportFailureCode = "";
   }
 
   function scheduleViewportSync(): void {
@@ -968,12 +1098,11 @@
 
   async function syncViewport(): Promise<void> {
     const epoch = viewportEpoch;
-    const sessionId = selectedSession?.sessionId;
-    if (epoch === null || sessionId === undefined || viewportAnchor === null)
-      return;
+    const anchor = viewportAnchor;
+    if (epoch === null || anchor === null || !anchor.isConnected) return;
     const revision = nextEmbeddedViewportRevision(viewportRevision);
     if (revision === null) return;
-    const rect = viewportAnchor.getBoundingClientRect();
+    const rect = anchor.getBoundingClientRect();
     const scaleFactor = globalThis.devicePixelRatio;
     const inside = embeddedViewportFullyInsideClient(
       rect,
@@ -981,25 +1110,34 @@
       document.documentElement.clientHeight,
       scaleFactor,
     );
-    const visible = active && selectedSession?.foreground === true && inside;
+    const visible = active && !viewportSuspended && inside;
     const bounds = visible
       ? buildEmbeddedViewportBounds(epoch, revision, rect, scaleFactor, true)
       : hiddenEmbeddedViewportBounds(epoch, revision, scaleFactor);
     if (bounds === null) return;
     viewportRevision = revision;
     try {
-      await genericDeckClient.viewportSetBounds(sessionId, bounds);
-      viewportApplied = bounds;
+      await genericDeckClient.viewportSetBounds(bounds);
+      if (
+        viewportEpoch === epoch &&
+        viewportRevision === revision &&
+        viewportAnchor === anchor
+      )
+        confirmViewportBounds(bounds);
     } catch (error) {
-      fail(error);
+      if (
+        viewportEpoch === epoch &&
+        viewportRevision === revision &&
+        viewportAnchor === anchor
+      )
+        failViewportBootstrap(error);
     }
   }
 
   async function hideViewport(): Promise<void> {
     const epoch = viewportEpoch;
-    const sessionId = viewportSessionId;
     const revision = nextEmbeddedViewportRevision(viewportRevision);
-    if (epoch === null || sessionId === "" || revision === null) return;
+    if (epoch === null || revision === null) return;
     const bounds = hiddenEmbeddedViewportBounds(
       epoch,
       revision,
@@ -1008,7 +1146,7 @@
     if (bounds === null) return;
     viewportRevision = revision;
     try {
-      await genericDeckClient.viewportSetBounds(sessionId, bounds);
+      await genericDeckClient.viewportSetBounds(bounds);
       viewportApplied = bounds;
     } catch {
       // Best-effort teardown; the host destroys the child with the session.
@@ -1016,6 +1154,8 @@
   }
 
   async function leaveSurface(): Promise<void> {
+    viewportSuspended = true;
+    cancelViewportRetry();
     const sessionId = selectedSession?.sessionId;
     if (sessionId !== undefined && outputFullscreen === true) {
       outputFullscreen = await genericDeckClient.fullscreenSet(
@@ -1320,7 +1460,7 @@
           No warm Protocol 2 sessions.
         </p>{/if}
     </div>
-    {#if !loadAvailable}
+    {#if !sessionCapacityAvailable}
       <p class="capacity-note">
         {SESSION_CAPACITY_CODE} · close one session explicitly; no LRU eviction occurs.
       </p>
@@ -1421,7 +1561,7 @@
       {runtimeAvailable}
       {runtimeUnavailableReason}
       {loadAvailable}
-      loadUnavailableReason={`${SESSION_CAPACITY_CODE}: close one of the four warm sessions explicitly.`}
+      {loadUnavailableReason}
       runtimeLoaded={selectedSessionReady}
       runtimeBusy={busy}
       statusMessage={statusMessage()}

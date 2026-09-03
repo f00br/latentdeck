@@ -66,7 +66,7 @@ describe("generic Deck exact host client", () => {
     expect(calls).toEqual([[GENERIC_DECK_COMMANDS.open, { request }]]);
   });
 
-  it("keeps every session/output/capture operation scoped by host session identity", async () => {
+  it("keeps session operations scoped while matching the global viewport host contract", async () => {
     const calls: Array<[string, Record<string, unknown>]> = [];
     const client = createGenericDeckClient(host(calls));
     const bounds = {
@@ -91,8 +91,8 @@ describe("generic Deck exact host client", () => {
     await client.foregroundSet("session-1");
     await client.foregroundClear();
     await client.close("session-1");
-    await client.viewportSessionBegin("session-1");
-    await client.viewportSetBounds("session-1", bounds);
+    await client.viewportSessionBegin();
+    await client.viewportSetBounds(bounds);
     await client.fullscreenStatusGet("session-1");
     await client.fullscreenSet("session-1", false);
     await client.spoutStatusGet("session-1");
@@ -125,11 +125,8 @@ describe("generic Deck exact host client", () => {
       [GENERIC_DECK_COMMANDS.foregroundSet, { sessionId: "session-1" }],
       [GENERIC_DECK_COMMANDS.foregroundClear, {}],
       [GENERIC_DECK_COMMANDS.close, { sessionId: "session-1" }],
-      [GENERIC_DECK_COMMANDS.viewportSessionBegin, { sessionId: "session-1" }],
-      [
-        GENERIC_DECK_COMMANDS.viewportSetBounds,
-        { sessionId: "session-1", bounds },
-      ],
+      [GENERIC_DECK_COMMANDS.viewportSessionBegin, {}],
+      [GENERIC_DECK_COMMANDS.viewportSetBounds, { bounds }],
       [GENERIC_DECK_COMMANDS.fullscreenStatusGet, { sessionId: "session-1" }],
       [
         GENERIC_DECK_COMMANDS.fullscreenSet,

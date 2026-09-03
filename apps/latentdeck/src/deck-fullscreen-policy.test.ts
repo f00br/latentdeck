@@ -81,7 +81,7 @@ describe("Deck host fullscreen recovery policy", () => {
     );
 
     expect(genericWorkspace).toContain(
-      "$: if (active && selectedSession?.sessionId !== viewportSessionId)",
+      "$: if (active && !viewportSuspended && viewportAnchor !== null)",
     );
     expect(poll).toContain("fullscreenStatusGet(sessionId)");
     expect(poll).not.toContain("fullscreenSet(");

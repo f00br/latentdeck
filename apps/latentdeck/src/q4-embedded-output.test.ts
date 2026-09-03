@@ -17,27 +17,51 @@ describe("generic embedded native-output contract", () => {
 
   it("hides the child surface when the exact Deck is inactive or torn down", () => {
     expect(workspaceSource).toContain(
-      "active && selectedSession?.foreground === true && inside",
+      "const visible = active && !viewportSuspended && inside",
     );
     expect(workspaceSource).toContain("hiddenEmbeddedViewportBounds(");
     expect(workspaceSource).toContain("await hideViewport();");
     expect(workspaceSource).toContain("embeddedViewportFullyInsideClient(");
   });
 
-  it("acknowledges viewport placement for the foreground generic session", () => {
+  it("acknowledges global viewport placement before a first generic session", () => {
     const beginIndex = workspaceSource.indexOf(
-      "await genericDeckClient.viewportSessionBegin(requested)",
+      "await genericDeckClient.viewportSessionBegin()",
     );
+    const syncIndex = workspaceSource.indexOf("async function syncViewport()");
     const invokeIndex = workspaceSource.indexOf(
-      "await genericDeckClient.viewportSetBounds(sessionId, bounds)",
+      "await genericDeckClient.viewportSetBounds(bounds)",
+      syncIndex,
     );
-    const appliedIndex = workspaceSource.indexOf("viewportApplied = bounds;");
+    const appliedIndex = workspaceSource.indexOf(
+      "confirmViewportBounds(bounds)",
+      invokeIndex,
+    );
     expect(beginIndex).toBeGreaterThan(-1);
+    expect(syncIndex).toBeGreaterThan(beginIndex);
     expect(invokeIndex).toBeGreaterThan(-1);
     expect(appliedIndex).toBeGreaterThan(invokeIndex);
+    expect(workspaceSource).toContain("viewportApplied = bounds;");
     expect(workspaceSource).toContain("embeddedViewportFullyInsideClient(");
     expect(rendererSource).toContain("disabled={!runtimeAvailable");
     expect(rendererSource).toContain("!sourceDraftReady");
+    expect(workspaceSource).toContain(
+      "sessionCapacityAvailable && viewportApplied?.visible === true",
+    );
+    expect(workspaceSource).toContain(
+      'errorCode = "output.viewport_not_ready"',
+    );
+  });
+
+  it("bounds bootstrap retries and exposes a fresh recovery trigger", () => {
+    expect(workspaceSource).toContain(
+      "const VIEWPORT_RETRY_DELAYS_MS = [100, 250, 500] as const",
+    );
+    expect(workspaceSource).toContain("viewportRetryExhausted = true");
+    expect(workspaceSource).toContain(
+      "const resize = () => requestViewportRecovery()",
+    );
+    expect(workspaceSource).toContain("resetViewportBootstrap();");
   });
 
   it("makes native video the sole declarative surface in fullscreen", () => {

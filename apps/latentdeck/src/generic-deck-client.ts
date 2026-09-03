@@ -270,11 +270,8 @@ export interface GenericDeckClient {
   foregroundSet(sessionId: string): Promise<GenericDeckSessionsView>;
   foregroundClear(): Promise<GenericDeckSessionsView>;
   close(sessionId: string): Promise<void>;
-  viewportSessionBegin(sessionId: string): Promise<EmbeddedViewportSession>;
-  viewportSetBounds(
-    sessionId: string,
-    bounds: EmbeddedViewportBounds,
-  ): Promise<void>;
+  viewportSessionBegin(): Promise<EmbeddedViewportSession>;
+  viewportSetBounds(bounds: EmbeddedViewportBounds): Promise<void>;
   fullscreenStatusGet(sessionId: string): Promise<boolean | null>;
   fullscreenSet(sessionId: string, enabled: boolean): Promise<boolean>;
   spoutStatusGet(sessionId: string): Promise<SpoutStatus | null>;
@@ -345,13 +342,10 @@ export function createGenericDeckClient(
     foregroundClear: () =>
       host.invoke(GENERIC_DECK_COMMANDS.foregroundClear, {}),
     close: (sessionId) => session(GENERIC_DECK_COMMANDS.close, sessionId),
-    viewportSessionBegin: (sessionId) =>
-      session(GENERIC_DECK_COMMANDS.viewportSessionBegin, sessionId),
-    viewportSetBounds: (sessionId, bounds) =>
-      host.invoke(GENERIC_DECK_COMMANDS.viewportSetBounds, {
-        sessionId,
-        bounds,
-      }),
+    viewportSessionBegin: () =>
+      host.invoke(GENERIC_DECK_COMMANDS.viewportSessionBegin, {}),
+    viewportSetBounds: (bounds) =>
+      host.invoke(GENERIC_DECK_COMMANDS.viewportSetBounds, { bounds }),
     fullscreenStatusGet: (sessionId) =>
       session(GENERIC_DECK_COMMANDS.fullscreenStatusGet, sessionId),
     fullscreenSet: (sessionId, enabled) =>
