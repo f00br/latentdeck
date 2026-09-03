@@ -62,8 +62,15 @@ describe("generic Deck exact host client", () => {
     };
 
     await client.open(request);
+    await client.replaceSources("session-1", request);
 
-    expect(calls).toEqual([[GENERIC_DECK_COMMANDS.open, { request }]]);
+    expect(calls).toEqual([
+      [GENERIC_DECK_COMMANDS.open, { request }],
+      [
+        GENERIC_DECK_COMMANDS.sourcesReplace,
+        { sessionId: "session-1", request },
+      ],
+    ]);
   });
 
   it("keeps session operations scoped while matching the global viewport host contract", async () => {

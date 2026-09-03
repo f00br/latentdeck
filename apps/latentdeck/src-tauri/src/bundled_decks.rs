@@ -23,13 +23,13 @@ fn embedded_bundled_decks() -> &'static [EmbeddedBundledDeck] {
     static DECKS: [EmbeddedBundledDeck; 2] = [
         EmbeddedBundledDeck {
             package_id: "org.latentdeck.deck.d2",
-            package_version: "0.2.0",
+            package_version: "0.2.1",
             archive_sha256: D2_ARCHIVE_SHA256,
             bytes: D2_ARCHIVE_BYTES,
         },
         EmbeddedBundledDeck {
             package_id: "org.latentdeck.deck.q4",
-            package_version: "0.2.0",
+            package_version: "0.2.1",
             archive_sha256: Q4_ARCHIVE_SHA256,
             bytes: Q4_ARCHIVE_BYTES,
         },
@@ -207,8 +207,8 @@ mod tests {
                 .map(|deck| (deck.package_id, deck.package_version))
                 .collect::<Vec<_>>(),
             [
-                ("org.latentdeck.deck.d2", "0.2.0"),
-                ("org.latentdeck.deck.q4", "0.2.0"),
+                ("org.latentdeck.deck.d2", "0.2.1"),
+                ("org.latentdeck.deck.q4", "0.2.1"),
             ]
         );
         assert!(

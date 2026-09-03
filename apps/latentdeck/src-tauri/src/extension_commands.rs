@@ -185,6 +185,8 @@ const MAX_DECK_UI_JSON_BYTES: u64 = 1_048_576;
 const MAX_DECK_UI_CONTROLS: usize = 128;
 const MAX_DECK_UI_SECTIONS: usize = 16;
 const MAX_DECK_UI_WIDGETS: usize = 128;
+const MAX_DECK_UI_VISIBILITY_PREDICATES: usize = 8;
+const MAX_DECK_UI_VISIBILITY_VALUES: usize = 16;
 const MAX_DECK_UI_CATALOG_ENTRIES: usize = 256;
 const MAX_DECK_UI_CATALOG_JSON_BYTES: u64 = 16 * 1_048_576;
 const MAX_JS_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
@@ -308,7 +310,49 @@ struct DeckFaceplateDescriptor {
 struct DeckFaceplateSection {
     section_id: String,
     title: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    region: Option<DeckFaceplateSectionRegion>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    columns: Option<u8>,
     widgets: Vec<DeckFaceplateWidget>,
+}
+
+fn deserialize_present_non_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DeckFaceplateSectionRegion {
+    Output,
+    Actions,
+    Controls,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DeckFaceplateVisibilityPredicate {
+    control_id: String,
+    one_of: Vec<DeckFaceplateVisibilityValue>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(untagged)]
+enum DeckFaceplateVisibilityValue {
+    Text(String),
+    Boolean(bool),
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -317,11 +361,23 @@ enum DeckFaceplateWidget {
     SourcePicker {
         id: String,
         label: String,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
+        visible_when: Option<Vec<DeckFaceplateVisibilityPredicate>>,
         slot_index: u8,
     },
     Slider {
         id: String,
         label: String,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
+        visible_when: Option<Vec<DeckFaceplateVisibilityPredicate>>,
         control_id: String,
         minimum: f64,
         maximum: f64,
@@ -330,6 +386,12 @@ enum DeckFaceplateWidget {
     Number {
         id: String,
         label: String,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
+        visible_when: Option<Vec<DeckFaceplateVisibilityPredicate>>,
         control_id: String,
         minimum: f64,
         maximum: f64,
@@ -338,22 +400,46 @@ enum DeckFaceplateWidget {
     Toggle {
         id: String,
         label: String,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
+        visible_when: Option<Vec<DeckFaceplateVisibilityPredicate>>,
         control_id: String,
     },
     Select {
         id: String,
         label: String,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
+        visible_when: Option<Vec<DeckFaceplateVisibilityPredicate>>,
         control_id: String,
         options: Vec<DeckFaceplateOption>,
     },
     RoleEditor {
         id: String,
         label: String,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
+        visible_when: Option<Vec<DeckFaceplateVisibilityPredicate>>,
         role_ids: Vec<String>,
     },
     Barycentric3 {
         id: String,
         label: String,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
+        visible_when: Option<Vec<DeckFaceplateVisibilityPredicate>>,
         x_control_id: String,
         y_control_id: String,
         vertex_role_ids: [String; 3],
@@ -361,21 +447,63 @@ enum DeckFaceplateWidget {
     Transport {
         id: String,
         label: String,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
+        visible_when: Option<Vec<DeckFaceplateVisibilityPredicate>>,
         slot_indices: Vec<u8>,
     },
     Seed {
         id: String,
         label: String,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
+        visible_when: Option<Vec<DeckFaceplateVisibilityPredicate>>,
     },
     Capture {
         id: String,
         label: String,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
+        visible_when: Option<Vec<DeckFaceplateVisibilityPredicate>>,
         modes: Vec<DeckFaceplateCaptureMode>,
     },
     Monitor {
         id: String,
         label: String,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
+        visible_when: Option<Vec<DeckFaceplateVisibilityPredicate>>,
     },
+}
+
+impl DeckFaceplateWidget {
+    fn visible_when(&self) -> Option<&[DeckFaceplateVisibilityPredicate]> {
+        match self {
+            Self::SourcePicker { visible_when, .. }
+            | Self::Slider { visible_when, .. }
+            | Self::Number { visible_when, .. }
+            | Self::Toggle { visible_when, .. }
+            | Self::Select { visible_when, .. }
+            | Self::RoleEditor { visible_when, .. }
+            | Self::Barycentric3 { visible_when, .. }
+            | Self::Transport { visible_when, .. }
+            | Self::Seed { visible_when, .. }
+            | Self::Capture { visible_when, .. }
+            | Self::Monitor { visible_when, .. } => visible_when.as_deref(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -723,7 +851,7 @@ fn validate_deck_faceplate(
     operator: &DeckOperatorDescriptor,
     faceplate: &DeckFaceplateDescriptor,
 ) -> Result<(), CommandError> {
-    if faceplate.schema_version != 1
+    if !matches!(faceplate.schema_version, 1 | 2)
         || !valid_deck_ui_text(&faceplate.title)
         || faceplate.sections.is_empty()
         || faceplate.sections.len() > MAX_DECK_UI_SECTIONS
@@ -753,6 +881,7 @@ fn validate_deck_faceplate(
     let mut seed_count = 0;
     let mut capture_count = 0;
     let mut monitor_count = 0;
+    let mut output_region_count = 0;
     let mut widget_count = 0;
     for section in &faceplate.sections {
         if !is_deck_ui_identifier(&section.section_id)
@@ -763,6 +892,27 @@ fn validate_deck_faceplate(
                 "faceplate.json contains an invalid or duplicate section.",
             ));
         }
+        if faceplate.schema_version == 1 {
+            if section.region.is_some() || section.columns.is_some() {
+                return Err(deck_ui_invalid(
+                    "Faceplate schema v1 cannot declare schema-v2 layout fields.",
+                ));
+            }
+        } else {
+            let Some(region) = section.region else {
+                return Err(deck_ui_invalid(
+                    "Faceplate schema v2 requires a region and bounded column count per section.",
+                ));
+            };
+            if !matches!(section.columns, Some(1..=4)) {
+                return Err(deck_ui_invalid(
+                    "Faceplate schema v2 requires a region and bounded column count per section.",
+                ));
+            }
+            if region == DeckFaceplateSectionRegion::Output {
+                output_region_count += 1;
+            }
+        }
         widget_count += section.widgets.len();
         if widget_count > MAX_DECK_UI_WIDGETS {
             return Err(deck_ui_invalid(
@@ -770,6 +920,39 @@ fn validate_deck_faceplate(
             ));
         }
         for widget in &section.widgets {
+            if faceplate.schema_version == 1 {
+                if widget.visible_when().is_some() {
+                    return Err(deck_ui_invalid(
+                        "Faceplate schema v1 cannot declare schema-v2 visibility predicates.",
+                    ));
+                }
+            } else {
+                validate_faceplate_visibility(&controls, widget.visible_when())?;
+                let valid_region = match widget {
+                    DeckFaceplateWidget::Monitor { .. } => {
+                        section.region == Some(DeckFaceplateSectionRegion::Output)
+                    }
+                    DeckFaceplateWidget::Capture { .. } => {
+                        section.region == Some(DeckFaceplateSectionRegion::Actions)
+                    }
+                    DeckFaceplateWidget::SourcePicker { .. }
+                    | DeckFaceplateWidget::Slider { .. }
+                    | DeckFaceplateWidget::Number { .. }
+                    | DeckFaceplateWidget::Toggle { .. }
+                    | DeckFaceplateWidget::Select { .. }
+                    | DeckFaceplateWidget::RoleEditor { .. }
+                    | DeckFaceplateWidget::Barycentric3 { .. }
+                    | DeckFaceplateWidget::Transport { .. }
+                    | DeckFaceplateWidget::Seed { .. } => {
+                        section.region == Some(DeckFaceplateSectionRegion::Controls)
+                    }
+                };
+                if !valid_region {
+                    return Err(deck_ui_invalid(
+                        "A schema-v2 faceplate widget occupies an invalid layout region.",
+                    ));
+                }
+            }
             let (id, label) = faceplate_widget_identity(widget);
             if !is_deck_ui_identifier(id) || !widget_ids.insert(id) || !valid_deck_ui_text(label) {
                 return Err(deck_ui_invalid(
@@ -961,10 +1144,62 @@ fn validate_deck_faceplate(
         || seed_count != 1
         || capture_count > 1
         || monitor_count != 1
+        || (faceplate.schema_version == 2 && output_region_count != 1)
     {
         return Err(deck_ui_invalid(
             "faceplate.json does not expose the complete closed Deck contract exactly once.",
         ));
+    }
+    Ok(())
+}
+
+fn validate_faceplate_visibility(
+    controls: &BTreeMap<&str, &DeckControlDescriptor>,
+    predicates: Option<&[DeckFaceplateVisibilityPredicate]>,
+) -> Result<(), CommandError> {
+    let Some(predicates) = predicates else {
+        return Ok(());
+    };
+    if predicates.is_empty() || predicates.len() > MAX_DECK_UI_VISIBILITY_PREDICATES {
+        return Err(deck_ui_invalid(
+            "A visibility predicate list is empty or exceeds its limit.",
+        ));
+    }
+    for predicate in predicates {
+        if !is_deck_ui_identifier(&predicate.control_id)
+            || predicate.one_of.is_empty()
+            || predicate.one_of.len() > MAX_DECK_UI_VISIBILITY_VALUES
+            || predicate.one_of.iter().collect::<BTreeSet<_>>().len()
+                != predicate.one_of.len()
+            || predicate.one_of.iter().any(|value| {
+                matches!(value, DeckFaceplateVisibilityValue::Text(text) if !is_deck_ui_identifier(text))
+            })
+        {
+            return Err(deck_ui_invalid(
+                "A visibility predicate is invalid, duplicated, unsafe, or exceeds its limits.",
+            ));
+        }
+        let Some(control) = controls.get(predicate.control_id.as_str()) else {
+            return Err(deck_ui_invalid(
+                "A visibility predicate references an absent operator control.",
+            ));
+        };
+        let matches_control = match control {
+            DeckControlDescriptor::Enum { options, .. } =>
+                predicate.one_of.iter().all(|value| {
+                    matches!(value, DeckFaceplateVisibilityValue::Text(text) if options.contains(text))
+                }),
+            DeckControlDescriptor::Boolean { .. } => predicate
+                .one_of
+                .iter()
+                .all(|value| matches!(value, DeckFaceplateVisibilityValue::Boolean(_))),
+            DeckControlDescriptor::Number { .. } | DeckControlDescriptor::Integer { .. } => false,
+        };
+        if !matches_control {
+            return Err(deck_ui_invalid(
+                "A visibility predicate must match one enum or boolean control exactly.",
+            ));
+        }
     }
     Ok(())
 }
@@ -1233,6 +1468,55 @@ mod tests {
         }
     }
 
+    fn d2_manifest_and_package() -> (DeckPackManifest, PackageReference) {
+        let manifest = serde_json::from_str::<DeckPackManifest>(include_str!(
+            "../../../../operators/builtin/d2/package/deck-pack.json"
+        ))
+        .expect("bundled D2 manifest");
+        let package = PackageReference {
+            kind: PackageKind::DeckPack,
+            package_id: manifest.deck_id.clone(),
+            package_version: manifest.deck_version.clone(),
+        };
+        (manifest, package)
+    }
+
+    fn d2_faceplate_json() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../../operators/builtin/d2/package/faceplate.json"
+        ))
+        .expect("bundled D2 faceplate")
+    }
+
+    fn validate_d2_faceplate_json(
+        faceplate: &serde_json::Value,
+    ) -> Result<DeckUiPackageView, CommandError> {
+        let (manifest, package) = d2_manifest_and_package();
+        deck_ui_view_from_parts(
+            &package,
+            &manifest,
+            include_bytes!("../../../../operators/builtin/d2/package/operator.json"),
+            &serde_json::to_vec(faceplate).expect("serialize faceplate"),
+        )
+    }
+
+    fn legacy_d2_faceplate_json() -> serde_json::Value {
+        let mut faceplate = d2_faceplate_json();
+        faceplate["schema_version"] = serde_json::json!(1);
+        for section in faceplate["sections"].as_array_mut().expect("sections") {
+            let section = section.as_object_mut().expect("section object");
+            section.remove("region");
+            section.remove("columns");
+            for widget in section["widgets"].as_array_mut().expect("widgets") {
+                widget
+                    .as_object_mut()
+                    .expect("widget object")
+                    .remove("visible_when");
+            }
+        }
+        faceplate
+    }
+
     #[test]
     fn deck_ui_catalog_view_is_closed_path_free_and_bound_to_exact_identity() {
         let manifest = serde_json::from_str::<DeckPackManifest>(include_str!(
@@ -1261,6 +1545,227 @@ mod tests {
         assert!(!json.contains("entrypoint"));
         assert!(!json.contains("python/deck_operator"));
         assert!(!json.contains("installed_path"));
+    }
+
+    #[test]
+    fn deck_ui_catalog_accepts_closed_faceplate_v2_layout_and_visibility() {
+        let manifest = serde_json::from_str::<DeckPackManifest>(include_str!(
+            "../../../../operators/builtin/d2/package/deck-pack.json"
+        ))
+        .expect("bundled D2 manifest");
+        let package = PackageReference {
+            kind: PackageKind::DeckPack,
+            package_id: manifest.deck_id.clone(),
+            package_version: manifest.deck_version.clone(),
+        };
+
+        let view = deck_ui_view_from_parts(
+            &package,
+            &manifest,
+            include_bytes!("../../../../operators/builtin/d2/package/operator.json"),
+            include_bytes!("../../../../operators/builtin/d2/package/faceplate.json"),
+        )
+        .expect("closed schema-v2 faceplate");
+        let json = serde_json::to_string(&view.faceplate).expect("serialize faceplate");
+
+        assert_eq!(view.faceplate.schema_version, 2);
+        assert!(json.contains("\"region\":\"output\""));
+        assert!(json.contains("\"visible_when\""));
+    }
+
+    #[test]
+    fn deck_ui_catalog_preserves_v1_and_rejects_v2_fields_on_v1() {
+        let legacy = legacy_d2_faceplate_json();
+        let view = validate_d2_faceplate_json(&legacy).expect("legacy faceplate remains valid");
+        let json = serde_json::to_string(&view.faceplate).expect("serialize legacy faceplate");
+        assert!(!json.contains("\"region\""));
+        assert!(!json.contains("\"columns\""));
+        assert!(!json.contains("\"visible_when\""));
+
+        let mut with_layout = legacy.clone();
+        with_layout["sections"][0]["region"] = serde_json::json!("controls");
+        assert!(validate_d2_faceplate_json(&with_layout).is_err());
+
+        let mut with_visibility = legacy;
+        with_visibility["sections"][3]["widgets"][0]["visible_when"] = serde_json::json!([
+            { "control_id": "algorithm", "one_of": ["xs1"] }
+        ]);
+        assert!(validate_d2_faceplate_json(&with_visibility).is_err());
+    }
+
+    #[test]
+    fn deck_ui_catalog_rejects_explicit_null_for_optional_schema_v2_fields() {
+        let legacy = legacy_d2_faceplate_json();
+
+        let mut null_region = legacy.clone();
+        null_region["sections"][0]["region"] = serde_json::Value::Null;
+        assert!(validate_d2_faceplate_json(&null_region).is_err());
+
+        let mut null_columns = legacy.clone();
+        null_columns["sections"][0]["columns"] = serde_json::Value::Null;
+        assert!(validate_d2_faceplate_json(&null_columns).is_err());
+
+        let mut null_v1_visibility = legacy;
+        null_v1_visibility["sections"][3]["widgets"][0]["visible_when"] = serde_json::Value::Null;
+        assert!(validate_d2_faceplate_json(&null_v1_visibility).is_err());
+
+        let mut null_v2_visibility = d2_faceplate_json();
+        null_v2_visibility["sections"][3]["widgets"]
+            .as_array_mut()
+            .expect("widgets")
+            .iter_mut()
+            .find(|widget| widget["id"] == "mode")
+            .expect("mode widget")["visible_when"] = serde_json::Value::Null;
+        assert!(validate_d2_faceplate_json(&null_v2_visibility).is_err());
+    }
+
+    #[test]
+    fn deck_ui_catalog_enforces_faceplate_v2_regions_and_columns() {
+        let valid = d2_faceplate_json();
+
+        let mut missing_columns = valid.clone();
+        missing_columns["sections"][0]
+            .as_object_mut()
+            .expect("section")
+            .remove("columns");
+        assert!(validate_d2_faceplate_json(&missing_columns).is_err());
+
+        let mut excessive_columns = valid.clone();
+        excessive_columns["sections"][0]["columns"] = serde_json::json!(5);
+        assert!(validate_d2_faceplate_json(&excessive_columns).is_err());
+
+        let mut monitor_outside_output = valid.clone();
+        monitor_outside_output["sections"][5]["region"] = serde_json::json!("controls");
+        assert!(validate_d2_faceplate_json(&monitor_outside_output).is_err());
+
+        let mut capture_outside_actions = valid.clone();
+        capture_outside_actions["sections"][4]["region"] = serde_json::json!("controls");
+        assert!(validate_d2_faceplate_json(&capture_outside_actions).is_err());
+
+        let mut control_outside_controls = valid.clone();
+        control_outside_controls["sections"][0]["region"] = serde_json::json!("actions");
+        assert!(validate_d2_faceplate_json(&control_outside_controls).is_err());
+
+        let mut duplicate_output = valid;
+        duplicate_output["sections"]
+            .as_array_mut()
+            .expect("sections")
+            .push(serde_json::json!({
+                "section_id": "second_output",
+                "title": "Second output",
+                "region": "output",
+                "columns": 1,
+                "widgets": []
+            }));
+        assert!(validate_d2_faceplate_json(&duplicate_output).is_err());
+    }
+
+    #[test]
+    fn deck_ui_catalog_rejects_open_unbounded_or_mistyped_visibility_predicates() {
+        fn mode_visibility(faceplate: &mut serde_json::Value) -> &mut serde_json::Value {
+            faceplate["sections"][3]["widgets"]
+                .as_array_mut()
+                .expect("widgets")
+                .iter_mut()
+                .find(|widget| widget["id"] == "mode")
+                .expect("mode widget")
+                .get_mut("visible_when")
+                .expect("mode visibility")
+        }
+
+        let valid = d2_faceplate_json();
+
+        let mut empty = valid.clone();
+        *mode_visibility(&mut empty) = serde_json::json!([]);
+        assert!(validate_d2_faceplate_json(&empty).is_err());
+
+        let mut duplicated = valid.clone();
+        *mode_visibility(&mut duplicated) = serde_json::json!([
+            { "control_id": "algorithm", "one_of": ["xs1", "xs1"] }
+        ]);
+        assert!(validate_d2_faceplate_json(&duplicated).is_err());
+
+        let mut absent_control = valid.clone();
+        *mode_visibility(&mut absent_control) = serde_json::json!([
+            { "control_id": "missing", "one_of": ["xs1"] }
+        ]);
+        assert!(validate_d2_faceplate_json(&absent_control).is_err());
+
+        let mut numeric_control = valid.clone();
+        *mode_visibility(&mut numeric_control) = serde_json::json!([
+            { "control_id": "mix", "one_of": ["xs1"] }
+        ]);
+        assert!(validate_d2_faceplate_json(&numeric_control).is_err());
+
+        let mut invalid_enum_value = valid.clone();
+        *mode_visibility(&mut invalid_enum_value) = serde_json::json!([
+            { "control_id": "algorithm", "one_of": ["bogus"] }
+        ]);
+        assert!(validate_d2_faceplate_json(&invalid_enum_value).is_err());
+
+        let mut numeric_value = valid.clone();
+        *mode_visibility(&mut numeric_value) = serde_json::json!([
+            { "control_id": "algorithm", "one_of": [1] }
+        ]);
+        assert!(validate_d2_faceplate_json(&numeric_value).is_err());
+
+        let mut unsafe_value = valid.clone();
+        *mode_visibility(&mut unsafe_value) = serde_json::json!([
+            { "control_id": "algorithm", "one_of": ["XS1"] }
+        ]);
+        assert!(validate_d2_faceplate_json(&unsafe_value).is_err());
+
+        let mut open_predicate = valid.clone();
+        *mode_visibility(&mut open_predicate) = serde_json::json!([
+            { "control_id": "algorithm", "one_of": ["xs1"], "script": "run()" }
+        ]);
+        assert!(validate_d2_faceplate_json(&open_predicate).is_err());
+
+        let mut too_many_predicates = valid.clone();
+        *mode_visibility(&mut too_many_predicates) = serde_json::json!([
+            { "control_id": "algorithm", "one_of": ["linear"] },
+            { "control_id": "algorithm", "one_of": ["xs1"] },
+            { "control_id": "algorithm", "one_of": ["xs2"] },
+            { "control_id": "algorithm", "one_of": ["xs3"] },
+            { "control_id": "algorithm", "one_of": ["xs4"] },
+            { "control_id": "algorithm", "one_of": ["xs5"] },
+            { "control_id": "mode", "one_of": ["hybridize"] },
+            { "control_id": "mode", "one_of": ["interact"] },
+            { "control_id": "algorithm", "one_of": ["linear"] }
+        ]);
+        assert!(validate_d2_faceplate_json(&too_many_predicates).is_err());
+
+        let mut too_many_values = valid;
+        *mode_visibility(&mut too_many_values) = serde_json::json!([
+            {
+                "control_id": "algorithm",
+                "one_of": [
+                    "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8",
+                    "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16"
+                ]
+            }
+        ]);
+        assert!(validate_d2_faceplate_json(&too_many_values).is_err());
+    }
+
+    #[test]
+    fn deck_ui_visibility_predicates_accept_only_boolean_values_for_boolean_controls() {
+        let boolean = DeckControlDescriptor::Boolean {
+            control_id: "enabled".to_owned(),
+            default: false,
+        };
+        let controls = BTreeMap::from([("enabled", &boolean)]);
+        let valid = vec![DeckFaceplateVisibilityPredicate {
+            control_id: "enabled".to_owned(),
+            one_of: vec![DeckFaceplateVisibilityValue::Boolean(true)],
+        }];
+        assert!(validate_faceplate_visibility(&controls, Some(&valid)).is_ok());
+
+        let mismatched = vec![DeckFaceplateVisibilityPredicate {
+            control_id: "enabled".to_owned(),
+            one_of: vec![DeckFaceplateVisibilityValue::Text("true".to_owned())],
+        }];
+        assert!(validate_faceplate_visibility(&controls, Some(&mismatched)).is_err());
     }
 
     #[test]

@@ -14,7 +14,11 @@ import type {
   GenericRecordingView,
 } from "./generic-deck-client";
 import GenericDeckWorkspace from "./GenericDeckWorkspace.svelte";
-import { EMPTY_LIBRARY_VIEW } from "./library-model";
+import {
+  EMPTY_LIBRARY_VIEW,
+  type CartridgeView,
+  type LibraryView,
+} from "./library-model";
 
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 
@@ -194,6 +198,83 @@ function idleRecording(): GenericRecordingView {
   };
 }
 
+function sourceCartridge(
+  marker: string,
+  cartridgeId: string,
+): CartridgeView {
+  return {
+    archiveSha256: marker.repeat(64),
+    cartridgeId,
+    codecFamily: "test",
+    codecProfile: "latent",
+    codecProfileVersion: "1.0.0",
+    timingContract: "test_24fps",
+    timingContractVersion: "1.0.0",
+    frameRateNumerator: 24,
+    frameRateDenominator: 1,
+    decodedWidth: 64,
+    decodedHeight: 64,
+    decodedFrameCount: 24,
+    durationNumerator: 1,
+    durationDenominator: 1,
+    signalGeometry: {
+      codec_family: "test",
+      profile: "latent",
+      profile_version: "1.0.0",
+      runtime_dtype: "F16",
+      batch: 1,
+      latent_channels: 24,
+      latent_slots: 24,
+      latent_height: 30,
+      latent_width: 45,
+      decoded_frame_count: 24,
+      decoded_height: 64,
+      decoded_width: 64,
+      timing_contract: "test_24fps",
+      timing_contract_version: "1.0.0",
+      frame_rate: { numerator: 24, denominator: 1 },
+    },
+    signalPresentation: {
+      orientation: "square",
+      aspect_ratio: { width: 1, height: 1 },
+      decoded_width: 64,
+      decoded_height: 64,
+    },
+    signalWorkload: {
+      latent_sites_per_slot: null,
+      latent_values_per_slot: null,
+      latent_values_per_clip: null,
+      decoded_pixels_per_frame: null,
+    },
+    favorite: false,
+    tags: [],
+    availability: "present",
+    paths: [
+      {
+        path: `${cartridgeId}.lc`,
+        fileName: `${cartridgeId}.lc`,
+        state: "present",
+        warningCode: null,
+      },
+    ],
+  };
+}
+
+function sourceLibrary(): LibraryView {
+  const cartridges = [
+    sourceCartridge("a", "source-a"),
+    sourceCartridge("b", "source-b"),
+    sourceCartridge("c", "captured-cartridge"),
+  ];
+  return {
+    ...EMPTY_LIBRARY_VIEW,
+    cartridges,
+    recent: cartridges,
+    totalIndexed: cartridges.length,
+    activeMemberCount: cartridges.length,
+  };
+}
+
 function clickButton(target: HTMLElement, label: string): void {
   const button = Array.from(target.querySelectorAll("button")).find(
     (candidate) => candidate.textContent?.trim() === label,
@@ -224,12 +305,15 @@ function findButton(target: HTMLElement, label: string): HTMLButtonElement {
 function deferred<T>(): {
   promise: Promise<T>;
   resolve(value: T): void;
+  reject(error: unknown): void;
 } {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((accept) => {
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((accept, deny) => {
     resolve = accept;
+    reject = deny;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 async function settleUi(): Promise<void> {
@@ -247,6 +331,9 @@ function installHost(state: {
   controlsSet?: (
     args: Record<string, unknown>,
   ) => Promise<GenericDeckSessionView["runtime"]>;
+  replaceSources?: (
+    args: Record<string, unknown>,
+  ) => Promise<GenericDeckSessionView>;
 }) {
   const runtimeSession = session();
   const snapshot = (): GenericDeckSessionsView => ({
@@ -280,6 +367,23 @@ function installHost(state: {
           return (
             state.controlsSet?.(args) ?? Promise.resolve(runtimeSession.runtime)
           );
+        case "deck_generic_runtime_options":
+          return Promise.resolve({
+            deck: runtimeSession.deck,
+            codec: runtimeSession.codec,
+            reason: "compatible",
+            profiles: [runtimeSession.profileKey],
+            device: runtimeSession.device,
+            slots: 2,
+            externalAssets: [],
+            sources: sourceLibrary().cartridges.map((source) => ({
+              cartridgeId: source.cartridgeId,
+              archiveSha256: source.archiveSha256,
+              reason: "compatible",
+            })),
+          });
+        case "deck_generic_sources_replace":
+          return state.replaceSources?.(args) ?? Promise.resolve(runtimeSession);
         case "deck_generic_capture_start":
           state.capture = capture("capturing");
           state.outputPin = {
@@ -304,8 +408,10 @@ function installHost(state: {
         case "deck_generic_recording_stop":
           state.recording = recording("finished");
           return Promise.resolve(state.recording);
+        case "library_resolve_preset_sources":
+          return Promise.resolve([sourceLibrary().cartridges[2]]);
         case "library_snapshot":
-          return Promise.resolve(EMPTY_LIBRARY_VIEW);
+          return Promise.resolve(sourceLibrary());
         default:
           return Promise.reject(new Error(`unexpected command: ${command}`));
       }
@@ -489,6 +595,70 @@ describe("generic Deck foreground output pin refresh", () => {
     target.remove();
   });
 
+  it("makes a finished capture immediately usable in either D2 slot without opening a fifth session", async () => {
+    const replacements: Record<string, unknown>[] = [];
+    const state = {
+      outputPin: null as GenericOutputPin | null,
+      capture: capture("finished"),
+      recording: idleRecording(),
+      replaceSources: async (args: Record<string, unknown>) => {
+        replacements.push(args);
+        const request = args.request as { sources: GenericDeckSessionView["sources"] };
+        return { ...session(), sources: request.sources };
+      },
+    };
+    installHost(state);
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = await mountWorkspace(target);
+
+    expect(findButton(target, "Use capture in A").disabled).toBe(false);
+    expect(findButton(target, "Use capture in B").disabled).toBe(false);
+
+    clickButton(target, "Start Live Capture");
+    await settleUi();
+    expect(findButton(target, "Use capture in A").disabled).toBe(true);
+    clickButton(target, "Stop Live Capture");
+    await settleUi();
+    expect(findButton(target, "Use capture in A").disabled).toBe(true);
+    state.outputPin = null;
+    await vi.advanceTimersByTimeAsync(1_000);
+    await settleUi();
+    expect(target.textContent).toContain("Output lease unpinned");
+    expect(findButton(target, "Snapshot").disabled).toBe(false);
+    expect(findButton(target, "Use capture in A").disabled).toBe(false);
+
+    const sourceSelects = target.querySelectorAll<HTMLSelectElement>(
+      '[data-widget-kind="source_picker"] select',
+    );
+    expect(sourceSelects).toHaveLength(2);
+    sourceSelects[1].value = "a".repeat(64);
+    sourceSelects[1].dispatchEvent(new Event("change", { bubbles: true }));
+    await settleUi();
+
+    clickButton(target, "Use capture in A");
+    await settleUi();
+
+    expect(replacements).toHaveLength(1);
+    expect(replacements[0].sessionId).toBe(SESSION_ID);
+    expect(
+      (replacements[0].request as { sources: GenericDeckSessionView["sources"] })
+        .sources,
+    ).toEqual([
+      {
+        cartridgeId: "captured-cartridge",
+        archiveSha256: "c".repeat(64),
+      },
+      { cartridgeId: "source-b", archiveSha256: "b".repeat(64) },
+    ]);
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === "deck_generic_open"),
+    ).toHaveLength(0);
+
+    await unmount(component);
+    target.remove();
+  });
+
   it("shows MP4 pin/unpin after actions and refreshes a terminal transition once", async () => {
     const state = {
       outputPin: null as GenericOutputPin | null,
@@ -540,6 +710,69 @@ describe("generic Deck foreground output pin refresh", () => {
     await vi.advanceTimersByTimeAsync(500);
     await settleUi();
     expect(sessionsGetCount()).toBe(6);
+
+    await unmount(component);
+    target.remove();
+  });
+
+  it("reconciles Close immediately and ignores a late stale session.not_found poll", async () => {
+    const state = {
+      outputPin: null as GenericOutputPin | null,
+      capture: idleCapture(),
+      recording: idleRecording(),
+    };
+    installHost(state);
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = await mountWorkspace(target);
+    const normalHost = invokeMock.getMockImplementation();
+    const lateStatus = deferred<GenericDeckSessionView>();
+    let closed = false;
+    invokeMock.mockImplementation(
+      (command: string, args: Record<string, unknown> = {}) => {
+        if (command === "deck_generic_status_get" && !closed) {
+          return lateStatus.promise;
+        }
+        if (command === "deck_generic_close") {
+          closed = true;
+          return Promise.resolve();
+        }
+        if (command === "deck_generic_sessions_get" && closed) {
+          return Promise.resolve({
+            sessions: [],
+            foregroundOutput: null,
+            outputPin: null,
+            recentFaults: [],
+          });
+        }
+        return normalHost?.(command, args);
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(500);
+    await settleUi();
+    const statusCallsWhilePending = invokeMock.mock.calls.filter(
+      ([command]) => command === "deck_generic_status_get",
+    ).length;
+    await vi.advanceTimersByTimeAsync(500);
+    await settleUi();
+    expect(
+      invokeMock.mock.calls.filter(
+        ([command]) => command === "deck_generic_status_get",
+      ),
+    ).toHaveLength(statusCallsWhilePending);
+    clickButton(target, "Close");
+    await settleUi();
+    expect(target.textContent).toContain("No warm Protocol 2 sessions.");
+
+    lateStatus.reject({
+      code: "session.not_found",
+      message: "The exact generic Deck session is not active.",
+    });
+    await settleUi();
+    expect(target.querySelector('[role="alert"]')).toBeNull();
+    expect(target.textContent).not.toContain("session.not_found");
+    expect(target.textContent).toContain("No warm Protocol 2 sessions.");
 
     await unmount(component);
     target.remove();

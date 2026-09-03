@@ -8,6 +8,7 @@ import {
   playDraftAwareSlot,
   replaceDraftSource,
   retainDraftSourceOptions,
+  selectedSourceAspectWarning,
   transportForDraftLoad,
 } from "./source-replacement";
 
@@ -101,6 +102,28 @@ describe("explicit captured-source replacement", () => {
     ]);
   });
 
+  it("describes an exact cross-slot aspect mismatch without proposing hidden conversion", () => {
+    const sources = [
+      {
+        archiveSha256: "a",
+        decodedWidth: 448,
+        decodedHeight: 800,
+        signalPresentation: { aspect_ratio: { width: 9, height: 16 } },
+      },
+      {
+        archiveSha256: "b",
+        decodedWidth: 1344,
+        decodedHeight: 768,
+        signalPresentation: { aspect_ratio: { width: 16, height: 9 } },
+      },
+    ];
+
+    expect(selectedSourceAspectWarning(["a", "b"], sources)).toBe(
+      "Aspect mismatch · A 9:16 (448×800) · B 16:9 (1344×768). No hidden resize or crop; align sources in the Toolkit first.",
+    );
+    expect(selectedSourceAspectWarning(["a", "a"], sources)).toBe("");
+  });
+
   it("coalesces overlapping source replacement requests and always releases", async () => {
     const transitions: boolean[] = [];
     const gate = createExclusiveOperationGate((active) =>
@@ -129,9 +152,10 @@ describe("explicit captured-source replacement", () => {
 
   it("publishes completed captures back into the generic Library source bank", () => {
     expect(workspaceSource).toContain("publishCompletedCapture(capture)");
-    expect(workspaceSource).toContain(
-      "onLibraryChanged(await librarySnapshot())",
-    );
+    expect(workspaceSource).toContain('"library_resolve_preset_sources"');
+    expect(workspaceSource).toContain("acceptLibrarySnapshot(incoming");
+    expect(workspaceSource).toContain("genericDeckClient.replaceSources(");
     expect(rendererSource).toContain("{#each sourceOptions as option");
+    expect(rendererSource).toContain("Use capture in {slotLabel(slotIndex)}");
   });
 });

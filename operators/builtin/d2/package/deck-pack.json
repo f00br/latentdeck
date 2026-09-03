@@ -2,7 +2,7 @@
   "manifest_version": "1.0.0",
   "kind": "deck_pack",
   "deck_id": "org.latentdeck.deck.d2",
-  "deck_version": "0.2.0",
+  "deck_version": "0.2.1",
   "display_name": "LatentDeck D2",
   "summary": "Two-source carrier and donor latent synthesis.",
   "publisher": {
@@ -37,8 +37,8 @@
   "signal": {
     "slots": 2,
     "roles": [
-      {"role_id": "carrier", "display_name": "Carrier"},
-      {"role_id": "donor", "display_name": "Donor"}
+      { "role_id": "carrier", "display_name": "Carrier" },
+      { "role_id": "donor", "display_name": "Donor" }
     ],
     "default_permutation": ["carrier", "donor"],
     "structural_carrier_role": "carrier",
@@ -97,6 +97,6 @@
   "faceplate_path": "faceplate.json",
   "integrity": {
     "catalog_path": "integrity.json",
-    "catalog_sha256": "10bfef378a65c2ab4b55cb575bdd70933127b59f957b1f5edcd877f0c577b9d1"
+    "catalog_sha256": "2b6666dd5452cc9ea185eaa90e2218baad9c5796e591a69bbf4bdf63fdc1b2e3"
   }
 }

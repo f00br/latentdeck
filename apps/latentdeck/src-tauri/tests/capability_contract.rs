@@ -54,7 +54,15 @@ fn fullscreen_commands_are_host_level_not_runtime_gated() {
 #[test]
 fn production_composition_root_registers_only_generic_deck_commands() {
     let main = include_str!("../src/main.rs");
-    assert!(main.contains("deck_generic_open"));
+    let handler = main
+        .split(".invoke_handler(tauri::generate_handler![")
+        .nth(1)
+        .expect("production invoke handler")
+        .split("])")
+        .next()
+        .expect("production invoke handler closes");
+    assert!(handler.contains("deck_generic_open"));
+    assert!(handler.contains("deck_generic_sources_replace"));
     assert!(main.contains("deck_generic_capture_start"));
     assert!(main.contains("deck_generic_recording_start"));
     assert!(!main.contains("mod d2_"));
@@ -63,6 +71,77 @@ fn production_composition_root_registers_only_generic_deck_commands() {
     assert!(!main.contains("deck_q4_"));
     assert!(!main.contains("D2AppState"));
     assert!(!main.contains("Q4AppState"));
+}
+
+#[test]
+fn source_replacement_preflights_before_the_old_worker_shutdown_boundary() {
+    let source = include_str!("../src/generic_deck_state.rs");
+    let command = source
+        .split("async fn deck_generic_sources_replace(")
+        .nth(1)
+        .expect("source replacement command")
+        .split("async fn configure_replacement_runtime(")
+        .next()
+        .expect("source replacement command closes");
+    let shutdown = command
+        .find("shutdown_for_replacement()")
+        .expect("destructive worker boundary");
+    for preflight in [
+        "resolve_deck_sources(identities)",
+        "prepare_open_selection(",
+        "prevalidate_load(&prepared, &load)",
+        "validate_replacement_identity(",
+    ] {
+        assert!(
+            command
+                .find(preflight)
+                .is_some_and(|index| index < shutdown),
+            "{preflight} must finish before the old worker stops"
+        );
+    }
+    assert!(command.contains("abort_lifecycle_transition(transition.generation)"));
+    assert!(
+        command
+            .find("complete_source_replacement(")
+            .is_some_and(|commit| command
+                .rfind("state.viewport.current()")
+                .is_some_and(|latest_viewport| commit < latest_viewport)),
+        "the published replacement must receive an authoritative post-commit viewport re-read"
+    );
+}
+
+#[test]
+fn mp4_pin_monitor_follows_the_shared_recorder_not_a_retired_runtime() {
+    let source = include_str!("../src/generic_deck_state.rs");
+    let monitor = source
+        .split("fn spawn_recording_pin_monitor(")
+        .nth(1)
+        .expect("recording pin monitor")
+        .split("async fn release_monitored_pin(")
+        .next()
+        .expect("recording pin monitor closes");
+
+    assert!(monitor.contains("recording: DecodedRecordingController"));
+    assert!(monitor.contains("recording.status().state"));
+    assert!(!monitor.contains("GenericDeckRuntime"));
+    assert!(!monitor.contains("runtime.is_closed()"));
+}
+
+#[test]
+fn source_replacement_preserves_private_spout_intent_without_requiring_spout() {
+    let actor = include_str!("../src/generic_deck_runtime.rs");
+    let restore = actor
+        .rsplit("fn restore_replacement_output(")
+        .next()
+        .expect("replacement output restore")
+        .split("fn publish_status(")
+        .next()
+        .expect("replacement output restore closes");
+
+    assert!(restore.contains("self.spout_requested_enabled = spout_requested_enabled"));
+    assert!(restore.contains("if self.output.spout_status().ready"));
+    assert!(restore.contains("let _ = self.output.set_spout_name(name)"));
+    assert!(restore.contains("effective_spout_enabled("));
 }
 
 #[test]

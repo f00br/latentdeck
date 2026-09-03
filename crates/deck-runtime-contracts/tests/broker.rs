@@ -144,6 +144,56 @@ fn mp4_pin_has_the_same_exclusive_switch_rule() {
 }
 
 #[test]
+fn replacing_a_worker_preserves_the_exact_session_foreground_lease_and_mp4_pin() {
+    let mut broker = broker_with_sessions(MAX_WARM_SESSIONS);
+    let foreground = broker.switch_foreground(&session_id(1)).unwrap();
+    let pin = broker
+        .pin_foreground(&session_id(1), OutputPinKind::Mp4)
+        .unwrap();
+
+    let replaced = broker.replace_worker(&session_id(1), worker_id(9)).unwrap();
+
+    assert_eq!(replaced.session_id, session_id(1));
+    assert_eq!(replaced.worker_id, worker_id(9));
+    assert_eq!(broker.len(), MAX_WARM_SESSIONS);
+    assert_eq!(broker.foreground_output(), Some(&foreground));
+    assert_eq!(broker.output_pin(), Some(&pin));
+    assert_eq!(
+        broker
+            .sessions()
+            .find(|session| session.session_id == session_id(1))
+            .map(|session| &session.worker_id),
+        Some(&worker_id(9))
+    );
+}
+
+#[test]
+fn replacing_with_an_assigned_worker_is_rejected_without_mutation() {
+    let mut broker = broker_with_sessions(2);
+    let before = broker.snapshot();
+
+    let error = broker
+        .replace_worker(&session_id(1), worker_id(2))
+        .unwrap_err();
+
+    assert_eq!(error, BrokerError::WorkerAlreadyAssigned);
+    assert_eq!(broker.snapshot(), before);
+}
+
+#[test]
+fn replacing_a_missing_session_is_rejected_without_mutation() {
+    let mut broker = broker_with_sessions(2);
+    let before = broker.snapshot();
+
+    let error = broker
+        .replace_worker(&session_id(9), worker_id(1))
+        .unwrap_err();
+
+    assert_eq!(error, BrokerError::SessionNotFound);
+    assert_eq!(broker.snapshot(), before);
+}
+
+#[test]
 fn stale_or_foreign_pin_token_cannot_release_current_pin() {
     let mut broker = broker_with_sessions(1);
     broker.switch_foreground(&session_id(1)).unwrap();

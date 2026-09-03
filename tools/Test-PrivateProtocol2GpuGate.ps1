@@ -38,8 +38,8 @@ try {
                 'raw_import'
             )
             decks = @(
-                'org.latentdeck.deck.d2@0.2.0',
-                'org.latentdeck.deck.q4@0.2.0'
+                'org.latentdeck.deck.d2@0.2.1',
+                'org.latentdeck.deck.q4@0.2.1'
             )
             external_deck = 'dev.latentdeck.private.h3-probe@0.2.0'
             required_surfaces = @(

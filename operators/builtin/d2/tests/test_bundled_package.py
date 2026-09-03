@@ -89,7 +89,7 @@ def test_d2_package_is_closed_and_faceplate_exposes_the_exact_contract() -> None
 
     assert (manifest["deck_id"], manifest["deck_version"]) == (
         "org.latentdeck.deck.d2",
-        "0.2.0",
+        "0.2.1",
     )
     assert manifest["runtime"] == {
         "kind": "python_operator_stream_v1",
@@ -218,7 +218,7 @@ def test_d2_integrity_catalog_and_deterministic_ld_are_exact(tmp_path: Path) -> 
     assert inspected["package"] == {
         "kind": "deck_pack",
         "package_id": "org.latentdeck.deck.d2",
-        "package_version": "0.2.0",
+        "package_version": "0.2.1",
     }
     assert inspected["file_count"] == 8
 

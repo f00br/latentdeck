@@ -212,6 +212,11 @@ pub(crate) struct GenericDeckRuntimeDiagnostics {
     pub(crate) metrics: RealtimeSessionMetrics,
 }
 
+pub(crate) struct GenericReplacementOutputState {
+    pub(crate) spout: NativeSpoutStatus,
+    pub(crate) spout_requested_enabled: bool,
+}
+
 pub(crate) struct GenericDeckRuntime {
     sender: mpsc::Sender<RuntimeCommand>,
     worker_pid: u32,
@@ -226,13 +231,14 @@ pub(crate) struct GenericDeckRuntime {
 }
 
 impl GenericDeckRuntime {
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub(crate) async fn start(
         app: AppHandle,
         parent: WebviewWindow,
         viewport: EmbeddedViewport,
         prepared: PreparedDeckSelectionV2,
         load: DeckSessionV2LoadRequest,
+        recording: DecodedRecordingController,
         app_local_data: PathBuf,
         library_importer: LibraryImporter,
     ) -> Result<Self, GenericDeckRuntimeError> {
@@ -390,7 +396,6 @@ impl GenericDeckRuntime {
         let status = Arc::new(Mutex::new(initial_status.clone()));
         let fault_code = Arc::new(Mutex::new(None));
         let capture_status = Arc::new(Mutex::new(GenericCaptureView::default()));
-        let recording = DecodedRecordingController::new();
         let output_visible = Arc::new(AtomicBool::new(false));
         let closed = Arc::new(AtomicBool::new(false));
         let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
@@ -547,6 +552,13 @@ impl GenericDeckRuntime {
             .await
     }
 
+    pub(crate) async fn replacement_output_state(
+        &self,
+    ) -> Result<GenericReplacementOutputState, GenericDeckRuntimeError> {
+        self.request(|reply| RuntimeCommand::ReplacementOutputState { reply })
+            .await
+    }
+
     pub(crate) async fn configure_spout(
         &self,
         name: Option<String>,
@@ -576,6 +588,19 @@ impl GenericDeckRuntime {
     pub(crate) async fn capture_stop(&self) -> Result<GenericCaptureView, GenericDeckRuntimeError> {
         self.request(|reply| RuntimeCommand::CaptureStop { reply })
             .await
+    }
+
+    pub(crate) async fn restore_replacement_output(
+        &self,
+        name: String,
+        spout_requested_enabled: bool,
+    ) -> Result<NativeSpoutStatus, GenericDeckRuntimeError> {
+        self.request(|reply| RuntimeCommand::RestoreReplacementOutput {
+            name,
+            spout_requested_enabled,
+            reply,
+        })
+        .await
     }
 
     pub(crate) async fn capture_status(
@@ -614,6 +639,11 @@ impl GenericDeckRuntime {
         self.recording.status()
     }
 
+    #[must_use]
+    pub(crate) fn recording_controller(&self) -> DecodedRecordingController {
+        self.recording.clone()
+    }
+
     pub(crate) async fn diagnostics(
         &self,
     ) -> Result<GenericDeckRuntimeDiagnostics, GenericDeckRuntimeError> {
@@ -622,11 +652,27 @@ impl GenericDeckRuntime {
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), GenericDeckRuntimeError> {
+        self.shutdown_with_recording_policy(RecordingShutdownPolicy::Stop)
+            .await
+    }
+
+    pub(crate) async fn shutdown_for_replacement(&self) -> Result<(), GenericDeckRuntimeError> {
+        self.shutdown_with_recording_policy(RecordingShutdownPolicy::Preserve)
+            .await
+    }
+
+    async fn shutdown_with_recording_policy(
+        &self,
+        recording_policy: RecordingShutdownPolicy,
+    ) -> Result<(), GenericDeckRuntimeError> {
         if self.is_closed() {
             return Ok(());
         }
         let result = self
-            .request(|reply| RuntimeCommand::Shutdown { reply })
+            .request(|reply| RuntimeCommand::Shutdown {
+                recording_policy,
+                reply,
+            })
             .await;
         let mut cleanup = self.cleanup_complete.clone();
         if !*cleanup.borrow() {
@@ -692,9 +738,17 @@ enum RuntimeCommand {
     SpoutStatus {
         reply: oneshot::Sender<Result<NativeSpoutStatus, GenericDeckRuntimeError>>,
     },
+    ReplacementOutputState {
+        reply: oneshot::Sender<Result<GenericReplacementOutputState, GenericDeckRuntimeError>>,
+    },
     ConfigureSpout {
         name: Option<String>,
         enabled: Option<bool>,
+        reply: oneshot::Sender<Result<NativeSpoutStatus, GenericDeckRuntimeError>>,
+    },
+    RestoreReplacementOutput {
+        name: String,
+        spout_requested_enabled: bool,
         reply: oneshot::Sender<Result<NativeSpoutStatus, GenericDeckRuntimeError>>,
     },
     CaptureStart {
@@ -716,8 +770,15 @@ enum RuntimeCommand {
         reply: oneshot::Sender<Result<GenericDeckRuntimeDiagnostics, GenericDeckRuntimeError>>,
     },
     Shutdown {
+        recording_policy: RecordingShutdownPolicy,
         reply: oneshot::Sender<Result<(), GenericDeckRuntimeError>>,
     },
+}
+
+#[derive(Clone, Copy)]
+enum RecordingShutdownPolicy {
+    Stop,
+    Preserve,
 }
 
 struct RuntimeActor {
@@ -778,7 +839,9 @@ impl RuntimeActor {
                         continue;
                     }
                     Err(mpsc::error::TryRecvError::Disconnected) => {
-                        let _ = self.stop(ShutdownReason::HostExit).await;
+                        let _ = self
+                            .stop(ShutdownReason::HostExit, RecordingShutdownPolicy::Stop)
+                            .await;
                         break;
                     }
                     Err(mpsc::error::TryRecvError::Empty) => {}
@@ -817,7 +880,9 @@ impl RuntimeActor {
                 receiver.recv().await
             };
             let Some(command) = command else {
-                let _ = self.stop(ShutdownReason::HostExit).await;
+                let _ = self
+                    .stop(ShutdownReason::HostExit, RecordingShutdownPolicy::Stop)
+                    .await;
                 break;
             };
             let was_processing = self.processing_active();
@@ -827,7 +892,9 @@ impl RuntimeActor {
             self.restart_clock_on_resume(was_processing);
         }
         if !self.worker_stopped {
-            let _ = self.stop(ShutdownReason::ProtocolFault).await;
+            let _ = self
+                .stop(ShutdownReason::ProtocolFault, RecordingShutdownPolicy::Stop)
+                .await;
         }
         self.settle_capture_on_shutdown();
         let _ = self.output.hide();
@@ -884,6 +951,13 @@ impl RuntimeActor {
                 finish(reply, result)
             }
             RuntimeCommand::SpoutStatus { reply } => finish(reply, Ok(self.output.spout_status())),
+            RuntimeCommand::ReplacementOutputState { reply } => finish(
+                reply,
+                Ok(GenericReplacementOutputState {
+                    spout: self.output.spout_status(),
+                    spout_requested_enabled: self.spout_requested_enabled,
+                }),
+            ),
             RuntimeCommand::ConfigureSpout {
                 name,
                 enabled,
@@ -892,6 +966,14 @@ impl RuntimeActor {
                 let result = self.configure_spout(name, enabled);
                 finish(reply, result)
             }
+            RuntimeCommand::RestoreReplacementOutput {
+                name,
+                spout_requested_enabled,
+                reply,
+            } => finish(
+                reply,
+                Ok(self.restore_replacement_output(name, spout_requested_enabled)),
+            ),
             RuntimeCommand::CaptureStart {
                 mode,
                 output,
@@ -916,8 +998,11 @@ impl RuntimeActor {
                 let result = self.diagnostics().await;
                 finish(reply, result)
             }
-            RuntimeCommand::Shutdown { reply } => {
-                let result = self.stop(ShutdownReason::HostExit).await;
+            RuntimeCommand::Shutdown {
+                recording_policy,
+                reply,
+            } => {
+                let result = self.stop(ShutdownReason::HostExit, recording_policy).await;
                 let _ = reply.send(result);
                 true
             }
@@ -1686,12 +1771,38 @@ impl RuntimeActor {
         Ok(status)
     }
 
-    async fn stop(&mut self, reason: ShutdownReason) -> Result<(), GenericDeckRuntimeError> {
+    fn restore_replacement_output(
+        &mut self,
+        name: String,
+        spout_requested_enabled: bool,
+    ) -> NativeSpoutStatus {
+        self.spout_requested_enabled = spout_requested_enabled;
+        if self.output.spout_status().ready {
+            // Spout is an optional publication surface. Preserve its private
+            // requested state across a worker replacement, but never destroy
+            // the only live Deck session because a newly allocated optional
+            // sender cannot be renamed or enabled.
+            let _ = self.output.set_spout_name(name);
+            let _ = self.output.set_spout_enabled(effective_spout_enabled(
+                self.foreground,
+                spout_requested_enabled,
+            ));
+        }
+        let status = self.output.spout_status();
+        self.presentation_diagnostics.observe_spout(&status);
+        status
+    }
+
+    async fn stop(
+        &mut self,
+        reason: ShutdownReason,
+        recording_policy: RecordingShutdownPolicy,
+    ) -> Result<(), GenericDeckRuntimeError> {
         if self.worker_stopped {
             return Ok(());
         }
         self.worker_stopped = true;
-        let _ = self.recording.stop();
+        apply_recording_shutdown_policy(&self.recording, recording_policy);
         self.session
             .client_mut()
             .request_shutdown(reason, SHUTDOWN_DEADLINE)
@@ -1727,11 +1838,20 @@ impl RuntimeActor {
     }
 }
 
+fn apply_recording_shutdown_policy(
+    recording: &DecodedRecordingController,
+    policy: RecordingShutdownPolicy,
+) {
+    if matches!(policy, RecordingShutdownPolicy::Stop) {
+        let _ = recording.stop();
+    }
+}
+
 const fn effective_spout_enabled(foreground: bool, requested: bool) -> bool {
     foreground && requested
 }
 
-fn prevalidate_load(
+pub(crate) fn prevalidate_load(
     prepared: &PreparedDeckSelectionV2,
     load: &DeckSessionV2LoadRequest,
 ) -> Result<(), GenericDeckRuntimeError> {
@@ -2802,6 +2922,22 @@ mod tests {
         assert!(!ordered.fatal);
 
         recording.stop().expect("cancel test recording");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn replacement_shutdown_preserves_the_shared_mp4_controller() {
+        let root = tempfile::tempdir().expect("temporary recording directory");
+        let recording = DecodedRecordingController::new();
+        recording
+            .arm(root.path().join("active.mp4"))
+            .expect("arm decoded recording");
+
+        apply_recording_shutdown_policy(&recording, RecordingShutdownPolicy::Preserve);
+
+        assert!(recording.is_active());
+        apply_recording_shutdown_policy(&recording, RecordingShutdownPolicy::Stop);
+        assert!(!recording.is_active());
     }
 
     #[test]

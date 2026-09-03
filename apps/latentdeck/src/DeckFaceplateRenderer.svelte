@@ -1,9 +1,15 @@
 <script lang="ts">
-  import type {
-    Barycentric3Widget,
-    NumericWidget,
-    SelectWidget,
-    ToggleWidget,
+  import { onDestroy } from "svelte";
+  import {
+    isFaceplateWidgetVisible,
+    type Barycentric3Widget,
+    type CaptureWidget,
+    type FaceplateSection,
+    type FaceplateWidget,
+    type MonitorWidget,
+    type NumericWidget,
+    type SelectWidget,
+    type ToggleWidget,
   } from "./faceplate-model";
   import {
     serializeDeckControls,
@@ -18,11 +24,13 @@
     label: string;
     available: boolean;
     incompatibilityReason?: string;
+    detail?: string;
   }
 
   export let model: DeckUiModel;
   export let initialDraft: DeckUiDraft;
   export let sourceOptions: readonly SourceOption[] = [];
+  export let sourceGeometryWarning = "";
   export let active = false;
   export let runtimeAvailable = false;
   export let runtimeUnavailableReason =
@@ -38,8 +46,18 @@
   export let captureStartAvailable = true;
   export let captureActive = false;
   export let liveCaptureActive = false;
+  export let capturedSourceAvailable = false;
+  export let captureReuseAvailable = true;
   export let captureUnavailableReason =
     "Latent capture is unavailable for this exact Deck and Codec profile.";
+  export let mp4Available = false;
+  export let mp4Active = false;
+  export let mp4Status = "Decoded MP4 output is unavailable.";
+  export let spoutName = "LatentDeck";
+  export let spoutStatus = "Spout2 output is unavailable.";
+  export let spoutEnabled = false;
+  export let spoutRenameAvailable = false;
+  export let spoutToggleAvailable = false;
   export let outputFullscreen: boolean | null = null;
   export let onDraftChange: (draft: DeckUiDraft) => void = () => undefined;
   export let onLoad: (draft: DeckUiDraft) => void | Promise<void> = () =>
@@ -64,6 +82,14 @@
   export let onCapture: (
     mode: "snapshot" | "live_capture",
   ) => void | Promise<void> = () => undefined;
+  export let onUseCapture: (slotIndex: number) => void | Promise<void> = () =>
+    undefined;
+  export let onMp4Toggle: () => void | Promise<void> = () => undefined;
+  export let onSpoutNameChange: (name: string) => void = () => undefined;
+  export let onSpoutNameCommit: (name: string) => void | Promise<void> = () =>
+    undefined;
+  export let onSpoutToggle: (enabled: boolean) => void | Promise<void> = () =>
+    undefined;
   export let onFullscreenToggle: () => void | Promise<void> = () => undefined;
   export let onMonitorAnchor: (element: HTMLDivElement | null) => void = () =>
     undefined;
@@ -71,6 +97,47 @@
   let draft = cloneDraft(initialDraft);
   let draftError = "";
   let sourceDraftReady = false;
+  let fullscreenActive = false;
+  let monitorWidget: MonitorWidget | undefined;
+  let captureWidget: CaptureWidget | undefined;
+  let controlSections: Array<{
+    section: FaceplateSection;
+    widgets: readonly FaceplateWidget[];
+  }> = [];
+  let surfaceNotice = "";
+  let captureReasonVisible = false;
+
+  $: fullscreenActive = active && outputFullscreen === true && runtimeLoaded;
+  $: syncFullscreenDocument(fullscreenActive);
+  $: monitorWidget = model.faceplate.sections
+    .flatMap((section) => section.widgets)
+    .find(isMonitorWidget);
+  $: captureWidget = model.faceplate.sections
+    .flatMap((section) => section.widgets)
+    .find(isCaptureWidget);
+  $: controlSections = model.faceplate.sections
+    .map((section) => ({
+      section,
+      widgets: section.widgets.filter(
+        (widget) =>
+          !isMonitorWidget(widget) &&
+          !isCaptureWidget(widget) &&
+          isFaceplateWidgetVisible(widget, draft.controls),
+      ),
+    }))
+    .filter(({ widgets }) => widgets.length > 0);
+  $: surfaceNotice =
+    draftError !== ""
+      ? draftError
+      : !runtimeAvailable && !runtimeLoaded
+        ? runtimeUnavailableReason
+        : runtimeAvailable && !loadAvailable
+          ? loadUnavailableReason
+          : "";
+  // Realtime-control acknowledgements are intentionally silent. Capture
+  // buttons may be disabled for a few milliseconds, but that transient state
+  // must not flash text or move the professional workbench around.
+  $: captureReasonVisible = !captureAvailable;
 
   $: sourceDraftReady =
     draft.sourceArchiveSha256s.length === model.slots &&
@@ -262,11 +329,42 @@
     onMonitorAnchor(element);
     return { destroy: () => onMonitorAnchor(null) };
   }
+
+  function isMonitorWidget(widget: FaceplateWidget): widget is MonitorWidget {
+    return widget.kind === "monitor";
+  }
+
+  function isCaptureWidget(widget: FaceplateWidget): widget is CaptureWidget {
+    return widget.kind === "capture";
+  }
+
+  function slotLabel(slotIndex: number): string {
+    return String.fromCharCode("A".charCodeAt(0) + slotIndex);
+  }
+
+  function selectedSourceDetail(slotIndex: number): string {
+    const selectedHash = draft.sourceArchiveSha256s[slotIndex];
+    return (
+      sourceOptions.find((option) => option.archiveSha256 === selectedHash)
+        ?.detail ?? ""
+    );
+  }
+
+  function syncFullscreenDocument(enabled: boolean): void {
+    if (typeof document === "undefined") return;
+    document.documentElement.classList.toggle(
+      "deck-output-fullscreen",
+      enabled,
+    );
+    document.body?.classList.toggle("deck-output-fullscreen", enabled);
+  }
+
+  onDestroy(() => syncFullscreenDocument(false));
 </script>
 
 <section
   class="declarative-deck"
-  class:fullscreen={active && outputFullscreen === true && runtimeLoaded}
+  class:fullscreen={fullscreenActive}
   data-deck-exact-key={model.exactKey}
   aria-labelledby={`deck-title-${model.exactKey}`}
   aria-busy={runtimeBusy}
@@ -286,350 +384,442 @@
     </div>
   </header>
 
-  {#if !runtimeAvailable && !runtimeLoaded}
-    <p class="runtime-unavailable" role="status">
-      {runtimeUnavailableReason}
-    </p>
-  {/if}
-  {#if runtimeAvailable && !loadAvailable}
-    <p class="runtime-unavailable" role="status">
-      {loadUnavailableReason}
-    </p>
-  {/if}
-  {#if draftError !== ""}
-    <p class="draft-error" role="alert">{draftError}</p>
-  {/if}
+  <p
+    class="surface-notice"
+    class:error={draftError !== ""}
+    role={draftError === "" ? "status" : "alert"}
+    title={surfaceNotice}
+  >
+    {surfaceNotice || "\u00a0"}
+  </p>
 
-  <div class="faceplate-sections">
-    {#each model.faceplate.sections as section (section.section_id)}
+  <div class="deck-workbench">
+    <aside class="output-column">
       <section
-        class="faceplate-section"
-        class:monitor-section={section.widgets.some(
-          (widget) => widget.kind === "monitor",
-        )}
-        aria-labelledby={`${model.exactKey}-${section.section_id}`}
+        class="output-stage"
+        data-workbench-region="output"
+        aria-label="Native Deck output"
       >
-        <header>
-          <span>{section.section_id}</span>
-          <h3 id={`${model.exactKey}-${section.section_id}`}>
-            {section.title}
-          </h3>
-        </header>
-        <div class="widget-grid">
-          {#each section.widgets as widget (widget.id)}
-            <article
-              class={`widget widget-${widget.kind}`}
-              data-widget-kind={widget.kind}
-            >
-              {#if widget.kind === "source_picker"}
-                <label>
-                  <span>{widget.label}</span>
-                  <select
-                    value={draft.sourceArchiveSha256s[widget.slot_index] ?? ""}
-                    disabled={runtimeBusy}
-                    onchange={(event) =>
-                      setSource(widget.slot_index, event.currentTarget.value)}
-                  >
-                    <option value="">No source selected</option>
-                    {#each sourceOptions as option (option.archiveSha256)}
-                      <option
-                        value={option.archiveSha256}
-                        disabled={!option.available ||
-                          option.incompatibilityReason !== undefined}
-                        >{option.label}{option.incompatibilityReason ===
-                        undefined
-                          ? ""
-                          : ` · INCOMPATIBLE: ${option.incompatibilityReason}`}</option
-                      >
-                    {/each}
-                  </select>
-                </label>
-              {:else if widget.kind === "slider" || widget.kind === "number"}
-                <label>
-                  <span>{widget.label}</span>
-                  <input
-                    type={widget.kind === "slider" ? "range" : "number"}
-                    min={widget.minimum}
-                    max={widget.maximum}
-                    step={widget.step}
-                    value={String(draft.controls[widget.control_id])}
-                    data-control-id={widget.control_id}
-                    disabled={runtimeBusy}
-                    oninput={(event) => setNumericControl(widget, event)}
-                  />
-                  <output>{String(draft.controls[widget.control_id])}</output>
-                </label>
-              {:else if widget.kind === "toggle"}
-                <label class="toggle">
-                  <input
-                    type="checkbox"
-                    checked={draft.controls[widget.control_id] === true}
-                    data-control-id={widget.control_id}
-                    disabled={runtimeBusy}
-                    onchange={(event) => setToggleControl(widget, event)}
-                  />
-                  <span>{widget.label}</span>
-                </label>
-              {:else if widget.kind === "select"}
-                <label>
-                  <span>{widget.label}</span>
-                  <select
-                    value={String(draft.controls[widget.control_id])}
-                    data-control-id={widget.control_id}
-                    disabled={runtimeBusy}
-                    onchange={(event) => setSelectControl(widget, event)}
-                  >
-                    {#each widget.options as option (option.value)}
-                      <option value={option.value}>{option.label}</option>
-                    {/each}
-                  </select>
-                </label>
-              {:else if widget.kind === "role_editor"}
-                <fieldset>
-                  <legend>{widget.label}</legend>
-                  <div class="role-grid">
-                    {#each widget.role_ids as roleId (roleId)}
-                      <label>
-                        <span
-                          >{model.roles.find((role) => role.roleId === roleId)
-                            ?.displayName ?? roleId}</span
-                        >
-                        <select
-                          value={String(draft.roleBindings[roleId])}
-                          disabled={runtimeBusy}
-                          onchange={(event) => setRole(roleId, event)}
-                        >
-                          {#each Array.from({ length: model.slots }, (_, slot) => slot) as slot}
-                            <option value={slot}
-                              >Physical slot {slot + 1}</option
-                            >
-                          {/each}
-                        </select>
-                      </label>
-                    {/each}
-                  </div>
-                  <button
-                    type="button"
-                    disabled={!runtimeLoaded ||
-                      runtimeBusy ||
-                      draftError !== ""}
-                    onclick={commitRoles}>Apply role permutation</button
-                  >
-                </fieldset>
-              {:else if widget.kind === "barycentric3"}
-                {@const xContract = numericContract(widget.x_control_id)}
-                {@const yContract = numericContract(widget.y_control_id)}
-                <fieldset>
-                  <legend>{widget.label}</legend>
-                  <div class="triangle" aria-hidden="true">
-                    <span>{widget.vertex_role_ids[0]}</span>
-                    <span>{widget.vertex_role_ids[1]}</span>
-                    <span>{widget.vertex_role_ids[2]}</span>
-                    <i
-                      style={`left:${Number(draft.controls[widget.x_control_id]) * 100}%;top:${(1 - Number(draft.controls[widget.y_control_id])) * 100}%`}
-                    ></i>
-                  </div>
-                  <label>
-                    X
-                    <input
-                      type="range"
-                      min={Math.max(
-                        xContract.minimum,
-                        barycentricXMinimum(
-                          draft.controls[widget.y_control_id],
-                        ),
-                      )}
-                      max={Math.min(
-                        xContract.maximum,
-                        barycentricXMaximum(
-                          draft.controls[widget.y_control_id],
-                        ),
-                      )}
-                      step={xContract.step}
-                      value={String(draft.controls[widget.x_control_id])}
-                      data-control-id={widget.x_control_id}
-                      disabled={runtimeBusy}
-                      oninput={(event) =>
-                        setBarycentricControl(widget, "x", event)}
-                    />
-                  </label>
-                  <label>
-                    Y
-                    <input
-                      type="range"
-                      min={yContract.minimum}
-                      max={Math.min(
-                        yContract.maximum,
-                        barycentricYMaximum(
-                          draft.controls[widget.x_control_id],
-                        ),
-                      )}
-                      step={yContract.step}
-                      value={String(draft.controls[widget.y_control_id])}
-                      data-control-id={widget.y_control_id}
-                      disabled={runtimeBusy}
-                      oninput={(event) =>
-                        setBarycentricControl(widget, "y", event)}
-                    />
-                  </label>
-                </fieldset>
-              {:else if widget.kind === "transport"}
-                <fieldset>
-                  <legend>{widget.label}</legend>
-                  <div class="transport-grid">
-                    {#each widget.slot_indices as slotIndex (slotIndex)}
-                      <div>
-                        <strong>Slot {slotIndex + 1}</strong>
-                        <button
-                          type="button"
-                          disabled={!runtimeLoaded || runtimeBusy}
-                          onclick={() => togglePlaying(slotIndex)}
-                          >{draft.playing[slotIndex] ? "Pause" : "Play"}</button
-                        >
-                        <label class="toggle">
-                          <input
-                            type="checkbox"
-                            checked={draft.loops[slotIndex]}
-                            disabled={!runtimeLoaded || runtimeBusy}
-                            onchange={(event) => setLoop(slotIndex, event)}
-                          />
-                          Loop
-                        </label>
-                        <small>HEAD {playheads[slotIndex] ?? 0}</small>
-                      </div>
-                    {/each}
-                  </div>
-                  <button
-                    type="button"
-                    disabled={!runtimeLoaded || runtimeBusy}
-                    onclick={() => void onRestart()}>Restart all</button
-                  >
-                </fieldset>
-              {:else if widget.kind === "seed"}
-                <label>
-                  <span>{widget.label}</span>
-                  <input
-                    type="number"
-                    min="0"
-                    max={Number.MAX_SAFE_INTEGER}
-                    step="1"
-                    value={String(draft.seed)}
-                    disabled={runtimeBusy}
-                    oninput={setSeed}
-                  />
-                  <button
-                    type="button"
-                    disabled={!runtimeLoaded ||
-                      runtimeBusy ||
-                      draftError !== ""}
-                    onclick={commitSeed}>Set seed</button
-                  >
-                </label>
-              {:else if widget.kind === "capture"}
-                <div class="capture-controls">
-                  <strong>{widget.label}</strong>
-                  {#if widget.modes.includes("snapshot")}
-                    <button
-                      type="button"
-                      disabled={!captureAvailable ||
-                        !captureStartAvailable ||
-                        captureActive ||
-                        !runtimeLoaded ||
-                        runtimeBusy}
-                      onclick={() => void onCapture("snapshot")}
-                      >Snapshot</button
-                    >
-                  {/if}
-                  {#if widget.modes.includes("live_capture")}
-                    <button
-                      type="button"
-                      disabled={!captureAvailable ||
-                        (!liveCaptureActive && !captureStartAvailable) ||
-                        (captureActive && !liveCaptureActive) ||
-                        !runtimeLoaded ||
-                        runtimeBusy}
-                      onclick={() => void onCapture("live_capture")}
-                      >{liveCaptureActive
-                        ? "Stop Live Capture"
-                        : "Start Live Capture"}</button
-                    >
-                  {/if}
-                  <small>{captureState}</small>
-                  {#if !captureAvailable || (!captureStartAvailable && !liveCaptureActive)}
-                    <small class="capability-unavailable"
-                      >{captureUnavailableReason}</small
-                    >
-                  {/if}
-                </div>
-              {:else if widget.kind === "monitor"}
-                <div class="monitor" class:live={runtimeLoaded}>
-                  <header>
-                    <span>{widget.label}</span>
-                    <strong
-                      >{runtimeLoaded
-                        ? "POST-OPERATOR STREAM"
-                        : "STANDBY"}</strong
-                    >
-                  </header>
-                  <div class="monitor-frame">
-                    <div
-                      use:monitorAnchor
-                      class="native-monitor-anchor"
-                      data-native-viewport={model.exactKey}
-                      aria-hidden="true"
-                    ></div>
-                    {#if !runtimeLoaded}
-                      <div class="monitor-placeholder">
-                        <strong>No active output</strong>
-                        <small
-                          >Intrinsic signal only · no hidden conversion</small
-                        >
-                      </div>
-                    {/if}
-                  </div>
-                  <button
-                    type="button"
-                    class:active={outputFullscreen === true}
-                    disabled={!runtimeLoaded ||
-                      runtimeBusy ||
-                      outputFullscreen === null}
-                    onclick={() => void onFullscreenToggle()}
-                    >{outputFullscreen === true
-                      ? "Exit fullscreen"
-                      : "Fullscreen output"}</button
-                  >
+        {#if monitorWidget !== undefined}
+          <div class="monitor" class:live={runtimeLoaded}>
+            <header>
+              <span>{monitorWidget.label}</span>
+              <strong
+                >{runtimeLoaded ? "POST-OPERATOR STREAM" : "STANDBY"}</strong
+              >
+            </header>
+            <div class="monitor-frame">
+              <div
+                use:monitorAnchor
+                class="native-monitor-anchor"
+                data-native-viewport={model.exactKey}
+                aria-hidden="true"
+              ></div>
+              {#if !runtimeLoaded}
+                <div class="monitor-placeholder">
+                  <strong>No active output</strong>
+                  <small>Intrinsic signal only · no hidden conversion</small>
                 </div>
               {/if}
-            </article>
-          {/each}
-        </div>
+            </div>
+          </div>
+        {/if}
       </section>
-    {/each}
-  </div>
 
-  <footer class="deck-actions">
-    <button
-      type="button"
-      class="primary"
-      disabled={!runtimeAvailable ||
-        !loadAvailable ||
-        runtimeBusy ||
-        draftError !== "" ||
-        !sourceDraftReady}
-      onclick={loadDeck}>Load exact Deck draft</button
-    >
-    <button
-      type="button"
-      disabled={!runtimeLoaded || runtimeBusy || draftError !== ""}
-      onclick={commitControls}>Apply now</button
-    >
-    <button
-      type="button"
-      disabled={!runtimeLoaded || runtimeBusy}
-      onclick={() => void onProcessOnce()}>Process once</button
-    >
-    <small>{model.summary}</small>
-  </footer>
+      <section
+        class="output-actions"
+        data-workbench-region="output-actions"
+        aria-label="Output and capture actions"
+      >
+        <header>
+          <span>OUTPUT</span>
+          <strong>Host actions</strong>
+        </header>
+        <div class="primary-actions">
+          <button
+            type="button"
+            class="primary"
+            disabled={!runtimeAvailable ||
+              !loadAvailable ||
+              runtimeBusy ||
+              draftError !== "" ||
+              !sourceDraftReady}
+            onclick={loadDeck}>Load exact Deck draft</button
+          >
+          <button
+            type="button"
+            disabled={!runtimeLoaded || runtimeBusy || draftError !== ""}
+            onclick={commitControls}>Apply now</button
+          >
+          <button
+            type="button"
+            disabled={!runtimeLoaded || runtimeBusy}
+            onclick={() => void onProcessOnce()}>Process once</button
+          >
+          <button
+            type="button"
+            disabled={!runtimeLoaded || runtimeBusy}
+            onclick={() => void onRestart()}>Restart all</button
+          >
+          <button
+            type="button"
+            class:active={outputFullscreen === true}
+            disabled={!runtimeLoaded ||
+              runtimeBusy ||
+              outputFullscreen === null}
+            onclick={() => void onFullscreenToggle()}
+            >{outputFullscreen === true
+              ? "Exit fullscreen"
+              : "Fullscreen output"}</button
+          >
+        </div>
+
+        {#if captureWidget !== undefined}
+          <article class="capture-module" data-widget-kind="capture">
+            <div class="capture-controls">
+              <strong>{captureWidget.label}</strong>
+              <div class="capture-buttons">
+                {#if captureWidget.modes.includes("snapshot")}
+                  <button
+                    type="button"
+                    disabled={!captureAvailable ||
+                      !captureStartAvailable ||
+                      captureActive ||
+                      !runtimeLoaded ||
+                      runtimeBusy}
+                    onclick={() => void onCapture("snapshot")}>Snapshot</button
+                  >
+                {/if}
+                {#if captureWidget.modes.includes("live_capture")}
+                  <button
+                    type="button"
+                    disabled={!captureAvailable ||
+                      (!liveCaptureActive && !captureStartAvailable) ||
+                      (captureActive && !liveCaptureActive) ||
+                      !runtimeLoaded ||
+                      runtimeBusy}
+                    onclick={() => void onCapture("live_capture")}
+                    >{liveCaptureActive
+                      ? "Stop Live Capture"
+                      : "Start Live Capture"}</button
+                  >
+                {/if}
+              </div>
+              <div class="capture-status" aria-live="polite">
+                <small>{captureState}</small>
+                <small
+                  class="capture-reason"
+                  class:quiet={!captureReasonVisible}
+                  title={captureReasonVisible ? captureUnavailableReason : ""}
+                  >{captureReasonVisible
+                    ? captureUnavailableReason
+                    : "\u00a0"}</small
+                >
+              </div>
+              {#if capturedSourceAvailable}
+                <div class="captured-source-actions">
+                  {#each Array.from({ length: model.slots }, (_, slotIndex) => slotIndex) as slotIndex}
+                    <button
+                      type="button"
+                      disabled={runtimeBusy || !captureReuseAvailable}
+                      onclick={() => void onUseCapture(slotIndex)}
+                      >Use capture in {slotLabel(slotIndex)}</button
+                    >
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          </article>
+        {/if}
+
+        <div class="output-connectors" aria-label="Host output connectors">
+          <div class="mp4-output">
+            <strong>Decoded MP4</strong>
+            <button
+              type="button"
+              class:active={mp4Active}
+              disabled={!mp4Available || runtimeBusy}
+              onclick={() => void onMp4Toggle()}
+              >{mp4Active ? "Stop MP4" : "Record MP4…"}</button
+            >
+            <small title={mp4Status}>{mp4Status}</small>
+          </div>
+          <div class="spout-output">
+            <strong>Spout2</strong>
+            <input
+              value={spoutName}
+              maxlength="255"
+              aria-label="Spout sender name"
+              disabled={!spoutRenameAvailable || runtimeBusy}
+              oninput={(event) => onSpoutNameChange(event.currentTarget.value)}
+            />
+            <button
+              type="button"
+              disabled={!spoutRenameAvailable ||
+                runtimeBusy ||
+                spoutName.trim() === ""}
+              onclick={() => void onSpoutNameCommit(spoutName.trim())}
+              >Apply name</button
+            >
+            <button
+              type="button"
+              class:active={spoutEnabled}
+              disabled={!spoutToggleAvailable || runtimeBusy}
+              onclick={() => void onSpoutToggle(!spoutEnabled)}
+              >{spoutEnabled ? "Disable sender" : "Enable sender"}</button
+            >
+            <small title={spoutStatus}>{spoutStatus}</small>
+          </div>
+        </div>
+        <small class="deck-summary">{model.summary}</small>
+      </section>
+    </aside>
+
+    <div class="control-column" data-workbench-region="controls">
+      {#if sourceGeometryWarning !== ""}
+        <p class="geometry-warning" role="status">
+          <strong>SOURCE GEOMETRY</strong>
+          <span>{sourceGeometryWarning}</span>
+        </p>
+      {/if}
+      {#each controlSections as { section, widgets } (section.section_id)}
+        <section
+          class="faceplate-section"
+          aria-labelledby={`${model.exactKey}-${section.section_id}`}
+          style={`--section-columns:${section.columns ?? 2}`}
+        >
+          <header>
+            <span>{section.section_id}</span>
+            <h3 id={`${model.exactKey}-${section.section_id}`}>
+              {section.title}
+            </h3>
+          </header>
+          <div class="widget-grid">
+            {#each widgets as widget (widget.id)}
+              <article
+                class={`widget widget-${widget.kind}`}
+                data-widget-kind={widget.kind}
+              >
+                {#if widget.kind === "source_picker"}
+                  <label>
+                    <span>{widget.label}</span>
+                    <select
+                      value={draft.sourceArchiveSha256s[widget.slot_index] ??
+                        ""}
+                      disabled={runtimeBusy}
+                      onchange={(event) =>
+                        setSource(widget.slot_index, event.currentTarget.value)}
+                    >
+                      <option value="">No source selected</option>
+                      {#each sourceOptions as option (option.archiveSha256)}
+                        <option
+                          value={option.archiveSha256}
+                          disabled={!option.available ||
+                            option.incompatibilityReason !== undefined}
+                          >{option.label}{option.incompatibilityReason ===
+                          undefined
+                            ? ""
+                            : ` · INCOMPATIBLE: ${option.incompatibilityReason}`}</option
+                        >
+                      {/each}
+                    </select>
+                    {#if selectedSourceDetail(widget.slot_index) !== ""}
+                      <small class="source-detail"
+                        >{selectedSourceDetail(widget.slot_index)}</small
+                      >
+                    {/if}
+                  </label>
+                {:else if widget.kind === "slider" || widget.kind === "number"}
+                  <label>
+                    <span>{widget.label}</span>
+                    <input
+                      type={widget.kind === "slider" ? "range" : "number"}
+                      min={widget.minimum}
+                      max={widget.maximum}
+                      step={widget.step}
+                      value={String(draft.controls[widget.control_id])}
+                      data-control-id={widget.control_id}
+                      disabled={runtimeBusy}
+                      oninput={(event) => setNumericControl(widget, event)}
+                    />
+                    <output>{String(draft.controls[widget.control_id])}</output>
+                  </label>
+                {:else if widget.kind === "toggle"}
+                  <label class="toggle">
+                    <input
+                      type="checkbox"
+                      checked={draft.controls[widget.control_id] === true}
+                      data-control-id={widget.control_id}
+                      disabled={runtimeBusy}
+                      onchange={(event) => setToggleControl(widget, event)}
+                    />
+                    <span>{widget.label}</span>
+                  </label>
+                {:else if widget.kind === "select"}
+                  <label>
+                    <span>{widget.label}</span>
+                    <select
+                      value={String(draft.controls[widget.control_id])}
+                      data-control-id={widget.control_id}
+                      disabled={runtimeBusy}
+                      onchange={(event) => setSelectControl(widget, event)}
+                    >
+                      {#each widget.options as option (option.value)}
+                        <option value={option.value}>{option.label}</option>
+                      {/each}
+                    </select>
+                  </label>
+                {:else if widget.kind === "role_editor"}
+                  <fieldset>
+                    <legend>{widget.label}</legend>
+                    <div class="role-grid">
+                      {#each widget.role_ids as roleId (roleId)}
+                        <label>
+                          <span
+                            >{model.roles.find((role) => role.roleId === roleId)
+                              ?.displayName ?? roleId}</span
+                          >
+                          <select
+                            value={String(draft.roleBindings[roleId])}
+                            disabled={runtimeBusy}
+                            onchange={(event) => setRole(roleId, event)}
+                          >
+                            {#each Array.from({ length: model.slots }, (_, slot) => slot) as slot}
+                              <option value={slot}
+                                >Physical slot {slot + 1}</option
+                              >
+                            {/each}
+                          </select>
+                        </label>
+                      {/each}
+                    </div>
+                    <button
+                      type="button"
+                      disabled={!runtimeLoaded ||
+                        runtimeBusy ||
+                        draftError !== ""}
+                      onclick={commitRoles}>Apply role permutation</button
+                    >
+                  </fieldset>
+                {:else if widget.kind === "barycentric3"}
+                  {@const xContract = numericContract(widget.x_control_id)}
+                  {@const yContract = numericContract(widget.y_control_id)}
+                  <fieldset>
+                    <legend>{widget.label}</legend>
+                    <div class="triangle" aria-hidden="true">
+                      <span>{widget.vertex_role_ids[0]}</span>
+                      <span>{widget.vertex_role_ids[1]}</span>
+                      <span>{widget.vertex_role_ids[2]}</span>
+                      <i
+                        style={`left:${Number(draft.controls[widget.x_control_id]) * 100}%;top:${(1 - Number(draft.controls[widget.y_control_id])) * 100}%`}
+                      ></i>
+                    </div>
+                    <label>
+                      X
+                      <input
+                        type="range"
+                        min={Math.max(
+                          xContract.minimum,
+                          barycentricXMinimum(
+                            draft.controls[widget.y_control_id],
+                          ),
+                        )}
+                        max={Math.min(
+                          xContract.maximum,
+                          barycentricXMaximum(
+                            draft.controls[widget.y_control_id],
+                          ),
+                        )}
+                        step={xContract.step}
+                        value={String(draft.controls[widget.x_control_id])}
+                        data-control-id={widget.x_control_id}
+                        disabled={runtimeBusy}
+                        oninput={(event) =>
+                          setBarycentricControl(widget, "x", event)}
+                      />
+                    </label>
+                    <label>
+                      Y
+                      <input
+                        type="range"
+                        min={yContract.minimum}
+                        max={Math.min(
+                          yContract.maximum,
+                          barycentricYMaximum(
+                            draft.controls[widget.x_control_id],
+                          ),
+                        )}
+                        step={yContract.step}
+                        value={String(draft.controls[widget.y_control_id])}
+                        data-control-id={widget.y_control_id}
+                        disabled={runtimeBusy}
+                        oninput={(event) =>
+                          setBarycentricControl(widget, "y", event)}
+                      />
+                    </label>
+                  </fieldset>
+                {:else if widget.kind === "transport"}
+                  <fieldset>
+                    <legend>{widget.label}</legend>
+                    <div class="transport-grid">
+                      {#each widget.slot_indices as slotIndex (slotIndex)}
+                        <div>
+                          <strong>Slot {slotIndex + 1}</strong>
+                          <button
+                            type="button"
+                            disabled={!runtimeLoaded || runtimeBusy}
+                            onclick={() => togglePlaying(slotIndex)}
+                            >{draft.playing[slotIndex]
+                              ? "Pause"
+                              : "Play"}</button
+                          >
+                          <label class="toggle">
+                            <input
+                              type="checkbox"
+                              checked={draft.loops[slotIndex]}
+                              disabled={!runtimeLoaded || runtimeBusy}
+                              onchange={(event) => setLoop(slotIndex, event)}
+                            />
+                            Loop
+                          </label>
+                          <small>HEAD {playheads[slotIndex] ?? 0}</small>
+                        </div>
+                      {/each}
+                    </div>
+                    <button
+                      type="button"
+                      disabled={!runtimeLoaded || runtimeBusy}
+                      onclick={() => void onRestart()}>Restart all</button
+                    >
+                  </fieldset>
+                {:else if widget.kind === "seed"}
+                  <label>
+                    <span>{widget.label}</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max={Number.MAX_SAFE_INTEGER}
+                      step="1"
+                      value={String(draft.seed)}
+                      disabled={runtimeBusy}
+                      oninput={setSeed}
+                    />
+                    <button
+                      type="button"
+                      disabled={!runtimeLoaded ||
+                        runtimeBusy ||
+                        draftError !== ""}
+                      onclick={commitSeed}>Set seed</button
+                    >
+                  </label>
+                {/if}
+              </article>
+            {/each}
+          </div>
+        </section>
+      {/each}
+    </div>
+  </div>
 </section>
 
 <style>
@@ -643,11 +833,12 @@
     min-height: calc(100vh - 132px);
     border: 1px solid var(--line);
     color: #dce4e6;
-    background: #101416;
+    background:
+      linear-gradient(135deg, rgb(255 255 255 / 2%), transparent 32%), #101416;
   }
 
   .deck-heading,
-  .deck-actions,
+  .output-actions > header,
   .faceplate-section > header {
     display: flex;
     align-items: center;
@@ -661,6 +852,7 @@
   .deck-heading p,
   .deck-heading h2,
   .deck-heading small,
+  .output-actions > header strong,
   .faceplate-section h3,
   .faceplate-section header span {
     margin: 0;
@@ -669,8 +861,9 @@
   .deck-heading p,
   .deck-heading small,
   .faceplate-section header span,
+  .output-actions > header span,
   .runtime-state,
-  .deck-actions small {
+  .deck-summary {
     color: #879297;
     font:
       0.62rem/1.4 ui-monospace,
@@ -680,10 +873,21 @@
   }
 
   .deck-heading h2,
+  .output-actions > header strong,
   .faceplate-section h3 {
     font-family: "Arial Narrow", "Segoe UI", sans-serif;
     letter-spacing: 0.05em;
     text-transform: uppercase;
+  }
+
+  .deck-heading {
+    height: 72px;
+    overflow: hidden;
+  }
+
+  .deck-heading > div:first-child,
+  .runtime-state {
+    min-width: 0;
   }
 
   .runtime-state {
@@ -694,6 +898,12 @@
     padding: 8px 10px;
   }
 
+  .runtime-state span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .runtime-state strong {
     color: var(--accent);
   }
@@ -702,38 +912,185 @@
     color: var(--warning);
   }
 
-  .runtime-unavailable,
-  .draft-error,
-  .capability-unavailable {
+  .surface-notice {
+    height: 34px;
     margin: 0;
     border-bottom: 1px solid var(--line);
+    overflow: hidden;
     padding: 8px 14px;
     color: var(--warning);
     background: #241e16;
     font-size: 0.72rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .draft-error {
+  .surface-notice.error {
     color: var(--error);
     background: #261719;
   }
 
-  .capability-unavailable {
+  .deck-workbench {
+    display: grid;
+    grid-template-columns: minmax(440px, 1.15fr) minmax(360px, 0.85fr);
+    align-items: start;
+    gap: 10px;
+    padding: 10px;
+  }
+
+  .output-column {
+    position: sticky;
+    z-index: 20;
+    top: 0;
+    display: grid;
+    min-width: 0;
+    gap: 8px;
+    align-self: start;
+  }
+
+  .output-stage,
+  .output-actions,
+  .faceplate-section {
+    min-width: 0;
+    border: 1px solid #3d484d;
+    background: #0d1214;
+  }
+
+  .output-stage {
+    overflow: hidden;
+    background: #000;
+  }
+
+  .output-actions {
+    display: grid;
+    gap: 8px;
+    padding-bottom: 10px;
+  }
+
+  .output-actions > header,
+  .faceplate-section > header {
+    min-height: 38px;
+    padding-block: 7px;
+  }
+
+  .primary-actions,
+  .capture-buttons,
+  .captured-source-actions {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+    gap: 6px;
+    padding-inline: 10px;
+  }
+
+  .capture-module,
+  .output-connectors {
+    margin-inline: 10px;
+    border: 1px solid #354046;
+    padding: 9px;
+    background: var(--panel);
+  }
+
+  .capture-controls {
+    display: grid;
+    min-width: 0;
+    gap: 7px;
+  }
+
+  .capture-buttons,
+  .captured-source-actions {
+    padding-inline: 0;
+  }
+
+  .capture-buttons button {
+    min-height: 34px;
+    white-space: nowrap;
+  }
+
+  .capture-status {
+    display: grid;
+    grid-template-rows: 1.25rem 2.5rem;
+    min-height: 3.75rem;
+    color: #879297;
+    font:
+      0.62rem/1.25 ui-monospace,
+      "Cascadia Mono",
+      Consolas,
+      monospace;
+  }
+
+  .capture-status small {
+    overflow: hidden;
+  }
+
+  .capture-reason {
+    min-height: 2.5rem;
     color: var(--warning);
   }
 
-  .faceplate-sections {
+  .capture-reason.quiet {
+    visibility: hidden;
+  }
+
+  .output-connectors {
     display: grid;
+    grid-template-columns: minmax(0, 0.72fr) minmax(0, 1.28fr);
+    gap: 8px;
+  }
+
+  .mp4-output,
+  .spout-output {
+    display: grid;
+    min-width: 0;
+    align-content: start;
+    gap: 6px;
+  }
+
+  .spout-output {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .spout-output strong,
+  .spout-output small {
+    grid-column: 1 / -1;
+  }
+
+  .output-connectors small,
+  .deck-summary {
+    overflow: hidden;
+    color: #7f8a8f;
+    font-size: 0.61rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .deck-summary {
+    padding-inline: 10px;
+  }
+
+  .control-column {
+    display: grid;
+    min-width: 0;
+    gap: 8px;
+  }
+
+  .geometry-warning {
+    display: grid;
+    gap: 3px;
+    margin: 0;
+    border: 1px solid #80672f;
+    padding: 9px 11px;
+    color: #d9c18a;
+    background: #211b11;
+    font-size: 0.68rem;
   }
 
   .faceplate-section > header {
     justify-content: flex-start;
-    padding-block: 7px;
   }
 
   .widget-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    grid-template-columns: repeat(var(--section-columns, 1), minmax(0, 1fr));
     gap: 8px;
     padding: 10px;
   }
@@ -761,6 +1118,15 @@
     font-size: 0.68rem;
     font-weight: 700;
     text-transform: uppercase;
+  }
+
+  .source-detail {
+    min-height: 1.1rem;
+    overflow: hidden;
+    color: #879297;
+    font-size: 0.62rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   select,
@@ -851,32 +1217,11 @@
     transform: translate(-50%, -50%);
   }
 
-  .monitor-section {
-    position: sticky;
-    z-index: 20;
-    top: 0;
-    order: -1;
-    background: #050708;
-  }
-
-  .monitor-section > header {
-    display: none;
-  }
-
-  .monitor-section .widget-grid,
-  .widget-monitor {
-    padding: 0;
-  }
-
-  .widget-monitor {
-    grid-column: 1 / -1;
-    border: 0;
-  }
-
   .monitor {
     display: grid;
     height: clamp(280px, 44vh, 560px);
-    grid-template-rows: auto minmax(0, 1fr) auto;
+    min-height: 0;
+    grid-template-rows: auto minmax(0, 1fr);
     background: #000;
   }
 
@@ -917,10 +1262,16 @@
     background-size: 40px 40px;
   }
 
+  :global(html.deck-output-fullscreen),
+  :global(body.deck-output-fullscreen) {
+    overflow: hidden !important;
+    overscroll-behavior: none;
+  }
+
   .declarative-deck.fullscreen {
     position: fixed;
     inset: 0;
-    z-index: 1000;
+    z-index: 2147483647;
     width: 100vw;
     height: 100dvh;
     min-height: 0;
@@ -929,34 +1280,62 @@
     background: #000;
   }
 
-  .fullscreen > :not(.faceplate-sections),
-  .fullscreen .faceplate-section:not(.monitor-section) {
+  .fullscreen > :not(.deck-workbench),
+  .fullscreen .control-column,
+  .fullscreen .output-actions {
     display: none;
   }
 
-  .fullscreen .faceplate-sections,
-  .fullscreen .monitor-section,
-  .fullscreen .widget-grid,
-  .fullscreen .widget-monitor,
+  .fullscreen .deck-workbench {
+    display: block;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+  }
+
+  .fullscreen .output-column {
+    position: static;
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  .fullscreen .output-stage,
   .fullscreen .monitor {
+    width: 100%;
     height: 100%;
     min-height: 0;
+    border: 0;
   }
 
   .fullscreen .monitor {
     grid-template-rows: minmax(0, 1fr);
   }
 
-  .fullscreen .monitor > header,
-  .fullscreen .monitor > button {
+  .fullscreen .monitor > header {
     display: none;
   }
 
-  .deck-actions {
-    justify-content: flex-start;
+  .fullscreen .monitor-frame {
+    height: 100%;
   }
 
-  .deck-actions small {
-    margin-left: auto;
+  @media (max-width: 1120px) {
+    .deck-workbench {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .output-column {
+      position: relative;
+      top: auto;
+    }
+
+    .widget-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .output-connectors {
+      grid-template-columns: minmax(0, 1fr);
+    }
   }
 </style>

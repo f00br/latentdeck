@@ -5,7 +5,7 @@ import type { Q4Controls, Q4Roles, Q4Transport } from "./q4-model";
 import { parseQ4Seed } from "./q4-model";
 
 export const DECK_PRESET_SCHEMA_VERSION = "2.0.0" as const;
-export const BUNDLED_DECK_VERSION = "0.2.0" as const;
+export const BUNDLED_DECK_VERSION = "0.2.1" as const;
 export const D2_DECK_ID = "org.latentdeck.deck.d2" as const;
 export const Q4_DECK_ID = "org.latentdeck.deck.q4" as const;
 

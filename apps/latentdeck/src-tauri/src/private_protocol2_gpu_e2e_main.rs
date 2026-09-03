@@ -96,7 +96,8 @@ const ADAPTER_VERSION: &str = "0.2.0";
 const D2_ID: &str = "org.latentdeck.deck.d2";
 const Q4_ID: &str = "org.latentdeck.deck.q4";
 const EXTERNAL_DECK_ID: &str = "dev.latentdeck.private.h3-probe";
-const DECK_VERSION: &str = "0.2.0";
+const BUNDLED_DECK_VERSION: &str = "0.2.1";
+const EXTERNAL_DECK_VERSION: &str = "0.2.0";
 const STABILITY_SECONDS: u64 = 360;
 const SAMPLE_INTERVAL_SECONDS: u64 = 5;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
@@ -316,7 +317,12 @@ async fn run_gate(app: tauri::AppHandle, config: GateConfig) -> GateResult<Value
     let codec = validate_exact_codec(&config)?;
     provision_exact_bundled_decks(&config.roots)?;
 
-    let d2_prepared = prepare_deck(&config, D2_ID, &config.sources[..2], &codec)?;
+    let d2_prepared = prepare_deck(
+        &config,
+        bundled_deck_reference(D2_ID)?,
+        &config.sources[..2],
+        &codec,
+    )?;
     let player_host = player_host_from_deck(&d2_prepared);
     let profile = d2_prepared.host.profile_key.clone();
     let tensor = d2_prepared.host.tensor_abi.clone();
@@ -329,7 +335,12 @@ async fn run_gate(app: tauri::AppHandle, config: GateConfig) -> GateResult<Value
     let d2_load = d2_load(&d2_prepared)?;
     let mut d2 = start_deck(d2_prepared, d2_load).await?;
 
-    let q4_prepared = prepare_deck(&config, Q4_ID, &config.sources, &codec)?;
+    let q4_prepared = prepare_deck(
+        &config,
+        bundled_deck_reference(Q4_ID)?,
+        &config.sources,
+        &codec,
+    )?;
     let q4_load = q4_load(&q4_prepared)?;
     let mut q4 = start_deck(q4_prepared, q4_load).await?;
 
@@ -339,7 +350,12 @@ async fn run_gate(app: tauri::AppHandle, config: GateConfig) -> GateResult<Value
 
     let external_archive_sha256 =
         install_external_probe_deck(&config, &tensor, &profile, &external_timing)?;
-    let external_prepared = prepare_deck(&config, EXTERNAL_DECK_ID, &config.sources[..2], &codec)?;
+    let external_prepared = prepare_deck(
+        &config,
+        external_deck_reference(),
+        &config.sources[..2],
+        &codec,
+    )?;
     let external_load = external_load(&external_prepared)?;
     let mut external = start_deck(external_prepared, external_load).await?;
     let external_surface = exercise_external_deck(&mut external).await?;
@@ -619,7 +635,7 @@ fn provision_exact_bundled_decks(roots: &ExtensionRoots) -> GateResult<()> {
         return Err("build-authorized bundled Deck provisioning reported an issue");
     }
     for deck_id in [D2_ID, Q4_ID] {
-        resolve_active(roots, &deck_reference(deck_id))
+        resolve_active(roots, &bundled_deck_reference(deck_id)?)
             .map_err(|_| "exact bundled Deck version is not active and trusted")?;
     }
     Ok(())
@@ -633,23 +649,34 @@ fn codec_reference() -> PackageReference {
     }
 }
 
-fn deck_reference(deck_id: &str) -> PackageReference {
+fn bundled_deck_reference(deck_id: &str) -> GateResult<PackageReference> {
+    if !matches!(deck_id, D2_ID | Q4_ID) {
+        return Err("bundled Deck reference must name D2 or Q4");
+    }
+    Ok(deck_reference(deck_id, BUNDLED_DECK_VERSION))
+}
+
+fn external_deck_reference() -> PackageReference {
+    deck_reference(EXTERNAL_DECK_ID, EXTERNAL_DECK_VERSION)
+}
+
+fn deck_reference(deck_id: &str, deck_version: &str) -> PackageReference {
     PackageReference {
         kind: PackageKind::DeckPack,
         package_id: deck_id.to_owned(),
-        package_version: DECK_VERSION.to_owned(),
+        package_version: deck_version.to_owned(),
     }
 }
 
 fn prepare_deck(
     config: &GateConfig,
-    deck_id: &str,
+    deck: PackageReference,
     sources: &[PrivateSource],
     codec: &ExactCodecEvidence,
 ) -> GateResult<PreparedDeckSelectionV2> {
     let mut selection = DeckPackageSelectionV2::new(
-        deck_id.to_owned(),
-        DECK_VERSION.to_owned(),
+        deck.package_id,
+        deck.package_version,
         CODEC_ID.to_owned(),
         CODEC_VERSION.to_owned(),
         latentdeck_control::v2::DeviceKind::Cuda,
@@ -1891,9 +1918,9 @@ fn install_external_probe_deck(
             "schema_version": "0.2.0",
             "deck_operator_api": "0.2.0",
             "deck_id": EXTERNAL_DECK_ID,
-            "deck_version": DECK_VERSION,
+            "deck_version": EXTERNAL_DECK_VERSION,
             "operator_id": "dev.latentdeck.private.h3_probe.operator",
-            "operator_version": DECK_VERSION,
+            "operator_version": EXTERNAL_DECK_VERSION,
             "entrypoint": "latentdeck_private_h3_probe.operator:process_sources",
             "source_count": 2,
             "role_ids": ["carrier", "donor"],
@@ -1952,7 +1979,7 @@ def process_sources(sources, controls, context):
         manifest_version: "1.0.0".to_owned(),
         kind: PackageKind::DeckPack,
         deck_id: EXTERNAL_DECK_ID.to_owned(),
-        deck_version: DECK_VERSION.to_owned(),
+        deck_version: EXTERNAL_DECK_VERSION.to_owned(),
         display_name: "Private Protocol 2 external Deck probe".to_owned(),
         summary: "Test-generated exact installed Deck used only by the private GPU gate."
             .to_owned(),
@@ -2037,7 +2064,7 @@ def process_sources(sources, controls, context):
         output_path: archive.clone(),
     })
     .map_err(|_| "test-generated external .ld could not be packed")?;
-    let package = deck_reference(EXTERNAL_DECK_ID);
+    let package = external_deck_reference();
     if packed.inspection.package != package {
         return Err("test-generated external .ld changed its exact identity");
     }
@@ -2168,10 +2195,10 @@ fn build_receipt(
             "codec": {"id": CODEC_ID, "version": CODEC_VERSION},
             "adapter": {"id": ADAPTER_ID, "version": ADAPTER_VERSION},
             "decks": [
-                {"id": D2_ID, "version": DECK_VERSION},
-                {"id": Q4_ID, "version": DECK_VERSION}
+                {"id": D2_ID, "version": BUNDLED_DECK_VERSION},
+                {"id": Q4_ID, "version": BUNDLED_DECK_VERSION}
             ],
-            "external_deck": {"id": EXTERNAL_DECK_ID, "version": DECK_VERSION}
+            "external_deck": {"id": EXTERNAL_DECK_ID, "version": EXTERNAL_DECK_VERSION}
         },
         "profile": {
             "codec_family": profile.codec_family,

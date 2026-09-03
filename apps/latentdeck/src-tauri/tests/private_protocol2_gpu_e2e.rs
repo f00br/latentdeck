@@ -63,6 +63,17 @@ fn private_protocol2_gpu_runner_is_an_executable_evidence_producer() {
         source.contains(r#"const EXTERNAL_DECK_ID: &str = "dev.latentdeck.private.h3-probe";"#),
         "the generated external Deck must use a valid lowercase reverse-DNS package ID"
     );
+    for required in [
+        r#"const BUNDLED_DECK_VERSION: &str = "0.2.1";"#,
+        r#"const EXTERNAL_DECK_VERSION: &str = "0.2.0";"#,
+        "bundled_deck_reference(deck_id)",
+        "external_deck_reference()",
+    ] {
+        assert!(
+            source.contains(required),
+            "the private runner is missing a split Deck version seam: {required}"
+        );
+    }
 
     let orchestrator = include_str!("../../../../tools/Run-PrivateProtocol2GpuE2E.ps1");
     for required in [

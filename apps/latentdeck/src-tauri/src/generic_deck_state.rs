@@ -45,7 +45,7 @@ use tauri_plugin_dialog::DialogExt as _;
 use uuid::Uuid;
 
 use crate::{
-    decoded_recording::normalize_mp4_destination,
+    decoded_recording::{DecodedRecordingController, normalize_mp4_destination},
     embedded_viewport::{
         EmbeddedViewportStore, ViewportBoundsRequest, ViewportSessionAck, validate_viewport_bounds,
         viewport_error,
@@ -53,7 +53,8 @@ use crate::{
     extension_commands::ExtensionManagerState,
     generic_deck_runtime::{
         GenericCaptureView, GenericDeckRuntime, GenericDeckRuntimeDiagnostics,
-        GenericDeckRuntimeError, GenericDeckRuntimeView,
+        GenericDeckRuntimeError, GenericDeckRuntimeView, GenericReplacementOutputState,
+        prevalidate_load,
     },
     library_state::{AppState, CommandError},
     preset_state::{PresetSaveView, deck_preset_load, deck_preset_save},
@@ -101,6 +102,14 @@ impl GenericSessionRegistry {
 
     fn close(&mut self, session_id: &SessionId) -> Result<WarmSession, BrokerError> {
         self.broker.close_session(session_id)
+    }
+
+    fn replace_worker(
+        &mut self,
+        session_id: &SessionId,
+        worker_id: WorkerId,
+    ) -> Result<WarmSession, BrokerError> {
+        self.broker.replace_worker(session_id, worker_id)
     }
 
     #[cfg(test)]
@@ -174,6 +183,17 @@ enum PreparedForegroundTransition {
     Pending(ForegroundTransition),
 }
 
+struct SourceReplacementTransition {
+    generation: u64,
+    old_runtime: Arc<GenericDeckRuntime>,
+    old_worker_id: WorkerId,
+    recording: DecodedRecordingController,
+    deck: PackageIdentity,
+    codec: PackageIdentity,
+    negotiated: GenericNegotiatedIdentity,
+    foreground: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GenericDeckFaultView {
@@ -192,6 +212,8 @@ struct GenericDeckController {
     recent_faults: VecDeque<GenericDeckFaultView>,
     closing: BTreeSet<SessionId>,
     lifecycle_transition: Option<u64>,
+    replacement_session: Option<SessionId>,
+    pending_output_start: Option<OutputPinToken>,
     next_lifecycle_generation: u64,
 }
 
@@ -330,7 +352,149 @@ impl GenericDeckController {
     fn abort_lifecycle_transition(&mut self, generation: u64) {
         if self.lifecycle_transition == Some(generation) {
             self.lifecycle_transition = None;
+            self.replacement_session = None;
         }
+    }
+
+    fn begin_source_replacement(
+        &mut self,
+        session_id: &SessionId,
+        request: &GenericDeckOpenRequest,
+    ) -> Result<SourceReplacementTransition, CommandError> {
+        self.reap_closed();
+        self.ensure_lifecycle_idle()?;
+        if self.closing.contains(session_id) {
+            return Err(session_not_found());
+        }
+        if self.registry.broker.output_pin().is_some_and(|pin| {
+            pin.session_id() == session_id && pin.kind() == OutputPinKind::Capture
+        }) {
+            return Err(source_replacement_capture_conflict());
+        }
+        let (old_runtime, old_worker_id, recording, deck, codec, negotiated, foreground) = {
+            let record = self
+                .sessions
+                .get(session_id)
+                .ok_or_else(session_not_found)?;
+            let capture = record
+                .runtime
+                .cached_capture_status()
+                .map_err(runtime_command_error)?;
+            ensure_capture_terminal_for_source_replacement(&capture.state)?;
+            validate_replacement_identity(
+                request,
+                &record.deck,
+                &record.codec,
+                &record.negotiated,
+                &record.negotiated,
+            )?;
+            (
+                Arc::clone(&record.runtime),
+                record.worker_id.clone(),
+                record.runtime.recording_controller(),
+                record.deck.clone(),
+                record.codec.clone(),
+                record.negotiated.clone(),
+                self.registry
+                    .broker
+                    .foreground_output()
+                    .is_some_and(|lease| &lease.session_id == session_id),
+            )
+        };
+        let generation = self.begin_lifecycle_transition()?;
+        self.replacement_session = Some(session_id.clone());
+        Ok(SourceReplacementTransition {
+            generation,
+            old_runtime,
+            old_worker_id,
+            recording,
+            deck,
+            codec,
+            negotiated,
+            foreground,
+        })
+    }
+
+    fn complete_source_replacement(
+        &mut self,
+        session_id: &SessionId,
+        transition: &SourceReplacementTransition,
+        record: GenericSessionRecord,
+    ) -> Result<GenericDeckSessionView, CommandError> {
+        if self.lifecycle_transition != Some(transition.generation) {
+            return Err(CommandError::new(
+                "session.lifecycle_changed",
+                "The generic Deck lifecycle changed during source replacement.",
+            ));
+        }
+        let current = self
+            .sessions
+            .get(session_id)
+            .ok_or_else(session_not_found)?;
+        if current.worker_id != transition.old_worker_id
+            || !Arc::ptr_eq(&current.runtime, &transition.old_runtime)
+        {
+            self.lifecycle_transition = None;
+            self.replacement_session = None;
+            return Err(CommandError::new(
+                "session.lifecycle_changed",
+                "The generic Deck worker changed during source replacement.",
+            ));
+        }
+        let runtime = record.runtime.view().map_err(runtime_command_error)?;
+        let view = GenericDeckSessionView {
+            session_id: session_id.as_str().to_owned(),
+            worker_id: record.worker_id.as_str().to_owned(),
+            deck: ExactPackageView::from(&record.deck),
+            codec: ExactPackageView::from(&record.codec),
+            negotiated: record.negotiated.view(),
+            sources: record.sources.clone(),
+            runtime,
+            foreground: transition.foreground,
+        };
+        self.registry
+            .replace_worker(session_id, record.worker_id.clone())
+            .map_err(broker_command_error)?;
+        self.sessions.insert(session_id.clone(), record);
+        self.lifecycle_transition = None;
+        self.replacement_session = None;
+        Ok(view)
+    }
+
+    fn fail_source_replacement(
+        &mut self,
+        session_id: &SessionId,
+        transition: &SourceReplacementTransition,
+        code: &'static str,
+    ) {
+        if self.lifecycle_transition != Some(transition.generation) {
+            return;
+        }
+        if self
+            .sessions
+            .get(session_id)
+            .is_some_and(|record| record.worker_id == transition.old_worker_id)
+        {
+            let _ = self.registry.worker_fault(&transition.old_worker_id);
+            self.sessions.remove(session_id);
+            if self
+                .pending_output_start
+                .as_ref()
+                .is_some_and(|pending| pending.session_id() == session_id)
+            {
+                self.pending_output_start = None;
+            }
+            if self.recent_faults.len() == MAX_RECENT_FAULTS {
+                self.recent_faults.pop_front();
+            }
+            self.recent_faults.push_back(GenericDeckFaultView {
+                session_id: session_id.as_str().to_owned(),
+                worker_id: transition.old_worker_id.as_str().to_owned(),
+                code: code.to_owned(),
+            });
+        }
+        self.lifecycle_transition = None;
+        self.replacement_session = None;
     }
 
     fn runtime(&mut self, session_id: &SessionId) -> Result<Arc<GenericDeckRuntime>, CommandError> {
@@ -342,6 +506,19 @@ impl GenericDeckController {
             .get(session_id)
             .map(|record| Arc::clone(&record.runtime))
             .ok_or_else(session_not_found)
+    }
+
+    fn runtime_for_mutation(
+        &mut self,
+        session_id: &SessionId,
+    ) -> Result<Arc<GenericDeckRuntime>, CommandError> {
+        if self.replacement_session.as_ref() == Some(session_id) {
+            return Err(CommandError::new(
+                "session.lifecycle_busy",
+                "Source replacement is already in progress for this generic Deck session.",
+            ));
+        }
+        self.runtime(session_id)
     }
 
     fn snapshot(&mut self) -> Result<GenericDeckSessionsView, CommandError> {
@@ -469,16 +646,32 @@ impl GenericDeckController {
     ) -> Result<OutputPinToken, CommandError> {
         self.reap_closed();
         self.ensure_lifecycle_idle()?;
-        self.registry
+        let token = self
+            .registry
             .pin_foreground(session_id, kind)
-            .map_err(broker_command_error)
+            .map_err(broker_command_error)?;
+        self.pending_output_start = Some(token.clone());
+        Ok(token)
     }
 
     fn unpin(&mut self, token: &OutputPinToken) -> Result<(), CommandError> {
         self.reap_closed();
-        self.registry
+        let result = self
+            .registry
             .release_output_pin(token)
-            .map_err(broker_command_error)
+            .map_err(broker_command_error);
+        if self.pending_output_start.as_ref() == Some(token)
+            && (result.is_ok() || self.registry.broker.output_pin() != Some(token))
+        {
+            self.pending_output_start = None;
+        }
+        result
+    }
+
+    fn complete_output_start(&mut self, token: &OutputPinToken) {
+        if self.pending_output_start.as_ref() == Some(token) {
+            self.pending_output_start = None;
+        }
     }
 
     fn prepare_close(
@@ -519,6 +712,8 @@ impl GenericDeckController {
         self.registry = GenericSessionRegistry::default();
         self.closing.clear();
         self.lifecycle_transition = None;
+        self.replacement_session = None;
+        self.pending_output_start = None;
         sessions
     }
 
@@ -526,7 +721,9 @@ impl GenericDeckController {
         let closed = self
             .sessions
             .iter()
-            .filter(|(_, record)| record.runtime.is_closed())
+            .filter(|(session_id, record)| {
+                self.replacement_session.as_ref() != Some(*session_id) && record.runtime.is_closed()
+            })
             .map(|(session_id, record)| {
                 (
                     session_id.clone(),
@@ -551,10 +748,16 @@ impl GenericDeckController {
                 });
             }
         }
+        if self
+            .pending_output_start
+            .as_ref()
+            .is_some_and(|pending| self.registry.broker.output_pin() != Some(pending))
+        {
+            self.pending_output_start = None;
+        }
         let terminal = self.registry.broker.output_pin().and_then(|token| {
-            self.sessions
-                .get(token.session_id())
-                .map(|record| match token.kind() {
+            self.sessions.get(token.session_id()).map(|record| {
+                let terminal = match token.kind() {
                     OutputPinKind::Capture => record
                         .runtime
                         .cached_capture_status()
@@ -562,7 +765,9 @@ impl GenericDeckController {
                     OutputPinKind::Mp4 => {
                         recording_state_terminal(record.runtime.recording_status().state)
                     }
-                })
+                };
+                output_pin_should_reap(self.pending_output_start.as_ref(), token, terminal)
+            })
         });
         if terminal == Some(true) {
             let _ = self.registry.reap_terminal_output_pin(|_| true);
@@ -751,7 +956,7 @@ struct GenericSessionExternalAssetView {
     byte_length: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct GenericNegotiatedIdentity {
     profile_key: GenericProfileKeyInput,
     device: DeviceKind,
@@ -1675,6 +1880,7 @@ pub(crate) async fn deck_generic_open(
             seed: request.seed,
         };
         let negotiated = GenericNegotiatedIdentity::from_prepared(&prepared);
+        let recording = DecodedRecordingController::new();
         let runtime = Arc::new(
             Box::pin(GenericDeckRuntime::start(
                 app.clone(),
@@ -1682,6 +1888,7 @@ pub(crate) async fn deck_generic_open(
                 viewport,
                 prepared,
                 load,
+                recording,
                 state.app_local_data.clone(),
                 library.importer(),
             ))
@@ -1741,6 +1948,261 @@ pub(crate) async fn deck_generic_open(
             .cancel_reservation(&session_id);
     }
     result
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
+pub(crate) async fn deck_generic_sources_replace(
+    app: AppHandle,
+    extensions: State<'_, ExtensionManagerState>,
+    library: State<'_, AppState>,
+    state: State<'_, GenericDeckAppState>,
+    session_id: String,
+    request: GenericDeckOpenRequest,
+) -> Result<GenericDeckSessionView, CommandError> {
+    if request.sources.is_empty()
+        || request.sources.len() > 16
+        || request.seed > MAX_JS_SAFE_INTEGER
+        || (request.device == DeviceKind::Cpu && request.device_ordinal != 0)
+    {
+        return Err(CommandError::new(
+            "deck.input_invalid",
+            "Generic Deck source replacement requires 1-16 exact sources and bounded controls, transport, and seed.",
+        ));
+    }
+    let session_id = parse_session_id(session_id)?;
+    let transition = {
+        let mut controller = state.controller.lock().await;
+        controller.begin_source_replacement(&session_id, &request)?
+    };
+
+    let preflight = Box::pin(async {
+        let identities = request
+            .sources
+            .iter()
+            .map(source_identity)
+            .collect::<Result<Vec<_>, _>>()?;
+        let resolved = library.resolve_deck_sources(identities).await?;
+        let retained_assets = {
+            let mut controller = state.controller.lock().await;
+            controller.retained_assets(&request.codec_id, &request.codec_version)
+        };
+        let roots = extensions.roots().clone();
+        let active_packages = extensions.active_packages().clone();
+        let deck_id = request.deck_id.clone();
+        let deck_version = request.deck_version.clone();
+        let codec_id = request.codec_id.clone();
+        let codec_version = request.codec_version.clone();
+        let profile = request.profile_key.clone();
+        let device = request.device;
+        let device_ordinal = request.device_ordinal;
+        let prepared = tauri::async_runtime::spawn_blocking(move || {
+            prepare_open_selection(
+                &roots,
+                &active_packages,
+                deck_id,
+                deck_version,
+                codec_id,
+                codec_version,
+                &profile,
+                device,
+                device_ordinal,
+                retained_assets,
+                &resolved,
+            )
+        })
+        .await
+        .map_err(|_| CommandError::new("package_invalid", "Generic Deck preflight stopped."))??;
+        let prepared_negotiated = GenericNegotiatedIdentity::from_prepared(&prepared);
+        validate_replacement_identity(
+            &request,
+            &transition.deck,
+            &transition.codec,
+            &transition.negotiated,
+            &prepared_negotiated,
+        )?;
+        let load = DeckSessionV2LoadRequest {
+            roles: request.roles.clone(),
+            controls: request.controls.clone(),
+            source_transport: request.source_transport.clone(),
+            seed: request.seed,
+        };
+        prevalidate_load(&prepared, &load).map_err(runtime_command_error)?;
+        let viewport = state.viewport.current_visible()?;
+        let parent = main_window(&app)?;
+        let output = transition
+            .old_runtime
+            .replacement_output_state()
+            .await
+            .map_err(runtime_command_error)?;
+        let worker_id = WorkerId::new(format!("worker-replacement-{}", Uuid::new_v4().simple()))
+            .map_err(|_| {
+                CommandError::new(
+                    "session.identity_invalid",
+                    "LatentDeck could not bind the replacement generic worker identity.",
+                )
+            })?;
+        Ok::<_, CommandError>((prepared, load, viewport, parent, output, worker_id))
+    })
+    .await;
+    let (prepared, load, viewport, parent, output, worker_id) = match preflight {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            state
+                .controller
+                .lock()
+                .await
+                .abort_lifecycle_transition(transition.generation);
+            return Err(error);
+        }
+    };
+
+    if let Err(error) = transition.old_runtime.shutdown_for_replacement().await {
+        settle_failed_source_replacement(
+            &state,
+            &session_id,
+            &transition,
+            "session.source_replacement_shutdown_failed",
+        )
+        .await;
+        return Err(runtime_command_error(error));
+    }
+
+    let runtime = match Box::pin(GenericDeckRuntime::start(
+        app,
+        parent,
+        viewport,
+        prepared,
+        load,
+        transition.recording.clone(),
+        state.app_local_data.clone(),
+        library.importer(),
+    ))
+    .await
+    {
+        Ok(runtime) => Arc::new(runtime),
+        Err(error) => {
+            settle_failed_source_replacement(
+                &state,
+                &session_id,
+                &transition,
+                "session.source_replacement_start_failed",
+            )
+            .await;
+            return Err(runtime_command_error(error));
+        }
+    };
+    let latest_viewport = match state.viewport.current() {
+        Ok(viewport) => viewport,
+        Err(error) => {
+            let _ = runtime.shutdown().await;
+            settle_failed_source_replacement(
+                &state,
+                &session_id,
+                &transition,
+                "session.source_replacement_output_failed",
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    if let Err(error) =
+        configure_replacement_runtime(&runtime, latest_viewport, transition.foreground, &output)
+            .await
+    {
+        let _ = runtime.shutdown().await;
+        settle_failed_source_replacement(
+            &state,
+            &session_id,
+            &transition,
+            "session.source_replacement_output_failed",
+        )
+        .await;
+        return Err(error);
+    }
+    let record = GenericSessionRecord {
+        runtime: Arc::clone(&runtime),
+        worker_id,
+        deck: transition.deck.clone(),
+        codec: transition.codec.clone(),
+        negotiated: transition.negotiated.clone(),
+        sources: request
+            .sources
+            .iter()
+            .map(GenericDeckSourceView::from)
+            .collect(),
+    };
+    let completion = {
+        let mut controller = state.controller.lock().await;
+        controller.complete_source_replacement(&session_id, &transition, record)
+    };
+    let view = match completion {
+        Ok(view) => view,
+        Err(error) => {
+            let _ = runtime.shutdown().await;
+            settle_failed_source_replacement(
+                &state,
+                &session_id,
+                &transition,
+                "session.source_replacement_commit_failed",
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    let latest_viewport = match state.viewport.current() {
+        Ok(viewport) => viewport,
+        Err(error) => {
+            let _ = runtime.shutdown().await;
+            state.controller.lock().await.reap_closed();
+            return Err(error);
+        }
+    };
+    if let Err(error) = runtime.set_viewport(latest_viewport).await {
+        let _ = runtime.shutdown().await;
+        state.controller.lock().await.reap_closed();
+        return Err(runtime_command_error(error));
+    }
+    Ok(view)
+}
+
+async fn configure_replacement_runtime(
+    runtime: &GenericDeckRuntime,
+    viewport: crate::embedded_viewport::EmbeddedViewport,
+    foreground: bool,
+    output: &GenericReplacementOutputState,
+) -> Result<(), CommandError> {
+    runtime
+        .set_viewport(viewport)
+        .await
+        .map_err(runtime_command_error)?;
+    runtime
+        .set_foreground(foreground)
+        .await
+        .map_err(runtime_command_error)?;
+    runtime
+        .restore_replacement_output(
+            output.spout.requested_name.clone(),
+            output.spout_requested_enabled,
+        )
+        .await
+        .map_err(runtime_command_error)?;
+    Ok(())
+}
+
+async fn settle_failed_source_replacement(
+    state: &GenericDeckAppState,
+    session_id: &SessionId,
+    transition: &SourceReplacementTransition,
+    code: &'static str,
+) {
+    let recording = transition.recording.clone();
+    let _ = tauri::async_runtime::spawn_blocking(move || recording.stop()).await;
+    state
+        .controller
+        .lock()
+        .await
+        .fail_source_replacement(session_id, transition, code);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1804,6 +2266,30 @@ fn package_identity(id: &str, version: &str) -> Result<PackageIdentity, CommandE
     Ok(PackageIdentity::new(id, version))
 }
 
+fn validate_replacement_identity(
+    request: &GenericDeckOpenRequest,
+    deck: &PackageIdentity,
+    codec: &PackageIdentity,
+    negotiated: &GenericNegotiatedIdentity,
+    prepared_negotiated: &GenericNegotiatedIdentity,
+) -> Result<(), CommandError> {
+    if request.deck_id != deck.package_id.as_str()
+        || request.deck_version != deck.version.to_string()
+        || request.codec_id != codec.package_id.as_str()
+        || request.codec_version != codec.version.to_string()
+        || request.profile_key != negotiated.profile_key
+        || request.device != negotiated.device
+        || request.device_ordinal != negotiated.device_ordinal
+        || prepared_negotiated != negotiated
+    {
+        return Err(CommandError::new(
+            "session.source_replacement_identity_mismatch",
+            "Source replacement must keep the exact Deck, Codec, profile, device, and external assets of the active session.",
+        ));
+    }
+    Ok(())
+}
+
 fn selection_command_error(error: DeckSelectionV2Error) -> CommandError {
     CommandError::new(
         error.code(),
@@ -1838,7 +2324,7 @@ pub(crate) async fn deck_generic_process_once(
     state: State<'_, GenericDeckAppState>,
     session_id: String,
 ) -> Result<GenericDeckRuntimeView, CommandError> {
-    runtime_for(&state, session_id)
+    runtime_for_mutation(&state, session_id)
         .await?
         .process_once()
         .await
@@ -1851,7 +2337,7 @@ pub(crate) async fn deck_generic_controls_set(
     session_id: String,
     controls: Vec<ControlBinding>,
 ) -> Result<GenericDeckRuntimeView, CommandError> {
-    runtime_for(&state, session_id)
+    runtime_for_mutation(&state, session_id)
         .await?
         .controls_set(controls)
         .await
@@ -1864,7 +2350,7 @@ pub(crate) async fn deck_generic_roles_set(
     session_id: String,
     roles: Vec<RoleBinding>,
 ) -> Result<GenericDeckRuntimeView, CommandError> {
-    runtime_for(&state, session_id)
+    runtime_for_mutation(&state, session_id)
         .await?
         .roles_set(roles)
         .await
@@ -1877,7 +2363,7 @@ pub(crate) async fn deck_generic_transport_set(
     session_id: String,
     source_transport: Vec<SourceTransportBinding>,
 ) -> Result<GenericDeckRuntimeView, CommandError> {
-    runtime_for(&state, session_id)
+    runtime_for_mutation(&state, session_id)
         .await?
         .transport_set(source_transport)
         .await
@@ -1890,7 +2376,7 @@ pub(crate) async fn deck_generic_seed_set(
     session_id: String,
     seed: u64,
 ) -> Result<GenericDeckRuntimeView, CommandError> {
-    runtime_for(&state, session_id)
+    runtime_for_mutation(&state, session_id)
         .await?
         .seed_set(seed)
         .await
@@ -1903,7 +2389,7 @@ pub(crate) async fn deck_generic_reset(
     session_id: String,
     preserve_playheads: bool,
 ) -> Result<GenericDeckRuntimeView, CommandError> {
-    runtime_for(&state, session_id)
+    runtime_for_mutation(&state, session_id)
         .await?
         .reset(preserve_playheads)
         .await
@@ -2004,6 +2490,18 @@ async fn runtime_for(
 ) -> Result<Arc<GenericDeckRuntime>, CommandError> {
     let session_id = parse_session_id(session_id)?;
     state.controller.lock().await.runtime(&session_id)
+}
+
+async fn runtime_for_mutation(
+    state: &GenericDeckAppState,
+    session_id: String,
+) -> Result<Arc<GenericDeckRuntime>, CommandError> {
+    let session_id = parse_session_id(session_id)?;
+    state
+        .controller
+        .lock()
+        .await
+        .runtime_for_mutation(&session_id)
 }
 
 fn parse_session_id(value: String) -> Result<SessionId, CommandError> {
@@ -2111,7 +2609,7 @@ pub(crate) async fn deck_generic_spout_configure(
     name: Option<String>,
     enabled: Option<bool>,
 ) -> Result<NativeSpoutStatus, CommandError> {
-    runtime_for(&state, session_id)
+    runtime_for_mutation(&state, session_id)
         .await?
         .configure_spout(name, enabled)
         .await
@@ -2175,6 +2673,7 @@ pub(crate) async fn deck_generic_capture_start(
             return Err(runtime_command_error(error));
         }
     };
+    state.controller.lock().await.complete_output_start(&token);
     spawn_capture_pin_monitor(app, session_id.clone(), token, runtime);
     Ok(Some(GenericCaptureSessionView::new(&session_id, capture)))
 }
@@ -2254,7 +2753,13 @@ pub(crate) async fn deck_generic_recording_start(
             return Err(runtime_command_error(error));
         }
     };
-    spawn_recording_pin_monitor(app, session_id.clone(), token, Arc::clone(&runtime));
+    state.controller.lock().await.complete_output_start(&token);
+    spawn_recording_pin_monitor(
+        app,
+        session_id.clone(),
+        token,
+        runtime.recording_controller(),
+    );
     Ok(Some(GenericRecordingSessionView::new(&session_id, &status)))
 }
 
@@ -2415,11 +2920,11 @@ fn spawn_recording_pin_monitor(
     app: AppHandle,
     session_id: SessionId,
     token: OutputPinToken,
-    runtime: Arc<GenericDeckRuntime>,
+    recording: DecodedRecordingController,
 ) {
     tauri::async_runtime::spawn(async move {
         loop {
-            if recording_state_terminal(runtime.recording_status().state) || runtime.is_closed() {
+            if recording_state_terminal(recording.status().state) {
                 release_monitored_pin(&app, &session_id, &token).await;
                 break;
             }
@@ -2444,6 +2949,28 @@ async fn release_monitored_pin(app: &AppHandle, session_id: &SessionId, token: &
 
 fn capture_state_terminal(state: &str) -> bool {
     matches!(state, "idle" | "finished" | "aborted" | "error")
+}
+
+fn ensure_capture_terminal_for_source_replacement(state: &str) -> Result<(), CommandError> {
+    if !capture_state_terminal(state) {
+        return Err(source_replacement_capture_conflict());
+    }
+    Ok(())
+}
+
+fn source_replacement_capture_conflict() -> CommandError {
+    CommandError::new(
+        "capture.source_replacement_conflict",
+        "Finish or cancel latent Snapshot/Live Capture before replacing Deck sources.",
+    )
+}
+
+fn output_pin_should_reap(
+    pending: Option<&OutputPinToken>,
+    token: &OutputPinToken,
+    terminal: bool,
+) -> bool {
+    terminal && pending != Some(token)
 }
 
 const fn recording_state_terminal(state: RecorderState) -> bool {
@@ -2893,6 +3420,21 @@ mod tests {
     }
 
     #[test]
+    fn pending_output_start_is_not_mistaken_for_terminal_idle_state() {
+        let mut registry = GenericSessionRegistry::default();
+        registry.reserve(session(1)).expect("reservation");
+        registry.commit(warm(1)).expect("commit");
+        registry.switch_foreground(&session(1)).expect("foreground");
+        let capture = registry
+            .pin_foreground(&session(1), OutputPinKind::Capture)
+            .expect("capture start reservation");
+
+        assert!(!output_pin_should_reap(Some(&capture), &capture, true));
+        assert!(output_pin_should_reap(None, &capture, true));
+        assert!(!output_pin_should_reap(None, &capture, false));
+    }
+
+    #[test]
     fn negotiated_identity_is_exact_path_free_and_stable_across_warm_switches() {
         let identity = GenericNegotiatedIdentity {
             profile_key: GenericProfileKeyInput {
@@ -2922,5 +3464,78 @@ mod tests {
         assert_eq!(wire["externalAssets"][0]["sha256"], "ab".repeat(32));
         assert_eq!(wire["externalAssets"][0]["byteLength"], 1_024);
         assert!(!wire.to_string().contains("path"));
+    }
+
+    fn replacement_request() -> GenericDeckOpenRequest {
+        GenericDeckOpenRequest {
+            deck_id: "org.example.deck".to_owned(),
+            deck_version: "1.2.3".to_owned(),
+            codec_id: "org.example.codec".to_owned(),
+            codec_version: "2.3.4".to_owned(),
+            profile_key: GenericProfileKeyInput {
+                codec_family: "synthetic".to_owned(),
+                profile: "latent".to_owned(),
+                profile_version: "1.0.0".to_owned(),
+            },
+            device: DeviceKind::Cuda,
+            device_ordinal: 0,
+            sources: vec![GenericDeckSourceInput {
+                cartridge_id: "550e8400-e29b-41d4-a716-446655440001".to_owned(),
+                archive_sha256: "aa".repeat(32),
+            }],
+            roles: Vec::new(),
+            controls: Vec::new(),
+            source_transport: Vec::new(),
+            seed: 7,
+        }
+    }
+
+    fn replacement_negotiated_identity() -> GenericNegotiatedIdentity {
+        GenericNegotiatedIdentity {
+            profile_key: GenericProfileKeyInput {
+                codec_family: "synthetic".to_owned(),
+                profile: "latent".to_owned(),
+                profile_version: "1.0.0".to_owned(),
+            },
+            device: DeviceKind::Cuda,
+            device_ordinal: 0,
+            external_assets: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn source_replacement_requires_the_same_exact_runtime_identity() {
+        let mut request = replacement_request();
+        let deck = package_identity("org.example.deck", "1.2.3").expect("deck identity");
+        let codec = package_identity("org.example.codec", "2.3.4").expect("codec identity");
+        let negotiated = replacement_negotiated_identity();
+
+        validate_replacement_identity(&request, &deck, &codec, &negotiated, &negotiated)
+            .expect("same exact runtime identity");
+
+        request.device_ordinal = 1;
+        let error =
+            validate_replacement_identity(&request, &deck, &codec, &negotiated, &negotiated)
+                .expect_err("device change is not a source replacement");
+        assert_eq!(
+            serde_json::to_value(error).expect("serialize command error")["code"],
+            "session.source_replacement_identity_mismatch"
+        );
+    }
+
+    #[test]
+    fn source_replacement_refuses_active_capture_but_accepts_completed_capture() {
+        for state in ["starting", "capturing", "finalizing"] {
+            let error = ensure_capture_terminal_for_source_replacement(state)
+                .expect_err("active latent capture must retain its exact source runtime");
+            assert_eq!(
+                serde_json::to_value(error).expect("serialize command error")["code"],
+                "capture.source_replacement_conflict"
+            );
+        }
+        for state in ["idle", "finished", "aborted", "error"] {
+            ensure_capture_terminal_for_source_replacement(state)
+                .expect("terminal latent capture permits source replacement");
+        }
     }
 }

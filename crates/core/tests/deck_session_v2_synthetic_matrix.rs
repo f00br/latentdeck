@@ -83,7 +83,8 @@ const CODEC_ID: &str = "dev.latentdeck.synthetic.codec";
 const CODEC_VERSION: &str = "2.0.0";
 const ADAPTER_ID: &str = "dev.latentdeck.synthetic.adapter";
 const ADAPTER_VERSION: &str = "2.0.0";
-const DECK_VERSION: &str = "0.2.0";
+const SYNTHETIC_DECK_VERSION: &str = "0.2.0";
+const BUNDLED_DECK_VERSION: &str = "0.2.1";
 const COMPATIBLE_DECK_ID: &str = "dev.latentdeck.synthetic.deck2";
 const COMPATIBLE_DECK4_ID: &str = "dev.latentdeck.synthetic.deck4";
 const SIGNAL_DECK_ID: &str = "dev.latentdeck.synthetic.bad-signal";
@@ -304,7 +305,7 @@ async fn installed_non_h3_codec_runs_external_decks_without_p1_fallback() {
     );
     assert_eq!(
         prepared.deck_runtime.runtime_binding().deck_version,
-        DECK_VERSION
+        SYNTHETIC_DECK_VERSION
     );
     assert!(
         Path::new(&prepared.deck_runtime.runtime_binding().python_root)
@@ -791,7 +792,7 @@ async fn run_bundled_deck_session(
     assert_ne!(prepared.host.profile_key.codec_family, "minimax_h3");
     let runtime = prepared.deck_runtime.runtime_binding();
     assert_eq!(runtime.deck_id, deck_id);
-    assert_eq!(runtime.deck_version, DECK_VERSION);
+    assert_eq!(runtime.deck_version, BUNDLED_DECK_VERSION);
     let package_root = Path::new(&runtime.python_root);
     let module_name = if deck_id == BUNDLED_D2_ID {
         "latentdeck_operator_d2"
@@ -1149,7 +1150,7 @@ fn finalize_synthetic_capture(
     }];
     manifest.operation_history = vec![OperationRecord {
         operator_id: Identifier("dev.latentdeck.synthetic.capture".to_owned()),
-        operator_version: DECK_VERSION.to_owned(),
+        operator_version: SYNTHETIC_DECK_VERSION.to_owned(),
         seed: 7,
         controls: BTreeMap::from([(
             "capture_mode".to_owned(),
@@ -1225,11 +1226,19 @@ fn assert_refused(
 fn selection(deck_id: &str) -> DeckPackageSelectionV2 {
     DeckPackageSelectionV2::new(
         deck_id.to_owned(),
-        DECK_VERSION.to_owned(),
+        deck_version(deck_id).to_owned(),
         CODEC_ID.to_owned(),
         CODEC_VERSION.to_owned(),
         latentdeck_control::v2::DeviceKind::Cuda,
     )
+}
+
+fn deck_version(deck_id: &str) -> &'static str {
+    if matches!(deck_id, BUNDLED_D2_ID | BUNDLED_Q4_ID) {
+        BUNDLED_DECK_VERSION
+    } else {
+        SYNTHETIC_DECK_VERSION
+    }
 }
 
 fn load_request(source_count: u8) -> DeckSessionV2LoadRequest {
@@ -1534,9 +1543,9 @@ fn install_deck(roots: &ExtensionRoots, root: &Path, fixture: DeckFixture<'_>) {
         "schema_version": "0.2.0",
         "deck_operator_api": "0.2.0",
         "deck_id": fixture.id,
-        "deck_version": DECK_VERSION,
+        "deck_version": SYNTHETIC_DECK_VERSION,
         "operator_id": format!("{}.operator", fixture.id),
-        "operator_version": DECK_VERSION,
+        "operator_version": SYNTHETIC_DECK_VERSION,
         "entrypoint": "synthetic_operator:process_sources",
         "source_count": fixture.source_count,
         "role_ids": roles,
@@ -1573,7 +1582,7 @@ fn install_deck(roots: &ExtensionRoots, root: &Path, fixture: DeckFixture<'_>) {
         manifest_version: "1.0.0".to_owned(),
         kind: PackageKind::DeckPack,
         deck_id: fixture.id.to_owned(),
-        deck_version: DECK_VERSION.to_owned(),
+        deck_version: SYNTHETIC_DECK_VERSION.to_owned(),
         display_name: "Synthetic external Deck".to_owned(),
         summary: "A test-only dynamically installed Deck.".to_owned(),
         publisher: publisher(),
@@ -1635,7 +1644,7 @@ fn install_deck(roots: &ExtensionRoots, root: &Path, fixture: DeckFixture<'_>) {
         &PackageReference {
             kind: PackageKind::DeckPack,
             package_id: fixture.id.to_owned(),
-            package_version: DECK_VERSION.to_owned(),
+            package_version: SYNTHETIC_DECK_VERSION.to_owned(),
         },
     );
 }
@@ -1665,7 +1674,7 @@ fn install_bundled_deck(roots: &ExtensionRoots, root: &Path, source: &Path, deck
     let package = PackageReference {
         kind: PackageKind::DeckPack,
         package_id: deck_id.to_owned(),
-        package_version: DECK_VERSION.to_owned(),
+        package_version: BUNDLED_DECK_VERSION.to_owned(),
     };
     assert_eq!(packed.inspection.package, package);
     let expected_sha256 = packed.inspection.archive_sha256;
@@ -2192,7 +2201,7 @@ impl SyntheticWorker {
                     load.deck_id.as_str(),
                     COMPATIBLE_DECK_ID | COMPATIBLE_DECK4_ID | BUNDLED_D2_ID | BUNDLED_Q4_ID
                 ));
-                assert_eq!(load.deck_version, DECK_VERSION);
+                assert_eq!(load.deck_version, deck_version(&load.deck_id));
                 let runtime = load.runtime.as_ref().expect("dynamic Deck runtime binding");
                 assert_eq!(runtime.deck_id, load.deck_id);
                 assert_eq!(runtime.deck_version, load.deck_version);

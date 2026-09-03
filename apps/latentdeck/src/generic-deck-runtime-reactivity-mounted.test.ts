@@ -440,7 +440,9 @@ describe("generic Deck runtime negotiation reactivity", () => {
 
     expect(target.textContent).toContain("Exact runtime preflight complete.");
     expect(target.textContent).not.toContain("Required external asset missing");
-    expect(target.querySelector(".runtime-unavailable")).toBeNull();
+    expect(
+      target.querySelector<HTMLDetailsElement>(".asset-drawer")?.open,
+    ).toBe(false);
     expect(sourceOption?.disabled).toBe(false);
     expect(sourceOption?.textContent).not.toContain("INCOMPATIBLE");
     const sourceSelects = target.querySelectorAll<HTMLSelectElement>(
@@ -485,7 +487,9 @@ describe("generic Deck runtime negotiation reactivity", () => {
     await settleUi();
 
     expect(target.textContent).toContain("Required external asset missing");
-    expect(target.querySelector(".runtime-unavailable")).not.toBeNull();
+    expect(
+      target.querySelector<HTMLDetailsElement>(".asset-drawer")?.open,
+    ).toBe(true);
     expect(sourceOption?.disabled).toBe(true);
     expect(loadButton?.disabled).toBe(true);
 

@@ -61,7 +61,8 @@ describe("generic Deck production surface", () => {
     expect(workspaceSource).toContain("captureStart");
     expect(rendererSource).toContain("liveCaptureActive");
     expect(workspaceSource).toContain("recordingStart");
-    expect(workspaceSource).toContain("Record MP4");
+    expect(rendererSource).toContain("Record MP4");
+    expect(workspaceSource).toContain("onMp4Toggle={recordingAction}");
     expect(workspaceSource).toContain("deck_generic_preset_save");
     expect(workspaceSource).toContain("deck_generic_preset_load");
   });

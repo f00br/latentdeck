@@ -74,6 +74,11 @@
     stagePresetLibraryLoad,
     type DeckPreset,
   } from "./preset-model";
+  import {
+    replaceDraftSource,
+    retainDraftSourceOptions,
+    selectedSourceAspectWarning,
+  } from "./source-replacement";
 
   export let model: DeckUiModel;
   export let models: readonly DeckUiModel[];
@@ -114,6 +119,10 @@
   let hydratedSessionId = "";
   let sessionSnapshotValid = false;
   let draft = createDeckUiDraft(model);
+  let observedLibrary = library;
+  let libraryView = library;
+  let sourceCartridges: CartridgeView[] = [...library.cartridges];
+  let completedCaptureSource: CartridgeView | null = null;
   let draftRevision = 0;
   let configuredDeckKey = model.exactKey;
   let busy = false;
@@ -153,6 +162,14 @@
   let controlsDispatchPending = false;
   let acknowledgedControls: Record<string, DeckUiScalar> | null = null;
   let controlsDispatcher = createControlsDispatcher(controlsEpoch);
+  let sessionLifecycleEpoch = 0;
+  let sessionPollToken: {
+    epoch: number;
+    sessionId: string;
+    deckKey: string;
+  } | null = null;
+  let sessionsRequestRevision = 0;
+  let closingSessionIds = new Set<string>();
 
   let codecOptions: GenericCodecOption[] = [];
   let selectedCodec: GenericCodecOption | undefined;
@@ -164,6 +181,7 @@
   let sourceOptions: Array<{
     archiveSha256: string;
     label: string;
+    detail?: string;
     available: boolean;
     incompatibilityReason?: string;
   }> = [];
@@ -180,6 +198,9 @@
   let recordingIsActive = false;
   let controlsDraftDirty = false;
   let controlsUnsettled = false;
+  let capturedSourceAvailable = false;
+  let captureReuseAvailable = false;
+  let sourceGeometryWarning = "";
 
   $: codecOptions = codecOptionsForExactDeck(model.exactKey, extensions.matrix);
   $: selectedCodec = codecOptions.find(
@@ -207,8 +228,12 @@
     hydrateSelectedSession(selectedSession);
   }
   $: playheads = playheadsFor(model, selectedSession);
-  $: sourceOptions = library.cartridges.map((cartridge) =>
+  $: sourceOptions = sourceCartridges.map((cartridge) =>
     sourceOption(cartridge, selectedProfile, runtimeOptions),
+  );
+  $: sourceGeometryWarning = selectedSourceAspectWarning(
+    draft.sourceArchiveSha256s,
+    sourceCartridges,
   );
   $: runtimeAvailable = exactRuntimeAvailable(
     selectedCodec,
@@ -245,6 +270,16 @@
       !sameControlSnapshot(draft.controls, acknowledgedControls));
   $: controlsUnsettled =
     controlsDraftDirty || controlsDispatchRunning || controlsDispatchPending;
+  $: capturedSourceAvailable =
+    completedCaptureSource?.availability === "present" &&
+    selectedSessionReady &&
+    selectedSession?.foreground === true;
+  $: captureReuseAvailable =
+    capturedSourceAvailable &&
+    !captureIsActive &&
+    (sessions.outputPin?.session_id !== selectedSessionId ||
+      sessions.outputPin.kind !== "capture") &&
+    !controlsUnsettled;
   $: captureStartAvailable = captureAvailable && !controlsUnsettled;
   $: captureUnavailableReason = recordingIsActive
     ? "MP4 recording pins the foreground output lease."
@@ -259,6 +294,7 @@
     selectedSession.runtime.faultCode === null &&
     !captureIsActive;
   $: if (model.exactKey !== configuredDeckKey) resetForExactDeck();
+  $: if (library !== observedLibrary) syncLibraryView(library);
   $: if (models !== observedModels) {
     observedModels = models;
     if (active) {
@@ -276,7 +312,7 @@
       viewportSuspended = false;
       viewportRetryAttempt = 0;
       viewportRetryExhausted = false;
-    }
+    } else invalidateSessionLifecycle();
   }
   $: if (active && !viewportSuspended && viewportAnchor !== null) {
     if (viewportEpoch === null) {
@@ -302,6 +338,7 @@
     }, 500);
     return () => {
       disposeControlsDispatcher();
+      invalidateSessionLifecycle();
       viewportSuspended = true;
       registerLeave(async () => undefined);
       globalThis.clearInterval(poll);
@@ -317,6 +354,7 @@
   });
 
   function resetForExactDeck(): void {
+    invalidateSessionLifecycle();
     resetControlsScope();
     viewportSuspended = false;
     viewportRetryAttempt = 0;
@@ -345,6 +383,51 @@
     message = "Choose an exact Codec version, device, and profile.";
     errorCode = "";
     void hideViewport();
+  }
+
+  function syncLibraryView(next: LibraryView): void {
+    observedLibrary = next;
+    libraryView = next;
+    const retainedHashes = [
+      ...draft.sourceArchiveSha256s,
+      ...(completedCaptureSource === null
+        ? []
+        : [completedCaptureSource.archiveSha256]),
+    ];
+    sourceCartridges = retainDraftSourceOptions(
+      next.cartridges,
+      [
+        ...sourceCartridges,
+        ...(completedCaptureSource === null ? [] : [completedCaptureSource]),
+      ],
+      retainedHashes,
+    );
+  }
+
+  function acceptLibrarySnapshot(
+    next: LibraryView,
+    resolvedSources: readonly (CartridgeView | null)[] = [],
+    additionallyRetained: readonly string[] = [],
+  ): void {
+    observedLibrary = next;
+    libraryView = next;
+    sourceCartridges = retainDraftSourceOptions(
+      next.cartridges,
+      [...sourceCartridges, ...resolvedSources],
+      [...draft.sourceArchiveSha256s, ...additionallyRetained],
+    );
+    onLibraryChanged(next);
+  }
+
+  function availableSourceIdentities(
+    cartridges: readonly CartridgeView[] = sourceCartridges,
+  ): GenericDeckSourceIdentity[] {
+    return cartridges
+      .filter((cartridge) => cartridge.availability === "present")
+      .map((cartridge) => ({
+        cartridgeId: cartridge.cartridgeId,
+        archiveSha256: cartridge.archiveSha256,
+      }));
   }
 
   function refreshExtensions(): Promise<void> {
@@ -484,12 +567,7 @@
         profileKey: profile,
         device,
         deviceOrdinal,
-        sources: library.cartridges
-          .filter((cartridge) => cartridge.availability === "present")
-          .map((cartridge) => ({
-            cartridgeId: cartridge.cartridgeId,
-            archiveSha256: cartridge.archiveSha256,
-          })),
+        sources: availableSourceIdentities(),
         selectedSources,
       });
       message =
@@ -539,12 +617,7 @@
       sources:
         profile === undefined
           ? []
-          : library.cartridges
-              .filter((cartridge) => cartridge.availability === "present")
-              .map((cartridge) => ({
-                cartridgeId: cartridge.cartridgeId,
-                archiveSha256: cartridge.archiveSha256,
-              })),
+          : availableSourceIdentities(),
       selectedSources: profile === undefined ? [] : selectedSourceSet(draft),
     });
     if (profile === undefined) {
@@ -584,12 +657,16 @@
     return {
       archiveSha256: cartridge.archiveSha256,
       label: `${cartridge.paths[0]?.fileName ?? cartridge.cartridgeId} · ${shortHash(cartridge.archiveSha256)}`,
+      detail: `${cartridge.signalPresentation.decoded_width}×${cartridge.signalPresentation.decoded_height} · ${cartridge.signalPresentation.aspect_ratio.width}:${cartridge.signalPresentation.aspect_ratio.height}`,
       available: cartridge.availability === "present",
       ...(incompatibilityReason === undefined ? {} : { incompatibilityReason }),
     };
   }
 
-  function selectedSourceSet(value: DeckUiDraft): GenericDeckSourceIdentity[] {
+  function selectedSourceSet(
+    value: DeckUiDraft,
+    cartridges: readonly CartridgeView[] = sourceCartridges,
+  ): GenericDeckSourceIdentity[] {
     if (
       value.sourceArchiveSha256s.length !== model.slots ||
       value.sourceArchiveSha256s.some((archiveSha256) => archiveSha256 === "")
@@ -597,7 +674,7 @@
       return [];
     }
     const selected = value.sourceArchiveSha256s.map((archiveSha256) =>
-      library.cartridges.find(
+      cartridges.find(
         (cartridge) =>
           cartridge.archiveSha256 === archiveSha256 &&
           cartridge.availability === "present",
@@ -772,7 +849,7 @@
     }
     draft = nextDraft;
     await run(async () => {
-      const wire = buildGenericDeckOpenDraft(model, draft, library.cartridges);
+      const wire = buildGenericDeckOpenDraft(model, draft, sourceCartridges);
       const opened = await genericDeckClient.open({
         deckId: model.deckId,
         deckVersion: model.deckVersion,
@@ -784,19 +861,58 @@
         ...wire,
       });
       if (opened.sessionId !== selectedSessionId) resetControlsScope();
+      invalidateSessionLifecycle();
       selectedSessionId = opened.sessionId;
-      sessions = await genericDeckClient.foregroundSet(opened.sessionId);
+      const revision = beginSessionsRequest();
+      applySessionsResponse(
+        await genericDeckClient.foregroundSet(opened.sessionId),
+        revision,
+      );
       message = `Warm session ${opened.sessionId} owns foreground output.`;
       await establishViewport();
     });
   }
 
   async function refreshSessions(): Promise<void> {
+    const revision = beginSessionsRequest();
     try {
-      applySessions(await genericDeckClient.sessionsGet());
+      applySessionsResponse(await genericDeckClient.sessionsGet(), revision);
     } catch (error) {
-      fail(error);
+      if (revision === sessionsRequestRevision) fail(error);
     }
+  }
+
+  function beginSessionsRequest(): number {
+    sessionsRequestRevision += 1;
+    return sessionsRequestRevision;
+  }
+
+  function applySessionsResponse(
+    next: GenericDeckSessionsView,
+    revision: number,
+  ): boolean {
+    if (revision !== sessionsRequestRevision) return false;
+    applySessions(next);
+    return true;
+  }
+
+  function invalidateSessionLifecycle(): void {
+    sessionLifecycleEpoch += 1;
+    sessionPollToken = null;
+  }
+
+  function sessionPollIsCurrent(token: {
+    epoch: number;
+    sessionId: string;
+    deckKey: string;
+  }): boolean {
+    return (
+      sessionPollToken === token &&
+      token.epoch === sessionLifecycleEpoch &&
+      token.sessionId === selectedSessionId &&
+      token.deckKey === model.exactKey &&
+      active
+    );
   }
 
   function applySessions(next: GenericDeckSessionsView): void {
@@ -813,10 +929,17 @@
           ) === model.exactKey,
       );
       const nextSelectedSessionId = foreground?.sessionId ?? "";
-      if (nextSelectedSessionId !== selectedSessionId) resetControlsScope();
+      if (nextSelectedSessionId !== selectedSessionId) {
+        invalidateSessionLifecycle();
+        resetControlsScope();
+      }
       selectedSessionId = nextSelectedSessionId;
       hydratedSessionId = "";
       sessionSnapshotValid = false;
+      capture = null;
+      recording = null;
+      spout = null;
+      outputFullscreen = null;
     }
   }
 
@@ -879,8 +1002,13 @@
     session: GenericDeckSessionView,
   ): Promise<void> {
     await run(async () => {
-      sessions = await genericDeckClient.foregroundSet(session.sessionId);
-      if (session.sessionId !== selectedSessionId) resetControlsScope();
+      const revision = beginSessionsRequest();
+      const next = await genericDeckClient.foregroundSet(session.sessionId);
+      if (!applySessionsResponse(next, revision)) return;
+      if (session.sessionId !== selectedSessionId) {
+        invalidateSessionLifecycle();
+        resetControlsScope();
+      }
       selectedSessionId = session.sessionId;
       hydratedSessionId = "";
       sessionSnapshotValid = false;
@@ -894,11 +1022,36 @@
   }
 
   async function closeSession(sessionId: string): Promise<void> {
-    await run(async () => {
+    if (closingSessionIds.has(sessionId)) return;
+    closingSessionIds = new Set([...closingSessionIds, sessionId]);
+    errorCode = "";
+    if (sessionId === selectedSessionId) {
+      invalidateSessionLifecycle();
+      resetControlsScope();
+    }
+    let closeError: unknown = null;
+    try {
       await genericDeckClient.close(sessionId);
-      applySessions(await genericDeckClient.sessionsGet());
-      message = `Warm session ${sessionId} closed explicitly.`;
-    });
+    } catch (error) {
+      closeError = error;
+    }
+    const revision = beginSessionsRequest();
+    try {
+      const next = await genericDeckClient.sessionsGet();
+      if (!applySessionsResponse(next, revision)) return;
+      if (!next.sessions.some((session) => session.sessionId === sessionId)) {
+        message = `Warm session ${sessionId} closed explicitly.`;
+        errorCode = "";
+        return;
+      }
+      if (closeError !== null) fail(closeError);
+    } catch (error) {
+      if (revision === sessionsRequestRevision) fail(closeError ?? error);
+    } finally {
+      const nextClosing = new Set(closingSessionIds);
+      nextClosing.delete(sessionId);
+      closingSessionIds = nextClosing;
+    }
   }
 
   async function runSessionAction(
@@ -919,7 +1072,7 @@
   }
 
   async function commitRoles(_roles: Record<string, number>): Promise<void> {
-    const wire = buildGenericDeckOpenDraft(model, draft, library.cartridges);
+    const wire = buildGenericDeckOpenDraft(model, draft, sourceCartridges);
     await runSessionAction((sessionId) =>
       genericDeckClient.rolesSet(sessionId, wire.roles),
     );
@@ -929,14 +1082,14 @@
     _playing: readonly boolean[],
     _loops: readonly boolean[],
   ): Promise<void> {
-    const wire = buildGenericDeckOpenDraft(model, draft, library.cartridges);
+    const wire = buildGenericDeckOpenDraft(model, draft, sourceCartridges);
     await runSessionAction((sessionId) =>
       genericDeckClient.transportSet(sessionId, wire.sourceTransport),
     );
   }
 
   async function commitSeed(_seed: number): Promise<void> {
-    const wire = buildGenericDeckOpenDraft(model, draft, library.cartridges);
+    const wire = buildGenericDeckOpenDraft(model, draft, sourceCartridges);
     await runSessionAction((sessionId) =>
       genericDeckClient.seedSet(sessionId, wire.seed),
     );
@@ -956,25 +1109,54 @@
 
   async function pollForegroundState(): Promise<void> {
     const sessionId = selectedSessionId;
-    if (sessionId === "" || busy) return;
+    if (sessionId === "" || busy || sessionPollToken !== null) return;
+    const token = {
+      epoch: sessionLifecycleEpoch,
+      sessionId,
+      deckKey: model.exactKey,
+    };
+    sessionPollToken = token;
     try {
       const outputPinKindBeforePoll = activeOutputPinKind();
-      applySession(await genericDeckClient.statusGet(sessionId));
-      capture = await genericDeckClient.captureStatusGet(sessionId);
-      recording = await genericDeckClient.recordingStatusGet(sessionId);
+      const nextSession = await genericDeckClient.statusGet(sessionId);
+      if (!sessionPollIsCurrent(token)) return;
+      applySession(nextSession);
+      const nextCapture = await genericDeckClient.captureStatusGet(sessionId);
+      if (!sessionPollIsCurrent(token)) return;
+      capture = nextCapture;
+      const nextRecording =
+        await genericDeckClient.recordingStatusGet(sessionId);
+      if (!sessionPollIsCurrent(token)) return;
+      recording = nextRecording;
       const outputPinKindAfterPoll = activeOutputPinKind();
       if (
         outputPinKindBeforePoll !== outputPinKindAfterPoll ||
         selectedSessionOutputPinKind() !== outputPinKindAfterPoll
       ) {
         await refreshSessions();
+        if (!sessionPollIsCurrent(token)) return;
       }
       await publishCompletedCapture(capture);
-      spout = await genericDeckClient.spoutStatusGet(sessionId);
-      outputFullscreen = await genericDeckClient.fullscreenStatusGet(sessionId);
+      if (!sessionPollIsCurrent(token)) return;
+      const nextSpout = await genericDeckClient.spoutStatusGet(sessionId);
+      if (!sessionPollIsCurrent(token)) return;
+      spout = nextSpout;
+      const nextFullscreen =
+        await genericDeckClient.fullscreenStatusGet(sessionId);
+      if (!sessionPollIsCurrent(token)) return;
+      outputFullscreen = nextFullscreen;
       if (spout !== null && !spoutNameDirty) spoutName = spout.requestedName;
     } catch (error) {
+      if (!sessionPollIsCurrent(token)) return;
+      if (commandErrorCode(error) === "session.not_found") {
+        invalidateSessionLifecycle();
+        await refreshSessions();
+        if (errorCode === "session.not_found") errorCode = "";
+        return;
+      }
       fail(error);
+    } finally {
+      if (sessionPollToken === token) sessionPollToken = null;
     }
   }
 
@@ -1012,8 +1194,138 @@
     }
     const key = `${completed.captureId ?? completed.cartridgeId}:${completed.archiveSha256}`;
     if (key === publishedCaptureKey) return;
+    const resolved = await invoke<(CartridgeView | null)[]>(
+      "library_resolve_preset_sources",
+      {
+        identities: [
+          {
+            cartridge_id: completed.cartridgeId,
+            archive_sha256: completed.archiveSha256,
+          },
+        ],
+      },
+    );
+    const capturedSource = resolved[0];
+    if (
+      capturedSource === null ||
+      capturedSource === undefined ||
+      capturedSource.cartridgeId !== completed.cartridgeId ||
+      capturedSource.archiveSha256 !== completed.archiveSha256
+    ) {
+      throw new Error(
+        "The completed capture is not yet available under its exact Library identity.",
+      );
+    }
+    const incoming = await librarySnapshot();
+    completedCaptureSource = capturedSource;
+    acceptLibrarySnapshot(incoming, [capturedSource], [
+      capturedSource.archiveSha256,
+    ]);
+    if (selectedCodec !== undefined && selectedProfile !== undefined) {
+      await refreshRuntimeOptionsInsideAction();
+    }
     publishedCaptureKey = key;
-    onLibraryChanged(await librarySnapshot());
+  }
+
+  async function useCompletedCapture(slotIndex: number): Promise<void> {
+    const capturedSource = completedCaptureSource;
+    const session = selectedSession;
+    if (
+      capturedSource === null ||
+      session === undefined ||
+      !selectedSessionReady ||
+      !captureReuseAvailable ||
+      !Number.isSafeInteger(slotIndex) ||
+      slotIndex < 0 ||
+      slotIndex >= model.slots
+    ) {
+      return;
+    }
+    await run(async () => {
+      invalidateSessionLifecycle();
+      const authoritative = await genericDeckClient.statusGet(
+        session.sessionId,
+      );
+      if (authoritative.sessionId !== session.sessionId) {
+        throw new Error(
+          "Source replacement status returned a different generic Deck session.",
+        );
+      }
+      const loadedDraft = genericDeckDraftFromSessionSnapshot(model, {
+        sources: authoritative.sources,
+        roles: authoritative.runtime.status.roles,
+        controls: authoritative.runtime.status.controls,
+        sourceTransport: authoritative.runtime.status.source_transport,
+        seed: authoritative.runtime.status.seed,
+      });
+      const nextDraft: DeckUiDraft = {
+        ...loadedDraft,
+        sourceArchiveSha256s: replaceDraftSource(
+          loadedDraft.sourceArchiveSha256s,
+          slotIndex,
+          capturedSource.archiveSha256,
+        ),
+      };
+      const selectedSources = selectedSourceSet(nextDraft);
+      if (selectedSources.length !== model.slots) {
+        throw new Error(
+          "Every Deck source slot must resolve to an exact available Library identity.",
+        );
+      }
+      const nextOptions = await genericDeckClient.runtimeOptions({
+        deckId: authoritative.deck.packageId,
+        deckVersion: authoritative.deck.packageVersion,
+        codecId: authoritative.codec.packageId,
+        codecVersion: authoritative.codec.packageVersion,
+        profileKey: authoritative.profileKey,
+        device: authoritative.device,
+        deviceOrdinal: authoritative.deviceOrdinal,
+        sources: availableSourceIdentities(),
+        selectedSources,
+      });
+      runtimeOptions = nextOptions;
+      if (nextOptions.reason !== "compatible") {
+        message = compatibilityReasonLabel(nextOptions.reason);
+        return;
+      }
+      const wire = buildGenericDeckOpenDraft(
+        model,
+        nextDraft,
+        sourceCartridges,
+      );
+      const replaced = await genericDeckClient.replaceSources(
+        authoritative.sessionId,
+        {
+          deckId: authoritative.deck.packageId,
+          deckVersion: authoritative.deck.packageVersion,
+          codecId: authoritative.codec.packageId,
+          codecVersion: authoritative.codec.packageVersion,
+          profileKey: authoritative.profileKey,
+          device: authoritative.device,
+          deviceOrdinal: authoritative.deviceOrdinal,
+          ...wire,
+        },
+      );
+      if (replaced.sessionId !== authoritative.sessionId) {
+        throw new Error(
+          "Source replacement returned a different generic Deck session.",
+        );
+      }
+      resetControlsScope();
+      draft = genericDeckDraftFromSessionSnapshot(model, {
+        sources: replaced.sources,
+        roles: replaced.runtime.status.roles,
+        controls: replaced.runtime.status.controls,
+        sourceTransport: replaced.runtime.status.source_transport,
+        seed: replaced.runtime.status.seed,
+      });
+      draftRevision += 1;
+      hydratedSessionId = replaced.sessionId;
+      sessionSnapshotValid = true;
+      acknowledgedControls = { ...draft.controls };
+      applySession(replaced);
+      message = `Captured cartridge loaded into slot ${String.fromCharCode(65 + slotIndex)} without closing the warm session.`;
+    });
   }
 
   async function recordingAction(): Promise<void> {
@@ -1066,8 +1378,8 @@
       const preset = buildGenericDeckPreset(
         model,
         draft,
-        library.cartridges,
-        library.deckSession.activeCollectionId,
+        sourceCartridges,
+        libraryView.deckSession.activeCollectionId,
       );
       const saved = await invoke<{ saved: boolean } | null>(
         "deck_generic_preset_save",
@@ -1128,7 +1440,11 @@
         sources as CartridgeView[],
       );
       draftRevision += 1;
-      onLibraryChanged(incoming);
+      acceptLibrarySnapshot(
+        incoming,
+        sources,
+        draft.sourceArchiveSha256s,
+      );
       presetMessage =
         "Exact preset v2 loaded as a draft; press Load exact Deck draft.";
       if (selectedProfile !== undefined) await refreshSourceEligibility();
@@ -1472,11 +1788,25 @@
 <section class="generic-workspace" aria-busy={busy || matrixBusy}>
   <section class="runtime-config" aria-label="Exact Deck and Codec selection">
     <header>
-      <div>
+      <div class="runtime-identity">
         <span>New warm-session negotiation</span>
         <strong>{model.deckId}@{model.deckVersion}</strong>
       </div>
-      <small>{message}</small>
+      <small class="runtime-message" title={message}>{message}</small>
+      <div class="preset-tools">
+        <strong>Preset v2</strong>
+        <button
+          type="button"
+          disabled={presetBusy || busy}
+          onclick={() => void loadPreset()}>Load</button
+        >
+        <button
+          type="button"
+          disabled={presetBusy || busy}
+          onclick={() => void savePreset()}>Save</button
+        >
+        <small title={presetMessage}>{presetMessage}</small>
+      </div>
     </header>
     <div class="config-grid">
       <label>
@@ -1529,37 +1859,50 @@
       </label>
     </div>
     {#if (runtimeOptions ?? discovery)?.externalAssets.length}
-      <div class="asset-grid" aria-label="External Codec assets">
-        {#each (runtimeOptions ?? discovery)?.externalAssets ?? [] as asset (asset.assetId)}
-          <article class:bound={asset.bound}>
-            <div>
-              <strong>{asset.displayName}</strong>
-              <small
-                >{asset.assetId} · {asset.required
-                  ? "required"
-                  : "optional"}</small
+      <details
+        class="asset-drawer"
+        open={(runtimeOptions ?? discovery)?.externalAssets.some(
+          (asset) => asset.required && !asset.bound,
+        )}
+      >
+        <summary>
+          Codec assets · {(runtimeOptions ?? discovery)?.externalAssets.filter(
+            (asset) => asset.bound,
+          ).length ?? 0}/{(runtimeOptions ?? discovery)?.externalAssets.length ??
+            0} bound
+        </summary>
+        <div class="asset-grid" aria-label="External Codec assets">
+          {#each (runtimeOptions ?? discovery)?.externalAssets ?? [] as asset (asset.assetId)}
+            <article class:bound={asset.bound}>
+              <div>
+                <strong>{asset.displayName}</strong>
+                <small
+                  >{asset.assetId} · {asset.required
+                    ? "required"
+                    : "optional"}</small
+                >
+                <small
+                  >{asset.bound
+                    ? `SHA-256 ${shortHash(asset.boundSha256 ?? "")}`
+                    : "Not bound"}</small
+                >
+              </div>
+              <button
+                type="button"
+                disabled={busy}
+                onclick={() => void selectExternalAsset(asset.assetId)}
+                >Choose file…</button
               >
-              <small
-                >{asset.bound
-                  ? `SHA-256 ${shortHash(asset.boundSha256 ?? "")}`
-                  : "Not bound"}</small
+              <button
+                type="button"
+                disabled={busy || !asset.bound}
+                onclick={() => void clearExternalAsset(asset.assetId)}
+                >Clear</button
               >
-            </div>
-            <button
-              type="button"
-              disabled={busy}
-              onclick={() => void selectExternalAsset(asset.assetId)}
-              >Choose file…</button
-            >
-            <button
-              type="button"
-              disabled={busy || !asset.bound}
-              onclick={() => void clearExternalAsset(asset.assetId)}
-              >Clear</button
-            >
-          </article>
-        {/each}
-      </div>
+            </article>
+          {/each}
+        </div>
+      </details>
     {/if}
     {#if errorCode !== ""}
       <p class="runtime-error" role="alert">
@@ -1568,8 +1911,8 @@
     {/if}
   </section>
 
-  <section class="session-rail" aria-label="Warm generic Deck sessions">
-    <header>
+  <details class="session-rail" aria-label="Warm generic Deck sessions">
+    <summary>
       <strong
         >Warm sessions {sessions.sessions
           .length}/{MAX_WARM_DECK_SESSIONS}</strong
@@ -1582,7 +1925,7 @@
           ? "Output lease unpinned"
           : `Pinned by ${sessions.outputPin.kind}`}</small
       >
-    </header>
+    </summary>
     <div class="session-list">
       {#each sessions.sessions as session (session.sessionId)}
         <article
@@ -1619,7 +1962,10 @@
           <button
             type="button"
             onclick={() => void closeSession(session.sessionId)}
-            disabled={busy}>Close</button
+            disabled={busy || closingSessionIds.has(session.sessionId)}
+            >{closingSessionIds.has(session.sessionId)
+              ? "Closing…"
+              : "Close"}</button
           >
         </article>
       {/each}
@@ -1637,87 +1983,7 @@
         {SESSION_PINNED_CODE} · capture or MP4 owns the foreground lease.
       </p>
     {/if}
-  </section>
-
-  <section class="host-tools" aria-label="Generic Deck host tools">
-    <div class="preset-tools">
-      <strong>Preset v2</strong>
-      <button
-        type="button"
-        disabled={presetBusy || busy}
-        onclick={() => void loadPreset()}>Load preset</button
-      >
-      <button
-        type="button"
-        disabled={presetBusy || busy}
-        onclick={() => void savePreset()}>Save preset</button
-      >
-      <small>{presetMessage}</small>
-    </div>
-    <div class="spout-tools">
-      <strong>Spout2 · {describeSpout(spout)}</strong>
-      <input
-        value={spoutName}
-        maxlength="255"
-        disabled={!spoutControlsFor(spout, busy).rename}
-        oninput={(event) => {
-          spoutName = event.currentTarget.value;
-          spoutNameDirty = true;
-        }}
-      />
-      <button
-        type="button"
-        disabled={!spoutControlsFor(spout, busy).rename ||
-          !spoutNameDirty ||
-          spoutName.trim() === ""}
-        onclick={() => void configureSpout(spoutName.trim(), null)}
-        >Apply name</button
-      >
-      <button
-        type="button"
-        disabled={!spoutControlsFor(spout, busy).toggle}
-        onclick={() => void configureSpout(null, !(spout?.enabled ?? false))}
-        >{spout?.enabled ? "Disable sender" : "Enable sender"}</button
-      >
-      <small
-        >{spout === null
-          ? "No foreground output"
-          : `${spout.width}×${spout.height} · ${spout.submittedFrames} frames`}</small
-      >
-    </div>
-    <div class="recording-tools">
-      <strong>Decoded MP4 · video-only H.264</strong>
-      <button
-        type="button"
-        disabled={!recordingAvailable ||
-          (!decodedRecordingControls(
-            recording ?? IDLE_DECODED_RECORDING,
-            selectedSession?.foreground === true,
-            busy,
-          ).start &&
-            !decodedRecordingControls(
-              recording ?? IDLE_DECODED_RECORDING,
-              selectedSession?.foreground === true,
-              busy,
-            ).stop)}
-        onclick={() => void recordingAction()}
-        >{decodedRecordingControls(
-          recording ?? IDLE_DECODED_RECORDING,
-          selectedSession?.foreground === true,
-          busy,
-        ).stop
-          ? "Stop MP4"
-          : "Record MP4…"}</button
-      >
-      <small
-        >{captureIsActive
-          ? "Latent capture pins the foreground output lease."
-          : describeDecodedRecording(
-              recording ?? IDLE_DECODED_RECORDING,
-            )}</small
-      >
-    </div>
-  </section>
+  </details>
 
   {#key `${model.exactKey}:${draftRevision}`}
     <DeckFaceplateRenderer
@@ -1740,6 +2006,33 @@
       liveCaptureActive={capture?.mode === "live_capture" &&
         capture.state === "capturing"}
       {captureUnavailableReason}
+       {capturedSourceAvailable}
+       {captureReuseAvailable}
+       {sourceGeometryWarning}
+      mp4Available={recordingAvailable &&
+        (decodedRecordingControls(
+          recording ?? IDLE_DECODED_RECORDING,
+          selectedSession?.foreground === true,
+          busy,
+        ).start ||
+          decodedRecordingControls(
+            recording ?? IDLE_DECODED_RECORDING,
+            selectedSession?.foreground === true,
+            busy,
+          ).stop)}
+      mp4Active={decodedRecordingControls(
+        recording ?? IDLE_DECODED_RECORDING,
+        selectedSession?.foreground === true,
+        busy,
+      ).stop}
+      mp4Status={captureIsActive
+        ? "Latent capture pins the foreground output lease."
+        : describeDecodedRecording(recording ?? IDLE_DECODED_RECORDING)}
+      {spoutName}
+      spoutStatus={describeSpout(spout)}
+      spoutEnabled={spout?.enabled ?? false}
+      spoutRenameAvailable={spoutControlsFor(spout, busy).rename}
+      spoutToggleAvailable={spoutControlsFor(spout, busy).toggle}
       {outputFullscreen}
       onDraftChange={updateDraft}
       onLoad={openDeck}
@@ -1751,6 +2044,14 @@
       onTransportCommit={commitTransport}
       onSeedCommit={commitSeed}
       onCapture={captureAction}
+      onUseCapture={useCompletedCapture}
+      onMp4Toggle={recordingAction}
+      onSpoutNameChange={(name) => {
+        spoutName = name;
+        spoutNameDirty = true;
+      }}
+      onSpoutNameCommit={(name) => configureSpout(name.trim(), null)}
+      onSpoutToggle={(enabled) => configureSpout(null, enabled)}
       onFullscreenToggle={toggleFullscreen}
       onMonitorAnchor={monitorAnchor}
     />
@@ -1760,63 +2061,134 @@
 <style>
   .generic-workspace {
     display: grid;
-    gap: 8px;
+    gap: 6px;
   }
 
   .runtime-config,
-  .session-rail,
-  .host-tools {
-    border: 1px solid #465149;
+  .session-rail {
+    border: 1px solid #3e4a43;
     color: #dce4de;
-    background: #111713;
+    background: #0e1411;
+    box-shadow: inset 0 1px rgb(255 255 255 / 3%);
   }
 
   .runtime-config > header,
-  .session-rail > header,
-  .host-tools,
   .config-grid,
   .asset-grid,
   .session-list {
-    display: flex;
+    display: grid;
     gap: 8px;
-    padding: 8px 10px;
+    padding: 7px 9px;
   }
 
-  .runtime-config > header,
-  .session-rail > header {
+  .runtime-config > header {
+    grid-template-columns: minmax(230px, auto) minmax(180px, 1fr) auto;
     align-items: center;
-    justify-content: space-between;
     border-bottom: 1px solid #39443d;
   }
 
-  .runtime-config > header div,
+  .runtime-identity,
   .runtime-config label,
-  .asset-grid article > div,
-  .preset-tools,
-  .spout-tools,
-  .recording-tools {
+  .asset-grid article > div {
     display: grid;
-    gap: 4px;
+    min-width: 0;
+    gap: 3px;
+  }
+
+  .runtime-identity strong {
+    overflow: hidden;
+    color: #b9d7c0;
+    font-size: 0.72rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .runtime-config span,
   .runtime-config small,
   .session-rail span,
-  .session-rail small,
-  .host-tools small {
+  .session-rail small {
     color: #88948c;
     font-size: 0.62rem;
   }
 
-  .config-grid {
+  .runtime-message {
+    min-width: 0;
+    overflow: hidden;
+    text-align: center;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .preset-tools {
     display: grid;
+    grid-template-columns: auto auto auto;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .preset-tools small {
+    grid-column: 1 / -1;
+    max-width: 240px;
+    overflow: hidden;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .config-grid {
     grid-template-columns: repeat(4, minmax(160px, 1fr));
+  }
+
+  .config-grid label > span {
+    overflow: hidden;
+    letter-spacing: 0.04em;
+    text-overflow: ellipsis;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  .config-grid select,
+  .config-grid input {
+    min-width: 0;
+    height: 30px;
+    border: 1px solid #4c5951;
+    border-radius: 2px;
+    padding: 4px 7px;
+    color: #dce4de;
+    background: #0a0f0c;
+    font-size: 0.68rem;
+  }
+
+  .asset-drawer,
+  .session-rail {
+    min-width: 0;
+  }
+
+  .asset-drawer > summary,
+  .session-rail > summary {
+    min-height: 32px;
+    padding: 7px 10px;
+    color: #9eaaa1;
+    background: #141b16;
+    cursor: pointer;
+    font-size: 0.67rem;
+    user-select: none;
+  }
+
+  .session-rail > summary {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .session-rail > summary small {
+    margin-left: auto;
   }
 
   .asset-grid,
   .session-list {
-    display: grid;
     grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+    border-top: 1px solid #303a34;
   }
 
   .asset-grid article,
@@ -1827,6 +2199,13 @@
     border: 1px solid #364139;
     padding: 7px;
     background: #0d120f;
+  }
+
+  .asset-grid article small,
+  .session-select small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .asset-grid article.bound,
@@ -1855,27 +2234,16 @@
     font-size: 0.68rem;
   }
 
-  .host-tools {
-    display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
-  }
-
-  .preset-tools,
-  .spout-tools,
-  .recording-tools {
-    grid-template-columns: auto auto auto minmax(0, 1fr);
-    align-items: center;
-  }
-
   @media (max-width: 1180px) {
-    .config-grid,
-    .host-tools {
-      grid-template-columns: 1fr 1fr;
+    .runtime-config > header {
+      grid-template-columns: minmax(220px, 1fr) auto;
     }
 
-    .preset-tools,
-    .spout-tools,
-    .recording-tools {
+    .runtime-message {
+      display: none;
+    }
+
+    .config-grid {
       grid-template-columns: 1fr 1fr;
     }
   }

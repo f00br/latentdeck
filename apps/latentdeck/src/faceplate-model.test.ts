@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   FaceplateContractError,
+  isFaceplateWidgetVisible,
   parseFaceplateDefinition,
   validateFaceplateAgainstDeck,
   type FaceplateDeckContract,
@@ -102,6 +103,64 @@ function d2Faceplate(): object {
   };
 }
 
+function d2FaceplateV2(): {
+  schema_version: number;
+  title: string;
+  sections: Array<{
+    section_id: string;
+    title: string;
+    region: string;
+    columns: number;
+    widgets: Array<Record<string, unknown>>;
+  }>;
+} {
+  const source = d2Faceplate() as {
+    schema_version: number;
+    sections: Array<{
+      section_id: string;
+      title: string;
+      widgets: Array<Record<string, unknown>>;
+    }>;
+  };
+  source.schema_version = 2;
+  const runtime = source.sections[2];
+  const capture = runtime.widgets.find((widget) => widget.kind === "capture")!;
+  const monitor = runtime.widgets.find((widget) => widget.kind === "monitor")!;
+  return {
+    schema_version: source.schema_version,
+    title: "D2",
+    sections: [
+      ...source.sections.slice(0, 2).map((section) => ({
+        ...section,
+        region: "controls",
+        columns: 2,
+      })),
+      {
+        ...runtime,
+        region: "controls",
+        columns: 2,
+        widgets: runtime.widgets.filter(
+          (widget) => widget.kind !== "capture" && widget.kind !== "monitor",
+        ),
+      },
+      {
+        section_id: "actions",
+        title: "Actions",
+        region: "actions",
+        columns: 1,
+        widgets: [capture],
+      },
+      {
+        section_id: "output",
+        title: "Output",
+        region: "output",
+        columns: 1,
+        widgets: [monitor],
+      },
+    ],
+  };
+}
+
 describe("closed declarative Deck faceplates", () => {
   it("parses and cross-checks an exact host-rendered D2 surface", () => {
     const faceplate = parseFaceplateDefinition(d2Faceplate());
@@ -182,6 +241,109 @@ describe("closed declarative Deck faceplates", () => {
     ).toThrowError(
       expect.objectContaining<Partial<FaceplateContractError>>({
         code: "faceplate.control_mismatch",
+      }),
+    );
+  });
+
+  it("supports bounded v2 visibility predicates without removing control bindings", () => {
+    const source = d2FaceplateV2() as {
+      schema_version: number;
+      sections: Array<{ widgets: Array<Record<string, unknown>> }>;
+    };
+    source.sections[1].widgets[0].visible_when = [
+      { control_id: "routing", one_of: ["donor"] },
+    ];
+
+    const faceplate = parseFaceplateDefinition(source);
+    expect(() =>
+      validateFaceplateAgainstDeck(faceplate, D2_DECK),
+    ).not.toThrow();
+    const mix = faceplate.sections[1].widgets[0];
+    expect(isFaceplateWidgetVisible(mix, { routing: "carrier" })).toBe(false);
+    expect(isFaceplateWidgetVisible(mix, { routing: "donor" })).toBe(true);
+    expect(
+      faceplate.sections.flatMap((section) => section.widgets),
+    ).toHaveLength(10);
+  });
+
+  it("keeps v1 closed and rejects unsafe or invalid v2 predicates", () => {
+    const v1 = d2Faceplate() as {
+      schema_version: number;
+      sections: Array<{ widgets: Array<Record<string, unknown>> }>;
+    };
+    v1.sections[1].widgets[0].visible_when = [
+      { control_id: "routing", one_of: ["donor"] },
+    ];
+    expect(() => parseFaceplateDefinition(v1)).toThrowError(
+      expect.objectContaining<Partial<FaceplateContractError>>({
+        code: "faceplate.closed_schema",
+      }),
+    );
+
+    const unknownControl = d2FaceplateV2() as {
+      schema_version: number;
+      sections: Array<{ widgets: Array<Record<string, unknown>> }>;
+    };
+    unknownControl.sections[1].widgets[0].visible_when = [
+      { control_id: "missing", one_of: ["donor"] },
+    ];
+    expect(() =>
+      validateFaceplateAgainstDeck(
+        parseFaceplateDefinition(unknownControl),
+        D2_DECK,
+      ),
+    ).toThrowError(
+      expect.objectContaining<Partial<FaceplateContractError>>({
+        code: "faceplate.visibility_mismatch",
+      }),
+    );
+
+    const invalidOption = d2FaceplateV2() as {
+      schema_version: number;
+      sections: Array<{ widgets: Array<Record<string, unknown>> }>;
+    };
+    invalidOption.sections[1].widgets[0].visible_when = [
+      { control_id: "routing", one_of: ["not-an-option"] },
+    ];
+    expect(() =>
+      validateFaceplateAgainstDeck(
+        parseFaceplateDefinition(invalidOption),
+        D2_DECK,
+      ),
+    ).toThrowError(
+      expect.objectContaining<Partial<FaceplateContractError>>({
+        code: "faceplate.visibility_mismatch",
+      }),
+    );
+
+    const numericControl = d2FaceplateV2() as {
+      schema_version: number;
+      sections: Array<{ widgets: Array<Record<string, unknown>> }>;
+    };
+    numericControl.sections[1].widgets[2].visible_when = [
+      { control_id: "mix", one_of: [true] },
+    ];
+    expect(() =>
+      validateFaceplateAgainstDeck(
+        parseFaceplateDefinition(numericControl),
+        D2_DECK,
+      ),
+    ).toThrowError(
+      expect.objectContaining<Partial<FaceplateContractError>>({
+        code: "faceplate.visibility_mismatch",
+      }),
+    );
+
+    const openPredicate = d2FaceplateV2() as {
+      schema_version: number;
+      sections: Array<{ widgets: Array<Record<string, unknown>> }>;
+    };
+    openPredicate.sections[1].widgets[0].visible_when = [
+      { control_id: "routing", one_of: ["donor"], script: "run()" },
+    ];
+    expect(() => parseFaceplateDefinition(openPredicate)).toThrowError(
+      expect.objectContaining<Partial<FaceplateContractError>>({
+        code: "faceplate.closed_schema",
       }),
     );
   });

@@ -99,7 +99,7 @@ describe("Deck preset model", () => {
     expect(preset).toMatchObject({
       schema_version: "2.0.0",
       deck_id: D2_DECK_ID,
-      deck_version: "0.2.0",
+      deck_version: "0.2.1",
       roles: { carrier: 1, donor: 2 },
     });
     expect(preset.controls.xs5_routing).toEqual({

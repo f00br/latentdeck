@@ -67,7 +67,7 @@ def context(
 
 
 def test_bundled_deck_identity_is_exact_and_versioned_side_by_side() -> None:
-    assert (DECK_ID, DECK_VERSION) == ("org.latentdeck.deck.d2", "0.2.0")
+    assert (DECK_ID, DECK_VERSION) == ("org.latentdeck.deck.d2", "0.2.1")
 
 
 def test_seeded_h3_profile_uses_the_authoritative_entrypoint_deterministically() -> None:

@@ -45,9 +45,10 @@ use generic_deck_state::{
     deck_generic_preset_load, deck_generic_preset_save, deck_generic_process_once,
     deck_generic_recording_start, deck_generic_recording_status_get, deck_generic_recording_stop,
     deck_generic_reset, deck_generic_roles_set, deck_generic_runtime_options,
-    deck_generic_seed_set, deck_generic_sessions_get, deck_generic_spout_configure,
-    deck_generic_spout_status_get, deck_generic_status_get, deck_generic_transport_set,
-    deck_generic_viewport_session_begin, deck_generic_viewport_set_bounds,
+    deck_generic_seed_set, deck_generic_sessions_get, deck_generic_sources_replace,
+    deck_generic_spout_configure, deck_generic_spout_status_get, deck_generic_status_get,
+    deck_generic_transport_set, deck_generic_viewport_session_begin,
+    deck_generic_viewport_set_bounds,
 };
 use library_state::{
     AppState, database_path, library_activate_collection_snapshot, library_add_membership,
@@ -244,6 +245,7 @@ fn main() {
             deck_generic_external_asset_select,
             deck_generic_external_asset_clear,
             deck_generic_open,
+            deck_generic_sources_replace,
             deck_generic_sessions_get,
             deck_generic_status_get,
             deck_generic_process_once,

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import faceplateRenderer from "./DeckFaceplateRenderer.svelte?raw";
 import genericWorkspace from "./GenericDeckWorkspace.svelte?raw";
+import recordingModel from "./recording-model.ts?raw";
 import {
   decodedRecordingControls,
   describeDecodedRecording,
@@ -57,8 +59,9 @@ describe("decoded MP4 recording policy", () => {
   it("wires one session-scoped recorder into the generic Deck workspace", () => {
     expect(genericWorkspace).toContain("recordingStatusGet(sessionId)");
     expect(genericWorkspace).toContain("recordingAction()");
-    expect(genericWorkspace).toContain("Record MP4");
-    expect(genericWorkspace).toContain("video-only H.264");
+    expect(faceplateRenderer).toContain("Record MP4");
+    expect(genericWorkspace).toContain("onMp4Toggle={recordingAction}");
+    expect(recordingModel).toContain("video-only H.264");
     expect(genericWorkspace).toContain(
       "$: recordingIsActive = recordingActive(recording)",
     );

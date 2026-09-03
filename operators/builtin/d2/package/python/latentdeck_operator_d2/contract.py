@@ -8,7 +8,7 @@ from dataclasses import dataclass, fields
 from enum import StrEnum
 
 DECK_ID = "org.latentdeck.deck.d2"
-DECK_VERSION = "0.2.0"
+DECK_VERSION = "0.2.1"
 OPERATOR_ID = "org.latentdeck.builtin.ld_d2"
 OPERATOR_VERSION = "0.2.0"
 MAX_SPATIAL_TOKENS = 4096

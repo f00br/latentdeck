@@ -92,8 +92,9 @@ describe("latest Library snapshot requests", () => {
     expect(appSource).toContain("onLibraryChanged={acceptDeckLibrary}");
     expect(workspaceSource).toContain("publishCompletedCapture(capture)");
     expect(workspaceSource).toContain(
-      "onLibraryChanged(await librarySnapshot())",
+      '"library_resolve_preset_sources"',
     );
-    expect(workspaceSource).toContain("onLibraryChanged(incoming)");
+    expect(workspaceSource).toContain("acceptLibrarySnapshot(incoming");
+    expect(workspaceSource).toContain("onLibraryChanged(next)");
   });
 });

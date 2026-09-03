@@ -58,8 +58,8 @@ describe("runtime Deck UI catalog", () => {
     });
 
     expect(catalog.decks.map((deck) => deck.exactKey)).toEqual([
-      "org.latentdeck.deck.d2@0.2.0",
-      "org.latentdeck.deck.q4@0.2.0",
+      "org.latentdeck.deck.d2@0.2.1",
+      "org.latentdeck.deck.q4@0.2.1",
     ]);
     expect(catalog.decks[0].faceplate.title).toBe("LatentDeck D2");
     expect(

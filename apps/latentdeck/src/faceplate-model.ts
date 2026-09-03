@@ -1,10 +1,18 @@
-export const FACEPLATE_SCHEMA_VERSION = 1 as const;
+export const FACEPLATE_SCHEMA_VERSION = 2 as const;
+export type FaceplateSchemaVersion = 1 | typeof FACEPLATE_SCHEMA_VERSION;
 
 export type FaceplateCaptureMode = "snapshot" | "live_capture";
+export type FaceplateSectionRegion = "output" | "actions" | "controls";
+
+export interface FaceplateVisibilityPredicate {
+  control_id: string;
+  one_of: readonly (string | boolean)[];
+}
 
 interface FaceplateWidgetBase {
   id: string;
   label: string;
+  visible_when?: readonly FaceplateVisibilityPredicate[];
 }
 
 export interface SourcePickerWidget extends FaceplateWidgetBase {
@@ -76,11 +84,13 @@ export type FaceplateWidget =
 export interface FaceplateSection {
   section_id: string;
   title: string;
+  region?: FaceplateSectionRegion;
+  columns?: number;
   widgets: readonly FaceplateWidget[];
 }
 
 export interface FaceplateDefinition {
-  schema_version: typeof FACEPLATE_SCHEMA_VERSION;
+  schema_version: FaceplateSchemaVersion;
   title: string;
   sections: readonly FaceplateSection[];
 }
@@ -129,13 +139,17 @@ export class FaceplateContractError extends Error {
 export function parseFaceplateDefinition(value: unknown): FaceplateDefinition {
   const root = record(value, "");
   exactKeys(root, ["schema_version", "title", "sections"], "");
-  if (root.schema_version !== FACEPLATE_SCHEMA_VERSION) {
+  if (
+    root.schema_version !== 1 &&
+    root.schema_version !== FACEPLATE_SCHEMA_VERSION
+  ) {
     fail(
       "faceplate.unsupported_schema",
       "/schema_version",
       "Unsupported faceplate schema.",
     );
   }
+  const schemaVersion = root.schema_version as FaceplateSchemaVersion;
   const sections = array(root.sections, "/sections");
   if (sections.length < 1 || sections.length > MAX_SECTIONS) {
     fail(
@@ -150,7 +164,12 @@ export function parseFaceplateDefinition(value: unknown): FaceplateDefinition {
   const parsedSections = sections.map((section, sectionIndex) => {
     const pointer = `/sections/${sectionIndex}`;
     const item = record(section, pointer);
-    exactKeys(item, ["section_id", "title", "widgets"], pointer);
+    exactKeys(
+      item,
+      ["section_id", "title", "widgets"],
+      pointer,
+      schemaVersion === FACEPLATE_SCHEMA_VERSION ? ["region", "columns"] : [],
+    );
     const sectionId = identifier(item.section_id, `${pointer}/section_id`);
     unique(sectionIds, sectionId, `${pointer}/section_id`, "section");
     const widgets = array(item.widgets, `${pointer}/widgets`);
@@ -162,19 +181,29 @@ export function parseFaceplateDefinition(value: unknown): FaceplateDefinition {
         "Faceplate widget count is out of bounds.",
       );
     }
+    const region =
+      item.region === undefined
+        ? undefined
+        : sectionRegion(item.region, `${pointer}/region`);
+    const columns =
+      item.columns === undefined
+        ? undefined
+        : integer(item.columns, `${pointer}/columns`, 1, 4);
     return {
       section_id: sectionId,
       title: text(item.title, `${pointer}/title`),
+      ...(region === undefined ? {} : { region }),
+      ...(columns === undefined ? {} : { columns }),
       widgets: widgets.map((widget, widgetIndex) => {
         const widgetPointer = `${pointer}/widgets/${widgetIndex}`;
-        const parsed = parseWidget(widget, widgetPointer);
+        const parsed = parseWidget(widget, widgetPointer, schemaVersion);
         unique(widgetIds, parsed.id, `${widgetPointer}/id`, "widget");
         return parsed;
       }),
     } satisfies FaceplateSection;
   });
   return {
-    schema_version: FACEPLATE_SCHEMA_VERSION,
+    schema_version: schemaVersion,
     title: text(root.title, "/title"),
     sections: parsedSections,
   };
@@ -219,9 +248,48 @@ export function validateFaceplateAgainstDeck(
   let seedCount = 0;
   let captureCount = 0;
   let monitorCount = 0;
+  let outputRegionCount = 0;
   for (const [sectionIndex, section] of faceplate.sections.entries()) {
+    if (faceplate.schema_version === FACEPLATE_SCHEMA_VERSION) {
+      if (section.region === "output") outputRegionCount += 1;
+      if (section.region === undefined || section.columns === undefined) {
+        fail(
+          "faceplate.layout_mismatch",
+          `/sections/${sectionIndex}`,
+          "Faceplate schema v2 sections require a bounded region and column count.",
+        );
+      }
+    }
     for (const [widgetIndex, widget] of section.widgets.entries()) {
       const pointer = `/sections/${sectionIndex}/widgets/${widgetIndex}`;
+      validateVisibility(widget, controls, pointer);
+      if (faceplate.schema_version === FACEPLATE_SCHEMA_VERSION) {
+        if (widget.kind === "monitor" && section.region !== "output") {
+          fail(
+            "faceplate.layout_mismatch",
+            pointer,
+            "The monitor widget must occupy the output region.",
+          );
+        }
+        if (widget.kind === "capture" && section.region !== "actions") {
+          fail(
+            "faceplate.layout_mismatch",
+            pointer,
+            "The capture widget must occupy the actions region.",
+          );
+        }
+        if (
+          widget.kind !== "monitor" &&
+          widget.kind !== "capture" &&
+          section.region !== "controls"
+        ) {
+          fail(
+            "faceplate.layout_mismatch",
+            pointer,
+            "Interactive faceplate controls must occupy the controls region.",
+          );
+        }
+      }
       switch (widget.kind) {
         case "source_picker":
           if (widget.slot_index >= deck.slots) {
@@ -391,18 +459,58 @@ export function validateFaceplateAgainstDeck(
       "Faceplate may contain at most one capture widget.",
     );
   }
+  if (
+    faceplate.schema_version === FACEPLATE_SCHEMA_VERSION &&
+    outputRegionCount !== 1
+  ) {
+    fail(
+      "faceplate.layout_mismatch",
+      "/sections",
+      "Faceplate schema v2 requires exactly one output region.",
+    );
+  }
 }
 
-function parseWidget(value: unknown, pointer: string): FaceplateWidget {
+export function isFaceplateWidgetVisible(
+  widget: FaceplateWidget,
+  controls: Readonly<Record<string, unknown>>,
+): boolean {
+  return (
+    widget.visible_when?.every((predicate) =>
+      predicate.one_of.some(
+        (expected) => controls[predicate.control_id] === expected,
+      ),
+    ) ?? true
+  );
+}
+
+function parseWidget(
+  value: unknown,
+  pointer: string,
+  schemaVersion: FaceplateSchemaVersion,
+): FaceplateWidget {
   const widget = record(value, pointer);
   const kind = widget.kind;
+  const visibility = parseVisibility(
+    widget.visible_when,
+    `${pointer}/visible_when`,
+    schemaVersion,
+  );
   const base = {
     id: identifier(widget.id, `${pointer}/id`),
     label: text(widget.label, `${pointer}/label`),
+    ...(visibility === undefined ? {} : { visible_when: visibility }),
   };
+  const optionalKeys =
+    schemaVersion === FACEPLATE_SCHEMA_VERSION ? ["visible_when"] : [];
   switch (kind) {
     case "source_picker":
-      exactKeys(widget, ["id", "kind", "label", "slot_index"], pointer);
+      exactKeys(
+        widget,
+        ["id", "kind", "label", "slot_index"],
+        pointer,
+        optionalKeys,
+      );
       return {
         ...base,
         kind,
@@ -414,6 +522,7 @@ function parseWidget(value: unknown, pointer: string): FaceplateWidget {
         widget,
         ["id", "kind", "label", "control_id", "minimum", "maximum", "step"],
         pointer,
+        optionalKeys,
       );
       const minimum = finite(widget.minimum, `${pointer}/minimum`);
       const maximum = finite(widget.maximum, `${pointer}/maximum`);
@@ -435,7 +544,12 @@ function parseWidget(value: unknown, pointer: string): FaceplateWidget {
       };
     }
     case "toggle":
-      exactKeys(widget, ["id", "kind", "label", "control_id"], pointer);
+      exactKeys(
+        widget,
+        ["id", "kind", "label", "control_id"],
+        pointer,
+        optionalKeys,
+      );
       return {
         ...base,
         kind,
@@ -446,6 +560,7 @@ function parseWidget(value: unknown, pointer: string): FaceplateWidget {
         widget,
         ["id", "kind", "label", "control_id", "options"],
         pointer,
+        optionalKeys,
       );
       const options = array(widget.options, `${pointer}/options`).map(
         (option, index) => {
@@ -477,7 +592,12 @@ function parseWidget(value: unknown, pointer: string): FaceplateWidget {
       };
     }
     case "role_editor":
-      exactKeys(widget, ["id", "kind", "label", "role_ids"], pointer);
+      exactKeys(
+        widget,
+        ["id", "kind", "label", "role_ids"],
+        pointer,
+        optionalKeys,
+      );
       return {
         ...base,
         kind,
@@ -495,6 +615,7 @@ function parseWidget(value: unknown, pointer: string): FaceplateWidget {
           "vertex_role_ids",
         ],
         pointer,
+        optionalKeys,
       );
       const roles = identifiers(
         widget.vertex_role_ids,
@@ -522,7 +643,12 @@ function parseWidget(value: unknown, pointer: string): FaceplateWidget {
       };
     }
     case "transport":
-      exactKeys(widget, ["id", "kind", "label", "slot_indices"], pointer);
+      exactKeys(
+        widget,
+        ["id", "kind", "label", "slot_indices"],
+        pointer,
+        optionalKeys,
+      );
       return {
         ...base,
         kind,
@@ -535,10 +661,15 @@ function parseWidget(value: unknown, pointer: string): FaceplateWidget {
       };
     case "seed":
     case "monitor":
-      exactKeys(widget, ["id", "kind", "label"], pointer);
+      exactKeys(widget, ["id", "kind", "label"], pointer, optionalKeys);
       return { ...base, kind };
     case "capture": {
-      exactKeys(widget, ["id", "kind", "label", "modes"], pointer);
+      exactKeys(
+        widget,
+        ["id", "kind", "label", "modes"],
+        pointer,
+        optionalKeys,
+      );
       const modes = array(widget.modes, `${pointer}/modes`);
       if (
         modes.length < 1 ||
@@ -563,11 +694,75 @@ function parseWidget(value: unknown, pointer: string): FaceplateWidget {
   }
 }
 
+function parseVisibility(
+  value: unknown,
+  pointer: string,
+  schemaVersion: FaceplateSchemaVersion,
+): FaceplateVisibilityPredicate[] | undefined {
+  if (value === undefined) return undefined;
+  if (schemaVersion !== FACEPLATE_SCHEMA_VERSION) {
+    fail(
+      "faceplate.closed_schema",
+      pointer,
+      "Visibility predicates require faceplate schema v2.",
+    );
+  }
+  const predicates = array(value, pointer);
+  if (predicates.length < 1 || predicates.length > 8) {
+    fail(
+      "faceplate.limit_exceeded",
+      pointer,
+      "Visibility predicate count is out of bounds.",
+    );
+  }
+  return predicates.map((predicate, index) => {
+    const predicatePointer = `${pointer}/${index}`;
+    const item = record(predicate, predicatePointer);
+    exactKeys(item, ["control_id", "one_of"], predicatePointer);
+    const values = array(item.one_of, `${predicatePointer}/one_of`);
+    if (
+      values.length < 1 ||
+      values.length > 16 ||
+      values.some(
+        (candidate) =>
+          typeof candidate !== "boolean" &&
+          (typeof candidate !== "string" || !IDENTIFIER.test(candidate)),
+      ) ||
+      new Set(values.map((candidate) => JSON.stringify(candidate))).size !==
+        values.length
+    ) {
+      fail(
+        "faceplate.invalid_widget",
+        `${predicatePointer}/one_of`,
+        "Visibility values are empty, duplicated, unsafe, or oversized.",
+      );
+    }
+    return {
+      control_id: identifier(item.control_id, `${predicatePointer}/control_id`),
+      one_of: values as (string | boolean)[],
+    };
+  });
+}
+
 function record(value: unknown, pointer: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     fail("faceplate.invalid_json", pointer, "Expected a JSON object.");
   }
   return value as Record<string, unknown>;
+}
+
+function sectionRegion(
+  value: unknown,
+  pointer: string,
+): FaceplateSectionRegion {
+  if (value !== "output" && value !== "actions" && value !== "controls") {
+    fail(
+      "faceplate.invalid_layout",
+      pointer,
+      "Section region must be output, actions, or controls.",
+    );
+  }
+  return value;
 }
 
 function array(value: unknown, pointer: string): unknown[] {
@@ -578,20 +773,66 @@ function array(value: unknown, pointer: string): unknown[] {
 
 function exactKeys(
   value: Record<string, unknown>,
-  allowed: readonly string[],
+  required: readonly string[],
   pointer: string,
+  optional: readonly string[] = [],
 ): void {
-  const allowedSet = new Set(allowed);
+  const allowedSet = new Set([...required, ...optional]);
   const actual = Object.keys(value);
   if (
     actual.some((key) => !allowedSet.has(key)) ||
-    allowed.some((key) => !Object.hasOwn(value, key))
+    required.some((key) => !Object.hasOwn(value, key))
   ) {
     fail(
       "faceplate.closed_schema",
       pointer,
       "Object fields do not match the closed faceplate schema.",
     );
+  }
+}
+
+function validateVisibility(
+  widget: FaceplateWidget,
+  controls: ReadonlyMap<string, DeckControlContract>,
+  pointer: string,
+): void {
+  for (const [predicateIndex, predicate] of (
+    widget.visible_when ?? []
+  ).entries()) {
+    const predicatePointer = `${pointer}/visible_when/${predicateIndex}`;
+    const control = controls.get(predicate.control_id);
+    if (control === undefined) {
+      fail(
+        "faceplate.visibility_mismatch",
+        `${predicatePointer}/control_id`,
+        "Visibility predicate references an absent operator control.",
+      );
+    }
+    if (control.value_type === "enum") {
+      if (
+        predicate.one_of.some(
+          (value) =>
+            typeof value !== "string" || !control.options.includes(value),
+        )
+      ) {
+        fail(
+          "faceplate.visibility_mismatch",
+          `${predicatePointer}/one_of`,
+          "Visibility predicate contains an invalid enum option.",
+        );
+      }
+      continue;
+    }
+    if (
+      control.value_type !== "boolean" ||
+      predicate.one_of.some((value) => typeof value !== "boolean")
+    ) {
+      fail(
+        "faceplate.visibility_mismatch",
+        `${predicatePointer}/control_id`,
+        "Visibility predicates may reference only matching enum or boolean controls.",
+      );
+    }
   }
 }
 

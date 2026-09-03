@@ -188,6 +188,29 @@ impl SessionBroker {
         Ok(())
     }
 
+    pub fn replace_worker(
+        &mut self,
+        session_id: &SessionId,
+        worker_id: WorkerId,
+    ) -> Result<WarmSession, BrokerError> {
+        if !self.sessions.contains_key(session_id) {
+            return Err(BrokerError::SessionNotFound);
+        }
+        if self
+            .sessions
+            .values()
+            .any(|session| session.worker_id == worker_id)
+        {
+            return Err(BrokerError::WorkerAlreadyAssigned);
+        }
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or(BrokerError::SessionNotFound)?;
+        session.worker_id = worker_id;
+        Ok(session.clone())
+    }
+
     pub fn close_session(&mut self, session_id: &SessionId) -> Result<WarmSession, BrokerError> {
         if !self.sessions.contains_key(session_id) {
             return Err(BrokerError::SessionNotFound);

@@ -19,13 +19,12 @@ describe("LatentDeck minimum-window layout contract", () => {
     expect(tauriConfig.app.windows[0]?.minWidth).toBe(960);
   });
 
-  it("collapses generic host tools before the 960px app minimum", () => {
+  it("collapses the compact technical rack before the app minimum", () => {
     const responsive = mediaBlock(workspaceSource, 1180);
-    expect(responsive).toContain(".host-tools");
+    expect(responsive).toContain(".runtime-config > header");
+    expect(responsive).toContain(".runtime-message");
+    expect(responsive).toContain(".config-grid");
     expect(responsive).toContain("grid-template-columns: 1fr 1fr;");
-    expect(responsive).toContain(".preset-tools");
-    expect(responsive).toContain(".spout-tools");
-    expect(responsive).toContain(".recording-tools");
   });
 
   it("keeps every Deck output inside one revisioned native viewport", () => {
@@ -36,8 +35,9 @@ describe("LatentDeck minimum-window layout contract", () => {
     );
     expect(workspaceSource).toContain("genericDeckClient.viewportSetBounds(");
     expect(workspaceSource).toContain("hiddenEmbeddedViewportBounds(");
+    expect(rendererSource).toContain('data-workbench-region="output"');
     expect(rendererSource).toMatch(
-      /\.monitor-section\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s,
+      /\.output-column\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s,
     );
     expect(rendererSource).not.toMatch(
       /<canvas|<video|ImageData|createImageBitmap/i,
@@ -45,20 +45,26 @@ describe("LatentDeck minimum-window layout contract", () => {
   });
 
   it("gives the declarative monitor the only fullscreen faceplate row", () => {
-    expect(rendererSource).toContain(
-      "class:fullscreen={active && outputFullscreen === true && runtimeLoaded}",
-    );
-    expect(rendererSource).toContain(
-      ".fullscreen .faceplate-section:not(.monitor-section)",
-    );
-    expect(rendererSource).toContain(".fullscreen .monitor-section");
+    expect(rendererSource).toContain("class:fullscreen={fullscreenActive}");
+    expect(rendererSource).toContain("deck-output-fullscreen");
+    expect(rendererSource).toContain(".fullscreen .control-column");
+    expect(rendererSource).toContain(".fullscreen .output-actions");
+    expect(rendererSource).toContain(":global(html.deck-output-fullscreen)");
+    expect(rendererSource).toContain(":global(body.deck-output-fullscreen)");
     expect(workspaceSource).toContain("scheduleViewportSync();");
   });
 
-  it("keeps generic output visible while declarative controls scroll", () => {
+  it("uses a two-region workbench and keeps transient capture copy out of output geometry", () => {
+    expect(rendererSource).toContain('data-workbench-region="output-actions"');
+    expect(rendererSource).toContain('data-workbench-region="controls"');
     expect(rendererSource).toMatch(
-      /\.monitor-section\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s,
+      /\.deck-workbench\s*\{[^}]*grid-template-columns:/s,
     );
+    expect(rendererSource).toContain('class="capture-reason"');
+    expect(rendererSource).toMatch(/\.capture-reason\s*\{[^}]*min-height:/s);
+    const responsive = mediaBlock(rendererSource, 1120);
+    expect(responsive).toContain(".deck-workbench");
+    expect(responsive).toContain("grid-template-columns: minmax(0, 1fr);");
     expect(workspaceSource).toContain("viewportEpoch");
     expect(workspaceSource).toContain("viewportApplied = bounds");
   });

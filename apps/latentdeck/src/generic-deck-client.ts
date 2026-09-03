@@ -204,6 +204,7 @@ export const GENERIC_DECK_COMMANDS = Object.freeze({
   externalAssetSelect: "deck_generic_external_asset_select",
   externalAssetClear: "deck_generic_external_asset_clear",
   open: "deck_generic_open",
+  sourcesReplace: "deck_generic_sources_replace",
   sessionsGet: "deck_generic_sessions_get",
   statusGet: "deck_generic_status_get",
   processOnce: "deck_generic_process_once",
@@ -248,6 +249,10 @@ export interface GenericDeckClient {
     assetId: string,
   ): Promise<GenericExternalAssetView>;
   open(request: GenericDeckOpenRequest): Promise<GenericDeckSessionView>;
+  replaceSources(
+    sessionId: string,
+    request: GenericDeckOpenRequest,
+  ): Promise<GenericDeckSessionView>;
   sessionsGet(): Promise<GenericDeckSessionsView>;
   statusGet(sessionId: string): Promise<GenericDeckSessionView>;
   processOnce(sessionId: string): Promise<GenericDeckRuntimeView>;
@@ -317,6 +322,11 @@ export function createGenericDeckClient(
         assetId,
       }),
     open: (request) => host.invoke(GENERIC_DECK_COMMANDS.open, { request }),
+    replaceSources: (sessionId, request) =>
+      host.invoke(GENERIC_DECK_COMMANDS.sourcesReplace, {
+        sessionId,
+        request,
+      }),
     sessionsGet: () => host.invoke(GENERIC_DECK_COMMANDS.sessionsGet, {}),
     statusGet: (sessionId) =>
       session(GENERIC_DECK_COMMANDS.statusGet, sessionId),

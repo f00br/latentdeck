@@ -9,7 +9,7 @@ use latentdeck_extension_manager::{
 
 const D2_ID: &str = "org.latentdeck.deck.d2";
 const Q4_ID: &str = "org.latentdeck.deck.q4";
-const BUNDLED_VERSION: &str = "0.2.0";
+const BUNDLED_VERSION: &str = "0.2.1";
 
 fn main() {
     build_bundled_decks().expect("build deterministic bundled D2/Q4 Deck packages");

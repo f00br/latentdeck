@@ -2,7 +2,7 @@
   "schema_version": "0.2.0",
   "deck_operator_api": "0.2.0",
   "deck_id": "org.latentdeck.deck.q4",
-  "deck_version": "0.2.0",
+  "deck_version": "0.2.1",
   "operator_id": "org.latentdeck.builtin.ld_q4",
   "operator_version": "0.2.0",
   "entrypoint": "latentdeck_operator_q4.operator:process_sources_host",

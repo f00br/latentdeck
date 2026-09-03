@@ -2,7 +2,7 @@
   "manifest_version": "1.0.0",
   "kind": "deck_pack",
   "deck_id": "org.latentdeck.deck.q4",
-  "deck_version": "0.2.0",
+  "deck_version": "0.2.1",
   "display_name": "LatentDeck Q4",
   "summary": "Four-source carrier and donor latent synthesis.",
   "publisher": {
@@ -37,10 +37,10 @@
   "signal": {
     "slots": 4,
     "roles": [
-      {"role_id": "carrier", "display_name": "Carrier"},
-      {"role_id": "donor_b", "display_name": "Donor B"},
-      {"role_id": "donor_c", "display_name": "Donor C"},
-      {"role_id": "donor_d", "display_name": "Donor D"}
+      { "role_id": "carrier", "display_name": "Carrier" },
+      { "role_id": "donor_b", "display_name": "Donor B" },
+      { "role_id": "donor_c", "display_name": "Donor C" },
+      { "role_id": "donor_d", "display_name": "Donor D" }
     ],
     "default_permutation": ["carrier", "donor_b", "donor_c", "donor_d"],
     "structural_carrier_role": "carrier",
@@ -99,6 +99,6 @@
   "faceplate_path": "faceplate.json",
   "integrity": {
     "catalog_path": "integrity.json",
-    "catalog_sha256": "53e165ea42f5afa96ba84a4ddc81cdb3faca8ca43a289b9bd7308316585017b6"
+    "catalog_sha256": "9cf7f67ddcf923f6d4476c6d44949a5b9a81f29d524b7ef922224359d57ba4be"
   }
 }

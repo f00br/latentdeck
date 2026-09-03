@@ -1,18 +1,47 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "title": "LatentDeck D2",
   "sections": [
     {
       "section_id": "sources",
       "title": "Sources",
+      "region": "controls",
+      "columns": 2,
       "widgets": [
-        {"id": "source_a", "kind": "source_picker", "label": "Source A", "slot_index": 0},
-        {"id": "source_b", "kind": "source_picker", "label": "Source B", "slot_index": 1}
+        {
+          "id": "source_a",
+          "kind": "source_picker",
+          "label": "Source A",
+          "slot_index": 0
+        },
+        {
+          "id": "source_b",
+          "kind": "source_picker",
+          "label": "Source B",
+          "slot_index": 1
+        }
+      ]
+    },
+    {
+      "section_id": "transport",
+      "title": "Transport",
+      "region": "controls",
+      "columns": 1,
+      "widgets": [
+        {
+          "id": "transport",
+          "kind": "transport",
+          "label": "Independent playheads",
+          "slot_indices": [0, 1]
+        },
+        { "id": "seed", "kind": "seed", "label": "Seed" }
       ]
     },
     {
       "section_id": "roles",
       "title": "Roles",
+      "region": "controls",
+      "columns": 1,
       "widgets": [
         {
           "id": "role_binding",
@@ -25,6 +54,8 @@
     {
       "section_id": "synthesis",
       "title": "Latent synthesis",
+      "region": "controls",
+      "columns": 2,
       "widgets": [
         {
           "id": "algorithm",
@@ -32,64 +63,207 @@
           "label": "Algorithm",
           "control_id": "algorithm",
           "options": [
-            {"value": "linear", "label": "LINEAR"},
-            {"value": "xs1", "label": "XS1"},
-            {"value": "xs2", "label": "XS2"},
-            {"value": "xs3", "label": "XS3"},
-            {"value": "xs4", "label": "XS4"},
-            {"value": "xs5", "label": "XS5"}
+            { "value": "linear", "label": "LINEAR" },
+            { "value": "xs1", "label": "XS1" },
+            { "value": "xs2", "label": "XS2" },
+            { "value": "xs3", "label": "XS3" },
+            { "value": "xs4", "label": "XS4" },
+            { "value": "xs5", "label": "XS5" }
           ]
         },
-        {"id": "mix", "kind": "slider", "label": "Mix", "control_id": "mix", "minimum": 0.0, "maximum": 1.0, "step": 0.01},
+        {
+          "id": "mix",
+          "kind": "slider",
+          "label": "Mix",
+          "control_id": "mix",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "step": 0.01
+        },
         {
           "id": "mode",
           "kind": "select",
           "label": "Mode",
           "control_id": "mode",
+          "visible_when": [
+            {
+              "control_id": "algorithm",
+              "one_of": ["xs1", "xs2", "xs3", "xs4", "xs5"]
+            }
+          ],
           "options": [
-            {"value": "hybridize", "label": "Hybridize"},
-            {"value": "interact", "label": "Interact"}
+            { "value": "hybridize", "label": "Hybridize" },
+            { "value": "interact", "label": "Interact" }
           ]
         },
-        {"id": "interaction", "kind": "slider", "label": "Interaction", "control_id": "interaction", "minimum": 0.0, "maximum": 1.0, "step": 0.01},
-        {"id": "preserve", "kind": "slider", "label": "Preserve", "control_id": "preserve", "minimum": 0.0, "maximum": 1.0, "step": 0.01},
-        {"id": "chaos", "kind": "slider", "label": "Chaos", "control_id": "chaos", "minimum": 0.0, "maximum": 1.0, "step": 0.01},
-        {"id": "xs1_channel_a", "kind": "number", "label": "XS1 channel A", "control_id": "xs1_channel_a", "minimum": 0, "maximum": 23, "step": 1},
-        {"id": "xs1_channel_b", "kind": "number", "label": "XS1 channel B", "control_id": "xs1_channel_b", "minimum": 0, "maximum": 23, "step": 1},
-        {"id": "xs1_angle", "kind": "number", "label": "XS1 angle", "control_id": "xs1_angle_degrees", "minimum": -180.0, "maximum": 180.0, "step": 1.0},
-        {"id": "xs2_radius", "kind": "number", "label": "XS2 spatial radius", "control_id": "xs2_radius", "minimum": 1, "maximum": 8, "step": 1},
-        {"id": "xs3_gain", "kind": "number", "label": "XS3 high gain", "control_id": "xs3_high_gain", "minimum": -2.0, "maximum": 2.0, "step": 0.05},
-        {"id": "xs4_epsilon", "kind": "number", "label": "XS4 epsilon", "control_id": "xs4_epsilon", "minimum": 0.00000001, "maximum": 0.001, "step": 0.00000001},
+        {
+          "id": "interaction",
+          "kind": "slider",
+          "label": "Interaction",
+          "control_id": "interaction",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "step": 0.01,
+          "visible_when": [
+            {
+              "control_id": "algorithm",
+              "one_of": ["xs1", "xs2", "xs3", "xs4", "xs5"]
+            }
+          ]
+        },
+        {
+          "id": "preserve",
+          "kind": "slider",
+          "label": "Preserve",
+          "control_id": "preserve",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "step": 0.01,
+          "visible_when": [
+            {
+              "control_id": "algorithm",
+              "one_of": ["xs1", "xs2", "xs3", "xs4", "xs5"]
+            }
+          ]
+        },
+        {
+          "id": "chaos",
+          "kind": "slider",
+          "label": "Chaos",
+          "control_id": "chaos",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "step": 0.01
+        },
+        {
+          "id": "xs1_channel_a",
+          "kind": "number",
+          "label": "XS1 channel A",
+          "control_id": "xs1_channel_a",
+          "minimum": 0,
+          "maximum": 23,
+          "step": 1,
+          "visible_when": [{ "control_id": "algorithm", "one_of": ["xs1"] }]
+        },
+        {
+          "id": "xs1_channel_b",
+          "kind": "number",
+          "label": "XS1 channel B",
+          "control_id": "xs1_channel_b",
+          "minimum": 0,
+          "maximum": 23,
+          "step": 1,
+          "visible_when": [{ "control_id": "algorithm", "one_of": ["xs1"] }]
+        },
+        {
+          "id": "xs1_angle",
+          "kind": "number",
+          "label": "XS1 angle",
+          "control_id": "xs1_angle_degrees",
+          "minimum": -180.0,
+          "maximum": 180.0,
+          "step": 1.0,
+          "visible_when": [{ "control_id": "algorithm", "one_of": ["xs1"] }]
+        },
+        {
+          "id": "xs2_radius",
+          "kind": "number",
+          "label": "XS2 spatial radius",
+          "control_id": "xs2_radius",
+          "minimum": 1,
+          "maximum": 8,
+          "step": 1,
+          "visible_when": [{ "control_id": "algorithm", "one_of": ["xs2"] }]
+        },
+        {
+          "id": "xs3_gain",
+          "kind": "number",
+          "label": "XS3 high gain",
+          "control_id": "xs3_high_gain",
+          "minimum": -2.0,
+          "maximum": 2.0,
+          "step": 0.05,
+          "visible_when": [{ "control_id": "algorithm", "one_of": ["xs3"] }]
+        },
+        {
+          "id": "xs4_epsilon",
+          "kind": "number",
+          "label": "XS4 epsilon",
+          "control_id": "xs4_epsilon",
+          "minimum": 0.00000001,
+          "maximum": 0.001,
+          "step": 0.00000001,
+          "visible_when": [{ "control_id": "algorithm", "one_of": ["xs4"] }]
+        },
         {
           "id": "xs5_routing",
           "kind": "select",
           "label": "XS5 routing",
           "control_id": "xs5_routing",
+          "visible_when": [{ "control_id": "algorithm", "one_of": ["xs5"] }],
           "options": [
-            {"value": "topk", "label": "TOPK"},
-            {"value": "sinkhorn", "label": "SINKHORN"}
+            { "value": "topk", "label": "TOPK" },
+            { "value": "sinkhorn", "label": "SINKHORN" }
           ]
         },
-        {"id": "temperature", "kind": "number", "label": "Temperature", "control_id": "temperature", "minimum": 0.02, "maximum": 1.0, "step": 0.01},
-        {"id": "top_k", "kind": "number", "label": "Top K", "control_id": "top_k", "minimum": 1, "maximum": 64, "step": 1},
-        {"id": "sinkhorn_iterations", "kind": "number", "label": "Sinkhorn iterations", "control_id": "sinkhorn_iterations", "minimum": 2, "maximum": 12, "step": 1}
+        {
+          "id": "temperature",
+          "kind": "number",
+          "label": "Temperature",
+          "control_id": "temperature",
+          "minimum": 0.02,
+          "maximum": 1.0,
+          "step": 0.01,
+          "visible_when": [{ "control_id": "algorithm", "one_of": ["xs5"] }]
+        },
+        {
+          "id": "top_k",
+          "kind": "number",
+          "label": "Top K",
+          "control_id": "top_k",
+          "minimum": 1,
+          "maximum": 64,
+          "step": 1,
+          "visible_when": [
+            { "control_id": "algorithm", "one_of": ["xs5"] },
+            { "control_id": "xs5_routing", "one_of": ["topk"] }
+          ]
+        },
+        {
+          "id": "sinkhorn_iterations",
+          "kind": "number",
+          "label": "Sinkhorn iterations",
+          "control_id": "sinkhorn_iterations",
+          "minimum": 2,
+          "maximum": 12,
+          "step": 1,
+          "visible_when": [
+            { "control_id": "algorithm", "one_of": ["xs5"] },
+            { "control_id": "xs5_routing", "one_of": ["sinkhorn"] }
+          ]
+        }
       ]
     },
     {
-      "section_id": "transport",
-      "title": "Transport",
+      "section_id": "capture",
+      "title": "Capture",
+      "region": "actions",
+      "columns": 1,
       "widgets": [
-        {"id": "transport", "kind": "transport", "label": "Independent playheads", "slot_indices": [0, 1]},
-        {"id": "seed", "kind": "seed", "label": "Seed"}
+        {
+          "id": "capture",
+          "kind": "capture",
+          "label": "Latent capture",
+          "modes": ["snapshot", "live_capture"]
+        }
       ]
     },
     {
       "section_id": "output",
       "title": "Output",
-      "widgets": [
-        {"id": "capture", "kind": "capture", "label": "Latent capture", "modes": ["snapshot", "live_capture"]},
-        {"id": "monitor", "kind": "monitor", "label": "Monitor"}
-      ]
+      "region": "output",
+      "columns": 1,
+      "widgets": [{ "id": "monitor", "kind": "monitor", "label": "Monitor" }]
     }
   ]
 }

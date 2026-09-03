@@ -226,7 +226,7 @@ describe("generic exact Deck frontend model", () => {
     const preset = buildGenericDeckPreset(deck, draft, sources, "collection-1");
 
     expect(preset.deck_id).toBe("org.latentdeck.deck.d2");
-    expect(preset.deck_version).toBe("0.2.0");
+    expect(preset.deck_version).toBe("0.2.1");
     expect(preset.slots[0]).toEqual({
       physical_slot: 1,
       source: {

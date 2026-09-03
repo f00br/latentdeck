@@ -38,6 +38,40 @@ export function retainDraftSourceOptions<
   return [...retained.values()];
 }
 
+export function selectedSourceAspectWarning<
+  TSource extends {
+    archiveSha256: string;
+    decodedWidth: number;
+    decodedHeight: number;
+    signalPresentation: {
+      aspect_ratio: { width: number; height: number };
+    };
+  },
+>(
+  selectedArchiveSha256s: readonly string[],
+  sources: readonly TSource[],
+): string {
+  const selected = selectedArchiveSha256s.map((archiveSha256) =>
+    sources.find((source) => source.archiveSha256 === archiveSha256),
+  );
+  const reference = selected[0];
+  if (reference === undefined) return "";
+  const expected = reference.signalPresentation.aspect_ratio;
+  const mismatchIndex = selected.findIndex((source, index) => {
+    if (index === 0 || source === undefined) return false;
+    const actual = source.signalPresentation.aspect_ratio;
+    return expected.width * actual.height !== actual.width * expected.height;
+  });
+  const mismatch = selected[mismatchIndex];
+  if (mismatchIndex < 1 || mismatch === undefined) return "";
+  const actual = mismatch.signalPresentation.aspect_ratio;
+  return [
+    "Aspect mismatch",
+    `A ${expected.width}:${expected.height} (${reference.decodedWidth}×${reference.decodedHeight})`,
+    `${String.fromCharCode(65 + mismatchIndex)} ${actual.width}:${actual.height} (${mismatch.decodedWidth}×${mismatch.decodedHeight}). No hidden resize or crop; align sources in the Toolkit first.`,
+  ].join(" · ");
+}
+
 export interface DraftAwareSlotPlayOptions {
   loadedArchiveSha256: string;
   draftArchiveSha256: string;

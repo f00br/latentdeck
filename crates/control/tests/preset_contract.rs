@@ -31,7 +31,7 @@ fn d2_preset_roundtrips_as_versioned_path_free_json() {
     assert!(text.ends_with('\n'));
     assert!(text.contains(r#""schema_version": "2.0.0""#));
     assert!(text.contains(r#""deck_id": "org.latentdeck.deck.d2""#));
-    assert!(text.contains(r#""deck_version": "0.2.0""#));
+    assert!(text.contains(r#""deck_version": "0.2.1""#));
     assert!(!text.contains(r#""deck_type""#));
     assert!(!text.contains(r"cartridge_path"));
     assert_eq!(
@@ -58,6 +58,7 @@ fn q4_preset_allows_deliberately_reused_cartridge_identities() {
     );
 
     let encoded = write_deck_preset_json(&preset).expect("serialize preset");
+    assert_eq!(preset.deck_version, "0.2.1");
     assert!(String::from_utf8_lossy(&encoded).contains(r#""deck_id": "org.latentdeck.deck.q4""#));
     assert_eq!(
         parse_deck_preset_json(&encoded).expect("parse preset"),
@@ -140,7 +141,7 @@ fn legacy_d2_and_q4_load_deterministically_and_next_write_is_v2() {
     )
     .expect("migrate legacy D2");
     assert_eq!(d2_v2.deck_id, "org.latentdeck.deck.d2");
-    assert_eq!(d2_v2.deck_version, "0.2.0");
+    assert_eq!(d2_v2.deck_version, "0.2.1");
     assert_eq!(d2_v2.roles.get("carrier"), Some(&1));
     assert_eq!(d2_v2.roles.get("donor"), Some(&2));
     assert!(!d2_v2.controls.contains_key("routing"));

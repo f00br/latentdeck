@@ -8,13 +8,13 @@
     },
     {
       "path": "faceplate.json",
-      "byte_length": 4180,
-      "sha256": "73702c43b918b41759177d270aff971e9ff52c860fdbca6e2fee4158f94c6b8b"
+      "byte_length": 7281,
+      "sha256": "53f1bea155d3fc74cc3ed2299e322218bfa0302f054ac2047bfbba52493fdeb0"
     },
     {
       "path": "operator.json",
       "byte_length": 2912,
-      "sha256": "417bbaa512ab103f2bf5756b51c1218ce4a39ea5991048276addd31c1b28452d"
+      "sha256": "912efee0c1a5b1243065a0141b3c2165dc44600e8c3cc82e819ec8c48d6973fd"
     },
     {
       "path": "python/latentdeck_operator_d2/__init__.py",
@@ -24,7 +24,7 @@
     {
       "path": "python/latentdeck_operator_d2/contract.py",
       "byte_length": 7159,
-      "sha256": "403ede87a9643a0e66f474cde54fa68777731c2d15d7bd0a77ee10d28d3b4b53"
+      "sha256": "56a488d18c112f258bd3159b32e31ff4e9d771a3139a273a402e768439984a6e"
     },
     {
       "path": "python/latentdeck_operator_d2/operator.py",

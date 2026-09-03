@@ -19,7 +19,8 @@ const ADAPTER_VERSION: &str = "0.2.0";
 const D2_ID: &str = "org.latentdeck.deck.d2";
 const Q4_ID: &str = "org.latentdeck.deck.q4";
 const EXTERNAL_DECK_ID: &str = "dev.latentdeck.private.h3-probe";
-const DECK_VERSION: &str = "0.2.0";
+const BUNDLED_DECK_VERSION: &str = "0.2.1";
+const EXTERNAL_DECK_VERSION: &str = "0.2.0";
 const PROFILE_FAMILY: &str = "minimax_h3";
 const PROFILE_NAME: &str = "h3_av_latent";
 const PROFILE_VERSION: &str = "0.1.0";
@@ -309,22 +310,32 @@ fn private_gpu_stability_resets_player_on_the_final_nonempty_batch() {
 }
 
 #[test]
-fn private_gpu_external_deck_identity_is_synchronized() {
+fn private_gpu_bundled_and_external_deck_identities_are_synchronized() {
     let runner = include_str!("../src/private_protocol2_gpu_e2e_main.rs");
-    assert!(
-        runner.contains(&format!(
-            "const EXTERNAL_DECK_ID: &str = \"{EXTERNAL_DECK_ID}\";"
-        )),
-        "the executable evidence producer and closed receipt validator must use one exact external Deck package ID"
-    );
+    for required in [
+        format!("const EXTERNAL_DECK_ID: &str = \"{EXTERNAL_DECK_ID}\";"),
+        format!("const BUNDLED_DECK_VERSION: &str = \"{BUNDLED_DECK_VERSION}\";"),
+        format!("const EXTERNAL_DECK_VERSION: &str = \"{EXTERNAL_DECK_VERSION}\";"),
+        "bundled_deck_reference(deck_id)".to_owned(),
+        "external_deck_reference()".to_owned(),
+    ] {
+        assert!(
+            runner.contains(&required),
+            "the executable evidence producer is missing an exact Deck identity seam: {required}"
+        );
+    }
 
     let script = include_str!("../../../../tools/Test-PrivateProtocol2GpuGate.ps1");
-    assert!(
-        script.contains(&format!(
-            "external_deck = '{EXTERNAL_DECK_ID}@{DECK_VERSION}'"
-        )),
-        "the PowerShell contract receipt must use the same exact external Deck package identity"
-    );
+    for package in [
+        format!("{D2_ID}@{BUNDLED_DECK_VERSION}"),
+        format!("{Q4_ID}@{BUNDLED_DECK_VERSION}"),
+        format!("{EXTERNAL_DECK_ID}@{EXTERNAL_DECK_VERSION}"),
+    ] {
+        assert!(
+            script.contains(&package),
+            "the PowerShell contract receipt is missing exact package {package}"
+        );
+    }
 }
 
 #[test]
@@ -475,11 +486,11 @@ fn validate_receipt(receipt: &GateReceipt) -> Result<(), String> {
             == vec![
                 ExactPackage {
                     id: D2_ID.to_owned(),
-                    version: DECK_VERSION.to_owned(),
+                    version: BUNDLED_DECK_VERSION.to_owned(),
                 },
                 ExactPackage {
                     id: Q4_ID.to_owned(),
-                    version: DECK_VERSION.to_owned(),
+                    version: BUNDLED_DECK_VERSION.to_owned(),
                 },
             ],
         "decks",
@@ -487,7 +498,7 @@ fn validate_receipt(receipt: &GateReceipt) -> Result<(), String> {
     require_exact(
         &receipt.packages.external_deck,
         EXTERNAL_DECK_ID,
-        DECK_VERSION,
+        EXTERNAL_DECK_VERSION,
         "external_deck",
     )?;
 
@@ -742,10 +753,10 @@ fn valid_receipt() -> Value {
             "codec": {"id": CODEC_ID, "version": CODEC_VERSION},
             "adapter": {"id": ADAPTER_ID, "version": ADAPTER_VERSION},
             "decks": [
-                {"id": D2_ID, "version": DECK_VERSION},
-                {"id": Q4_ID, "version": DECK_VERSION}
+                {"id": D2_ID, "version": BUNDLED_DECK_VERSION},
+                {"id": Q4_ID, "version": BUNDLED_DECK_VERSION}
             ],
-            "external_deck": {"id": EXTERNAL_DECK_ID, "version": DECK_VERSION}
+            "external_deck": {"id": EXTERNAL_DECK_ID, "version": EXTERNAL_DECK_VERSION}
         },
         "profile": {
             "codec_family": PROFILE_FAMILY,

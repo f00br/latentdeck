@@ -66,9 +66,9 @@ describe("generic embedded native-output contract", () => {
 
   it("makes native video the sole declarative surface in fullscreen", () => {
     expect(workspaceSource).toContain("scheduleViewportSync();");
-    expect(rendererSource).toContain(
-      ".fullscreen .faceplate-section:not(.monitor-section)",
-    );
+    expect(rendererSource).toContain(".fullscreen .control-column");
+    expect(rendererSource).toContain(".fullscreen .output-actions");
+    expect(rendererSource).toContain(":global(body.deck-output-fullscreen)");
     expect(rendererSource).toMatch(
       /\.fullscreen \.monitor\s*\{[^}]*min-height:\s*0;/s,
     );
