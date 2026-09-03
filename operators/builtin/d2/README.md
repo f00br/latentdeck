@@ -1,154 +1,155 @@
-# LD-D2 built-in operator 0.1
+# LatentDeck D2 Deck Package 0.2.1
 
-This directory is the trusted, built-in Python operator package for the
-LatentDeck LD-D2 dual deck. It processes one H3 visual latent slot from deck A
-and one from deck B and returns the post-operator latent slot plus JSON-safe
-provenance. It does not load code from cartridges.
+D2 is the bundled two-source reference Deck for LatentDeck `0.1.x`. It is a
+real `.ld` package that uses the same package validator, trust lifecycle,
+generic Protocol 2 runtime, Deck SDK, and declarative faceplate contract as an
+external Deck. It has no private D2 worker or application-only operator API.
 
-## Clean-room provenance
+The package source in this directory is authoritative. The Python wheel uses
+the same operator module, but a wheel by itself is not an installable Deck and
+does not supply the package manifest, signal contract, or faceplate.
 
-The private laboratory evidence established the names of the XS1 through XS5
-families, the H3 runtime tensor contract, the usefulness of deterministic
-latent operations, and an affinity-routing direction for XS5. The original
-math in this package was written for the public 0.1 contract. It is not a copy
-or reconstruction of the earlier prototype.
+## Contract identity
 
-The deliberate 0.1 definitions are:
+| Axis                | Value                                  |
+| ------------------- | -------------------------------------- |
+| Deck package        | `org.latentdeck.deck.d2` `0.2.1`       |
+| Package manifest    | `deck-pack.json` `1.0.0`               |
+| Operator            | `org.latentdeck.builtin.ld_d2` `0.2.0` |
+| Operator schema/API | `0.2.0` / `0.2.0`                      |
+| Python package      | `latentdeck-operator-d2` `0.2.0`       |
+| Deck SDK            | `latentdeck-deck-sdk` `0.2.0`          |
+| Faceplate schema    | `2`                                    |
+| Worker protocol     | `2`                                    |
+| Runtime kind        | `python_operator_stream_v1`            |
 
-- `LINEAR`: exact A/B linear interpolation baseline.
-- `XS1`: channel-pair rotation on the routed donor.
-- `XS2`: circular full-grid exchange with the four spatial neighbours at a
-  bounded radius.
-- `XS3`: temporal low/high-pass interaction using the previous slot supplied
-  independently for each playhead.
-- `XS4`: per-channel donor statistics transfer into the structural carrier's
-  statistics.
-- `XS5`: per-slot cosine-affinity transport over the complete spatial grid,
-  using either bounded top-k routing or bounded Sinkhorn normalization.
+The Deck package and operator have independent versions. Changing package
+metadata or its faceplate can require a new `deck_version` without changing
+the mathematical `operator_version`.
 
-`ROUTING=A` makes A the structural carrier and B the donor. `ROUTING=B` swaps
-those roles without changing the independent A/B playhead positions.
-`HYBRIDIZE` blends routed donor material into the carrier. `INTERACT` applies
-the routed donor displacement to the carrier. With `CHAOS=0`,
-`INTERACTION=0` is an exact bypass to the linear baseline. `CHAOS=0` is itself
-an exact unchanged chaos path; non-zero chaos uses a seed-derived, stateless
-channel/spatial permutation.
+## Signal and roles
 
-## Contract
+D2 declares two physical source slots and two logical roles:
 
-`process_slot(a, b, controls, context)` accepts two equal, finite, F16 tensors
-with layout `[1, 24, 1, H, W]`. The context must identify H3 profile `0.1.0`
-and the H3 causal timing contract `0.1.0`. The implementation never crops,
-resizes, downsamples, changes temporal mapping, or chooses a cheaper hidden
-algorithm. Inputs larger than the documented full-grid token bound are
-rejected explicitly.
+- `carrier` is the structural reference;
+- `donor` supplies material to the selected synthesis algorithm.
 
-For `XS3`, `context.previous_a` and `context.previous_b` are optional equal
-slots from the respective independent playheads. At the first slot, an absent
-previous value means "previous equals current". No history is inferred or
-shared between decks.
+The default permutation maps physical slots A and B to `carrier` and `donor`.
+The faceplate role editor may swap that mapping without moving the sources or
+their independent playheads. The role binding in `DeckOperatorContext` is
+authoritative. The old `routing` control is not part of `operator.json`; a
+direct SDK caller that supplies it must agree with the role binding.
 
-The returned `operation` object matches the LC operation-history shape:
-operator ID/version, deterministic seed, and fully normalized controls. The
-additional profile, playhead, carrier, and grid fields are runtime provenance
-for diagnostics and resample orchestration.
+The bundled manifest accepts these exact CUDA F16 shapes:
 
-The machine-readable descriptor and its schema live beside the package source
-as `descriptor.json` and `descriptor.schema.json`.
+```text
+[1, 24, 1, 50, 28]
+[1, 24, 1, 48, 28]
+[1, 24, 1, 48, 84]
+[1, 24, 1, 30, 45]
+```
 
-The dependency-free registry contract lives in
-`codec-host/python/src/latentdeck_codec_host/operator_api.py`. Application code
-registers this builtin by an explicit ID, version, callable, and matching
-exported entrypoint; descriptor text is never imported dynamically. The H3
-binding in `codec-host/codecs/h3/src/latentdeck_codec_h3/d2_engine.py` owns the
-two independently indexed F16 sources and feeds each post-operator slot
-directly into the causal decoder. It is deliberately separate from Player's
-single-cartridge worker state.
+Timing is exactly `24/1` frames per second with 24 samples per latent slot.
+The profile allowlist is `null`, so D2 does not hard-code H3 identity. This
+does not relax compatibility: the enabled Codec Package, selected cartridges,
+Torch/tensor ABI, geometry, timing, and five required capabilities must still
+intersect exactly. D2 never casts, resizes, crops, aligns, re-encodes, or moves
+a source to another device.
 
-Loop and Restart first return a typed reset barrier. The scheduler may resume
-only after the decoder reset succeeds with a strictly newer nonzero `u64`
-generation. A failed reset preserves the barrier, playheads, sequence, and XS3
-history so it can be retried without crossing causal state.
+## Synthesis controls
 
-## Local checks
+`LINEAR` is the A/B interpolation baseline controlled by `mix`. The remaining
+algorithm choices operate on the logical carrier and donor:
 
-From the repository root, use the workspace's pinned PyTorch runtime and test
-extra:
+- `XS1` rotates a selected pair of donor channels;
+- `XS2` exchanges material with four spatial neighbours at a bounded radius;
+- `XS3` combines current and previous source slots for temporal low/high-pass
+  interaction;
+- `XS4` transfers donor statistics into the carrier's per-channel statistics;
+- `XS5` performs full-grid cosine-affinity transport with bounded TOPK or
+  Sinkhorn routing.
+
+`interaction` blends an XS target with the linear baseline. `mode` selects
+hybridization or displacement-style interaction, `preserve` controls retained
+carrier structure, and seeded `chaos` adds a deterministic channel/spatial
+permutation perturbation. With `interaction = 0`, the XS path returns to the
+linear baseline; with `chaos = 0`, the chaos path is unchanged.
+
+All 16 public controls are declared in `operator.json`. The operator rejects
+unknown or ill-typed controls, equal XS1 channel indices, TOPK larger than the
+current grid, and grids larger than 4096 spatial tokens. It records the exact
+operator identity, normalized controls, seed, profile, playheads, carrier,
+history use, and grid in bounded JSON provenance.
+
+## Generic Deck SDK and runtime
+
+The package manifest selects the
+`latentdeck_operator_d2.operator:process_sources_host` entrypoint. Protocol 2
+loads it through the enabled Deck package and compatible Codec Package. The
+generic worker invokes it through the Deck SDK gate:
+
+```python
+process_sources(
+    sources: tuple[torch.Tensor, ...],
+    controls: dict[str, object],
+    context: DeckOperatorContext,
+) -> DeckOperatorResult
+```
+
+The SDK requires two finite contiguous tensors with identical shape, dtype,
+and device, plus bounded scalar controls and an exact role permutation.
+Previous-source history stays attached to its physical slot when roles move.
+The result must be finite and contiguous, preserve the input shape, dtype, and
+device exactly, and contain bounded data-only provenance.
+
+The standalone `process_sources` export wraps the same implementation with SDK
+validation for tests and direct SDK use. The host entrypoint avoids duplicating
+that gate because the generic worker already applies it. Neither entrypoint
+imports the codec host or owns transport, decode, output, capture, or package
+lifecycle.
+
+## Declarative faceplate
+
+The schema-v2 faceplate declares six host-rendered sections:
+
+- two source pickers;
+- independent transport and seed;
+- the carrier/donor role editor;
+- the synthesis controls;
+- Snapshot and Live Capture actions;
+- one output monitor anchor.
+
+Every operator control is bound exactly once. Algorithm-specific controls use
+`visible_when`, so XS1 through XS5 show only their relevant parameters. The
+host renders the layout and owns accessibility, realtime dispatch, native
+video, fullscreen, Spout, MP4, and capture orchestration; the package contains
+no HTML, JavaScript, CSS, native window code, or private Tauri commands.
+
+Snapshot and Live Capture receive the post-operator latent state before decode.
+Core validates and imports the finished `.lc`; D2 never writes a cartridge
+directly or embeds code in one.
+
+## Trust and provenance
+
+The deterministic `.ld` archive is a closed integrity-catalogued tree. It must
+be installed, verified, and explicitly enabled through the Extensions Manager.
+Active sessions retain the exact validated package and Codec Package versions;
+there is no newest-version or protocol fallback.
+
+The XS family names and broad research direction came from private laboratory
+evidence. The public implementation and control mapping were written for this
+contract and do not copy a private workflow, model, cartridge, or latent
+payload. Tests generate their tensors synthetically.
+
+## Focused checks
+
+From the repository root:
 
 ```powershell
 uv run --package latentdeck-operator-d2 --extra cu130 --extra test pytest operators/builtin/d2/tests
 uv run ruff check operators/builtin/d2
 ```
 
-The H3 pre-decode binding has a separate synthetic conformance check:
-
-```powershell
-uv run --package latentdeck-codec-h3 --extra cu130 pytest codec-host/codecs/h3/tests/test_d2_engine.py
-```
-
-## Isolated worker boundary
-
-The Codec Pack installs a second no-argument process entrypoint for the deck:
-
-```powershell
-uv run --package latentdeck-codec-h3 --extra cu130 latentdeck-h3-d2-worker
-```
-
-Like the Player worker, it reads the one-time bootstrap secret from inherited
-stdin and then uses length-prefixed MessagePack over the supervisor-created
-Named Pipe. Its closed commands are `deck.d2.load`,
-`deck.d2.process_slot`, `deck.d2.reset`, `deck.d2.restart`,
-`deck.d2.controls.set`, `deck.d2.transport.set`, `deck.d2.seed.set`, and
-`deck.d2.status`. The host scheduler, never the UI, sends `process_slot` and
-the generation-changing reset command.
-
-`deck.d2.process_slot` runs the trusted operator over the complete F16 latent
-slot before TAEH3 decode and publishes the resulting one-to-four RGBA frames
-to the bounded shared-memory ring. Its control acknowledgement contains only
-typed counters, playheads, ring sequences, and canonical JSON provenance. It
-does **not** place latent bytes or paths on control IPC.
-
-Snapshot and Live Capture use a separate disk sink attached to
-`D2ProcessedSlot.output` immediately before decode. The three closed Python
-worker commands are:
-
-```text
-deck.d2.capture.start  {
-  deck_id, deck_revision, capture_id,
-  mode: "snapshot" | "live_capture",
-  temporary_root, max_latent_slots, max_visual_bytes
-}
-deck.d2.capture.stop   {deck_id, deck_revision, capture_id}
-deck.d2.capture.status {deck_id, deck_revision, capture_id}
-```
-
-`capture_id` is a canonical non-nil UUID. `temporary_root` must be an existing
-absolute directory selected by the trusted host. Starting either mode first
-requests a restart barrier; no slot is written until a strictly newer causal
-generation resets both playheads to zero. Snapshot freezes controls, seed, and
-transport and automatically finalizes exactly one structural-carrier cycle.
-A shorter, playing, loop-enabled non-carrier is rejected before Snapshot
-starts because it would force a reset inside that cycle.
-
-Live Capture records at most 32 full control/seed state events. Stop finalizes
-immediately when the current length already satisfies `T=2+5n`; otherwise it
-arms the first future valid length. Transport remains frozen so playhead/time
-mapping cannot change silently. Changing routing remains visible in the event
-history and makes carrier audio temporally ineligible.
-
-The bounded receipt contains only the capture ID/mode, partial Safetensors
-path, SHA-256, byte length, F16 visual shape/frame count, two parent
-identities, audio disposition/descriptor, and either frozen Snapshot state or
-the Live control history. Audio disposition values match the LC contract:
-`source_absent`, `copied_from_carrier_exact`, or `omitted_timing_mismatch` with
-`duration_mismatch`, `temporal_mapping_mismatch`, or
-`duration_and_mapping_mismatch`.
-
-The worker owns both capture partials until the host validates and consumes the
-finished payload. Active or finished capture-owned partials are deleted on
-worker close/unload; active partials are also deleted on reset, process/decode
-error, spool failure, or capture replacement. Successful host consumption
-must therefore happen before codec worker teardown.
-
-The test corpus is generated synthetically in memory. No cartridges, latent
-payloads, model assets, workflows, or generated media are included.
+The package tests check the manifest/operator/faceplate cross-contract,
+integrity catalog, deterministic `.ld` packing, isolated imports, generic SDK
+behavior, and the operator's deterministic golden traces.

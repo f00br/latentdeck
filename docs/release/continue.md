@@ -1,139 +1,158 @@
 # Continue: LatentDeck 0.1 release preparation
 
-This is the only current operational handoff for the repository.
+This is the only current operational handoff for the repository. It describes
+the state a new agent should act on, not the history of the milestone.
 
 ## Last completed state
 
-- On 2026-09-01 the owner explicitly accepted the complete local `0.1.0`
-  functional surface with no remaining product defects.
-- The owner-accepted source and unsigned artifact baseline is clean `main`
-  commit `dbe310a2b8c0a9f78a11ab8217f07c8c91a39db4`.
-- LatentDeck App, LatentPlayer, and H3 Codec Pack `0.1.1` were built from that
-  commit. Their receipts record `git_dirty=false`, exact hashes, SBOMs, notices,
-  and the same 490-file public snapshot.
-- The owner confirmed Player, Library/Collections, LD-D2, LD-Q4, 9:16 and 16:9
-  presentation, Snapshot, long latent Live Capture, capture hot insertion,
-  upright D2/Q4 MP4 recording, presets, Resample, Spout2, and LatentPlayer
-  PLAY/PREPARE behavior.
-- The corrected H3 Codec Pack setup installed successfully for the current
-  user. Player, D2, and Q4 discovered its required CUDA H3 adapter; the local
-  install/reinstall/exact-version uninstall lifecycle passed.
-- Strict four-source Q4, the owner-approved six-minute D2/Q4 stability runs,
-  CUDA parity, and Spout2 evidence remain accepted. Do not repeat those heavy
-  tests without a related source change or concrete regression.
-- Superseded release-build and evidence clones used during owner UAT were
-  removed after the accepted artifact directories had been preserved and
-  integrity-checked in the primary checkout.
+- On 2026-09-03 the owner completed the final manual user pass and accepted the
+  Protocol 2 modular-runtime milestone with no known product defect remaining.
+- The accepted implementation checkpoint is clean `main` commit
+  `3648e7c634c4310767165ce8975129323a5c09f2`.
+- Application version remains `0.1.0`. H3 Codec Pack and adapter are `0.2.0`.
+  Bundled D2 and Q4 Deck packages are `0.2.1`.
+- `.lc` remains the codec-neutral data format. Installable Decks use only `.ld`;
+  installable codecs use only `.ldcodec`. The retired `.lddeck` spelling and
+  legacy adjacent Codec Pack ZIP must not return.
+- Worker Protocol 2 is the authoritative Player and generic Deck path. Protocol
+  1 remains only as an explicit Player bridge; Protocol 2 failures never fall
+  back silently.
+- The common Extensions lifecycle covers inspect, exact expected SHA-256,
+  install, verify, enable, disable, repair, remove, list, and compatibility
+  matrix operations. Versions are immutable and explicitly selected; there is
+  no newest-version auto-selection.
+- D2, Q4, and external Decks run through the same Deck SDK, declarative
+  faceplate renderer, compatibility resolver, session broker, and generic
+  runtime. A third-party Deck can define its own faceplate without changing the
+  host application.
+- The Codec SDK owns profile validation, source reads, decode, raw import, and
+  capture writing. Core retains an integrity-validated cartridge handle and
+  cross-checks the adapter's profile receipt before GPU allocation.
+- Up to four Deck sessions may stay warm. A fifth is refused without LRU
+  eviction. One foreground output lease exists; Live Capture and MP4 pin it
+  independently until stopped.
+- The ComfyUI gallery is complete: exactly 36 repository-owned nodes, strict
+  combined-registry equality, no private payloads, and isolated CPU Fit View
+  acceptance with no missing or red cards.
 
-The accepted `dbe310a` binaries remain the durable functional UAT evidence
-snapshot. The release-documentation commit made after them is newer source, so
-those binaries are not the final publication candidate. Build the publication
-candidate again from the final clean documentation/release commit.
+## Accepted evidence
 
-## Next action
+The exact `3648e7c` clean clone passed `tools/Check-Workspace.ps1` and the
+public-tree audit:
 
-The next agent owns release documentation, repository publication preparation,
-release presentation, and the eventual release workflow:
+- LatentDeck frontend: 172 passed;
+- LatentPlayer frontend: 49 passed;
+- Rust: 694 passed, 0 failed, 21 expected ignored;
+- Python: 422 passed;
+- Codec Pack curator: 7 passed;
+- formatting, Clippy, packaging, H3 setup tooling, Protocol 2 contracts,
+  diagnostics, and linked development-pack checks: passed.
 
-1. Read `AGENTS.md`, `README.md`, this handoff,
-   `ACCEPTANCE_STATUS.md`, `MASTER_USER_TEST.md`,
-   `REPOSITORY_BOUNDARY.md`, and `PUBLIC_RELEASE_CHECKLIST.md` before editing.
-2. Create `comfy/toolkit/workflows/00_ALL_NODES_GALLERY.json` under the exact
-   contract below. This is an open, required release-presentation task; it was
-   not part of the completed functional owner UAT and must not be reported as
-   already implemented or tested.
-3. Prepare detailed public-facing documentation, onboarding, release notes,
-   repository presentation, and any other owner-assigned GitHub/release copy.
-   Keep verified facts distinct from proposed text and do not expose local
-   paths, private data, or unsupported claims.
-4. Complete the Git archive and history review, attribution/license/SBOM review,
-   security-contact plan, and every applicable item in the public-release
-   checklist. Record only evidence that was actually produced.
-5. Commit accepted changes locally on `main`. Create a fresh independent
-   short-path clone from the final clean commit, run the aggregate workspace
-   gate, and rebuild the complete application and H3 Codec Pack artifact sets.
-   Never mix these with the older `dbe310a` binaries.
-6. Exercise the final signed artifacts on a clean non-admin Windows 11 NVIDIA
-   account: application install/update/uninstall, H3 offline setup plus adjacent
-   ZIP, exact-version Codec Pack removal, external decoder selection, Player,
-   D2, Q4, recovery, and Spout2.
-7. Create or change a remote, push, tag, sign, upload, or publish only after the
-   owner gives explicit authority for that exact action.
+The owner then accepted the real CUDA/H3 user paths in Player, D2, and Q4:
 
-## Why this is next
+- smooth 24 fps presentation and immediate realtime controls;
+- role changes, play/pause/restart/loop, and natural non-loop EOF without losing
+  the warm session or output;
+- Snapshot, Live Capture, immediate capture reuse, replay, and MP4;
+- fullscreen, compact sticky monitor, aspect handling, and Spout;
+- compatible and incompatible external `.ld` lifecycle with explicit reasons
+  and no fallback;
+- four warm sessions, fifth-session refusal, Close, and separate Live
+  Capture/MP4 output-lease pinning.
 
-There is no known functional product bug left in 0.1. The remaining work turns
-the accepted local product into a reviewed, understandable, signed, and
-authorized public release. Because documentation and presentation are part of
-the public source snapshot, they must be complete before the final clean build.
+The manual pass is owner acceptance, not a signed clean-machine receipt. Exact
+artifact hashes belong in generated receipts and `SHA256SUMS.txt`, not in this
+source handoff.
 
-## ComfyUI all-nodes gallery contract
+## Current local delivery step
 
-Add `comfy/toolkit/workflows/00_ALL_NODES_GALLERY.json` as a public, data-free,
-non-queueable discovery canvas:
+The development installations and stale test profiles were removed before the
+new first-install pass. After this documentation commit, build one fresh
+unsigned set from a new clean short-path clone of the exact final `main` HEAD:
 
-- exactly one instance of every 33 Toolkit node, the one official Recorder
-  node, and the two reviewed Channel Roll example nodes: 36 repository-owned
-  node types in total;
-- strict automated equality between the graph's repository-owned node types
-  and the combined three `NODE_CLASS_MAPPINGS` registries; a subset-only test
-  is insufficient;
-- clear groups for Cartridge/Conversion, Decode/Offline, XS operators, Labs,
-  Diagnostics/Evaluation, Developer/Utilities, Recorder, and External Example;
-- no cartridge, weight, raw latent, prompt, private workflow, absolute path, or
-  machine-specific value;
-- opening is the test: Queue is not required and may be intentionally invalid;
-- in the isolated CPU profile, Fit View shows the complete readable canvas with
-  no missing or red node cards.
+1. Run `tools/Test-PublicTree.ps1` and `tools/Check-Workspace.ps1` in that clone.
+2. Run `tools/Build-ReleaseCandidate.ps1` for the two application installers.
+3. Run `tools/Build-H3CodecPack.ps1` with the pinned CPython archive,
+   `-PackVersion 0.2.0`, and `-RequireCuda` for the H3 setup plus adjacent
+   `.ldcodec`.
+4. Keep each complete artifact directory with its receipt, checksums, SBOM, and
+   notices. Never combine output from different commits.
+5. Preserve that exact clean clone as the sole current build clone; remove
+   superseded development clones only after exact path and process checks.
 
-After visual verification, update the Toolkit workflow index and the isolated
-ComfyUI test runbook, and record the actual evidence in the acceptance status.
-Adding the gallery is a new post-acceptance source change, so include it before
-building the final clean RC.
+The owner will perform the short first-install UAT using those generated
+installers. If it passes, the next agent owns final public documentation,
+repository presentation, release notes, legal/security review, signing
+preparation, and the publication checklist.
 
-## Open release and publication threads
+## Next action for a fresh agent
 
-- `00_ALL_NODES_GALLERY.json`, its strict registry test, workflow index, and
-  isolated ComfyUI visual proof;
-- detailed public documentation, onboarding, release notes, and repository
-  presentation;
-- exact Git archive/history and legal/attribution/license/SBOM review;
-- a private vulnerability-reporting channel and authenticated publisher trust;
-- clean-machine signed application and Codec Pack lifecycle evidence;
-- explicit owner authority for the remote, push, tag, upload, and release.
+1. Read `AGENTS.md`, `README.md`, this file, `ACCEPTANCE_STATUS.md`,
+   `MASTER_USER_TEST.md`, `REPOSITORY_BOUNDARY.md`, and
+   `PUBLIC_RELEASE_CHECKLIST.md`.
+2. Confirm the owner's first-install result and inspect the exact generated
+   receipts before calling any artifact current.
+3. If the install pass is clean, update only the final public-facing
+   documentation and release evidence the owner assigns. Do not reopen the
+   completed Protocol 2 architecture without a concrete defect.
+4. If the owner reports a defect, reproduce it against the exact receipt,
+   repair source only in the primary checkout, add a test at the failed
+   boundary, commit locally on `main`, and rebuild from another fresh clone.
+5. Complete the open archive/history, attribution/license/SBOM,
+   security-contact, signing, and clean-machine publication gates with real
+   evidence.
+6. Create or change a remote, push, tag, sign, upload, or publish only after the
+   owner explicitly authorizes that exact action.
+
+## First-install expectations
+
+- LatentDeck App, LatentPlayer, and H3 Codec Pack are independent current-user
+  installations.
+- H3 setup requires the exact matching `.ldcodec` beside it and installs no
+  decoder, model, cartridge, Deck package, or application.
+- On first launch, Extensions provisions trusted bundled D2/Q4, discovers H3,
+  and requires explicit enable/selection. The user then selects the accepted
+  external TAEH3 file.
+- Player opens the selected cartridge through H3 on CUDA. D2/Q4 require a
+  compatible complete source set and show exact incompatibility reasons rather
+  than converting or substituting data.
+- Removing one application must not remove the other application, extension
+  packages, decoder selection, or user cartridges. Exact-version H3 removal is
+  a separate lifecycle.
+
+## Open release and publication gates
+
+- owner confirmation of the fresh unsigned first-install path;
+- final public onboarding, architecture/SDK documentation, release notes, and
+  repository presentation review;
+- exact Git archive and history inspection;
+- attribution, third-party license, artifact SBOM, and distributed-asset review;
+- private vulnerability-reporting channel;
+- authenticated signing for both application installers, H3 setup, and its
+  generated uninstaller;
+- signed offline lifecycle on a clean non-admin Windows 11 NVIDIA account;
+- explicit owner authority for any remote, push, tag, upload, or release.
 
 ## Protected local state
 
-- `docs/CONCEPT.md` has owner-authored tracked modifications.
-- `docs/latent_concept.md` is an owner-authored untracked document.
-- Local concept PNGs are ignored visual references, not technical
-  specifications.
-
-Do not edit, stage, delete, or reformat those owner documents. If they affect a
-repository guard, apply the exact staged candidate to a clean local clone and
-audit there.
+`docs/CONCEPT.md` has owner-authored tracked changes and
+`docs/latent_concept.md` is owner-authored and untracked. Do not edit, stage,
+delete, or reformat either document. Audit the exact staged candidate in a
+clean clone when those files make the primary checkout dirty.
 
 ## Do not
 
-- Do not create or alter a remote, push, tag, upload, publish, sign, or enable a
-  service without explicit owner authorization.
-- Do not start RunPod or obtain new private corpus for release preparation.
-- Do not repeat completed CUDA, Spout, fullscreen, or six-minute soak suites
-  without a relevant code change or a concrete regression.
-- Do not reuse an old build clone, patch generated artifacts, or combine files
-  and metadata from different commits.
-- Do not add `.lc`, Safetensors, weights, private media, generated outputs,
-  diagnostics, environments, or machine-local paths to Git.
-- Do not silently align, resize, crop, re-encode, or substitute incompatible
-  cartridges.
+- Do not add cartridges, raw latents, decoder/model weights, private media,
+  generated output, diagnostics, environments, or local absolute paths to Git.
+- Do not restore hardcoded H3/D2/Q4 production paths or duplicate package,
+  compatibility, presentation, or session logic in a faceplate.
+- Do not hide incompatibility through cast, resize, crop, alignment, re-encode,
+  source substitution, or Protocol 1 fallback.
+- Do not treat exact SHA-256 or self-declared publisher text as authenticated
+  publisher identity.
+- Do not patch an old clone or generated artifact set.
+- Do not publish anything without separate explicit owner authorization.
 
-## Release-preparation definition of done
-
-- The gallery and detailed public documentation are committed and verified.
-- The public-release checklist has evidence for every applicable item.
-- A fresh clean clone at the final commit passes
-  `tools/Check-Workspace.ps1` and `tools/Test-PublicTree.ps1`.
-- Fresh application and H3 Codec Pack artifacts, receipts, checksums, SBOMs,
-  notices, and signatures all bind that same final commit.
-- The clean Windows lifecycle and publisher-trust gates are recorded.
-- Publication still waits for a separate explicit owner command.
+Current classification: **owner-accepted local unsigned 0.1 application and
+Protocol 2 modular-runtime milestone; fresh installer UAT and publication gates
+remain open**.

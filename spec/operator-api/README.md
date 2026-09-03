@@ -1,16 +1,39 @@
-# LatentDeck Explicit-Install Operator API 0.1
+# Comfy Toolkit Explicit-Install Operator API 0.1
 
 ## Status and scope
 
-This document defines the public Python research-operator boundary used by
-LatentDeck Comfy Toolkit 0.1. It complements the standalone application's
-closed builtin registry; it does not make arbitrary Python operators part of
-the realtime release worker.
+This document defines the older public Python research-operator boundary used
+by LatentDeck Comfy Toolkit 0.1. It does not define the current LatentDeck
+application Deck SDK and does not install arbitrary Python operators into the
+realtime application worker.
 
 An external operator is separately installed trusted Python code: either a
 normal distribution or an explicitly copied ComfyUI module. It is not
 cartridge content. `.lc` readers never inspect, import, install, or execute an
 operator.
+
+## This API versus the current Deck SDK
+
+The two APIs deliberately share a `process_sources`-shaped callable, but they
+are separate contracts and their descriptors and types are not
+interchangeable.
+
+| Boundary     | This Comfy Toolkit API                                                      | Current LatentDeck Deck SDK                                                                              |
+| ------------ | --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| Purpose      | Offline and research operator use inside the Toolkit host.                  | Realtime installed Decks in the LatentDeck application.                                                  |
+| Distribution | A separately reviewed Python distribution or explicitly copied module.      | A strict, integrity-catalogued `.ld` Deck Package.                                                       |
+| Activation   | Host imports code, then calls `registry.install`.                           | Extensions Manager installs, verifies, and explicitly enables an exact package version.                  |
+| Descriptor   | Toolkit operator descriptor/API `0.1.0`.                                    | `deck-pack.json` `1.0.0` plus `operator.json` schema/API `0.2.0`.                                        |
+| Call types   | `OperatorContext` and `ToolkitOperatorResult`.                              | `DeckOperatorContext` and `DeckOperatorResult` from `latentdeck-deck-sdk` `0.2.0`.                       |
+| Topology     | `topology`, `input_count`, processing modes, and descriptor bypass.         | Manifest slots/roles, role permutation, exact geometry/timing/capabilities, and previous-source context. |
+| User surface | No Deck faceplate, session, transport, native output, or capture authority. | Host-rendered faceplate v2 plus generic sessions, transport, output, and capture.                        |
+
+Third-party Decks are supported now through the
+[Deck Package contract](../deck-package/README.md) and current Deck SDK. Do not
+rename a Toolkit descriptor to `operator.json`, place it in `.ld`, or pass a
+Toolkit result/context to the generic Deck worker. Shared mathematical code may
+be adapted deliberately, but the target contract must be implemented and
+validated explicitly.
 
 ## Versioning
 
@@ -29,20 +52,20 @@ The machine-readable closed schema is
 
 Every external operator declares exactly these fields:
 
-| Field | Contract |
-|---|---|
-| `schema_version` | Exactly `0.1.0`. |
-| `operator_id` | Stable bounded lowercase token. |
-| `operator_version` | `MAJOR.MINOR.PATCH`. |
-| `trust` | Exactly `explicit_install`. |
-| `entrypoint` | Identity string `module:callable`; never dynamically imported by the registry. |
-| `topology` | Exactly `single_source`, `dual_source`, or `carrier_donors`. |
-| `input_count` | Exact number of ordered sources: 1 for single, 2 for dual, and 2–16 for carrier plus donors. |
-| `capabilities` | Closed booleans for `full_clip`, `streaming`, `chunk`, and `deterministic`; at least one processing mode is supported. |
-| `supported_profiles` | One to sixteen closed codec/profile/timing/layout declarations. |
-| `controls` | Closed, bounded enum/float/integer control declarations. |
-| `bypass` | One or more exact control values plus `output_source`; the runtime owns this identity path. |
-| `limits.max_spatial_tokens` | Positive bound no greater than 4096. |
+| Field                       | Contract                                                                                                               |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `schema_version`            | Exactly `0.1.0`.                                                                                                       |
+| `operator_id`               | Stable bounded lowercase token.                                                                                        |
+| `operator_version`          | `MAJOR.MINOR.PATCH`.                                                                                                   |
+| `trust`                     | Exactly `explicit_install`.                                                                                            |
+| `entrypoint`                | Identity string `module:callable`; never dynamically imported by the registry.                                         |
+| `topology`                  | Exactly `single_source`, `dual_source`, or `carrier_donors`.                                                           |
+| `input_count`               | Exact number of ordered sources: 1 for single, 2 for dual, and 2–16 for carrier plus donors.                           |
+| `capabilities`              | Closed booleans for `full_clip`, `streaming`, `chunk`, and `deterministic`; at least one processing mode is supported. |
+| `supported_profiles`        | One to sixteen closed codec/profile/timing/layout declarations.                                                        |
+| `controls`                  | Closed, bounded enum/float/integer control declarations.                                                               |
+| `bypass`                    | One or more exact control values plus `output_source`; the runtime owns this identity path.                            |
+| `limits.max_spatial_tokens` | Positive bound no greater than 4096.                                                                                   |
 
 Unknown fields, non-finite numeric values, invalid ranges, executable source,
 download locations, and cartridge trust claims are rejected. The descriptor is
@@ -53,11 +76,11 @@ metadata, not a loader.
 The callable always receives one immutable tuple. The descriptor fixes its
 meaning and length:
 
-| Topology | `input_count` | `sources` order |
-|---|---:|---|
-| `single_source` | 1 | `(source,)` |
-| `dual_source` | 2 | `(carrier, donor)` |
-| `carrier_donors` | 2–16 | `(carrier, donor_1, donor_2, ...)` |
+| Topology         | `input_count` | `sources` order                    |
+| ---------------- | ------------: | ---------------------------------- |
+| `single_source`  |             1 | `(source,)`                        |
+| `dual_source`    |             2 | `(carrier, donor)`                 |
+| `carrier_donors` |          2–16 | `(carrier, donor_1, donor_2, ...)` |
 
 All sources are independently validated before trusted operator code runs.
 They must have identical shape and device. Donor order is stable and is part of
@@ -116,10 +139,10 @@ process_sources(
 ) -> ToolkitOperatorResult
 ```
 
-The new callable must expose exactly three positional parameters. For the
-unpublished bootstrap draft only, an exactly four-parameter legacy
-`process_slot(carrier, donor, controls, context)` callable remains installable
-for `dual_source` descriptors. New operators must use `process_sources`.
+The canonical callable exposes exactly three positional parameters. The
+Toolkit retains one narrow compatibility path for a pre-0.1, exactly
+four-parameter `process_slot(carrier, donor, controls, context)` callable with
+`dual_source` descriptors. New operators must use `process_sources`.
 
 Sources are finite dense F16 tensors with exact layout `[1,24,1,H,W]`, identical
 shape and device, and a spatial grid within the descriptor limit. The context
@@ -155,6 +178,24 @@ or dynamic entrypoint import. A cartridge cannot select a package or module,
 provide Python source, supply a download URL, or trigger registry mutation.
 Operator installation and cartridge loading are separate actions and separate
 trust domains.
+
+## Moving a research operator into a Deck
+
+To expose Toolkit research as a realtime Deck, create a new Deck integration:
+
+1. implement the current Deck SDK callable using `DeckOperatorContext` and
+   `DeckOperatorResult`;
+2. declare its typed controls and role order in `operator.json` `0.2.0`;
+3. declare exact runtime, signal, timing, geometry, and capability requirements
+   in `deck-pack.json`;
+4. bind every source, role, control, transport, seed, and output anchor in a
+   schema-v2 declarative faceplate;
+5. build, inspect, install, verify, and explicitly enable the resulting `.ld`
+   package.
+
+There is no automatic descriptor conversion or inherited Toolkit trust. The
+Deck package receives application runtime authority only after its own package
+and compatibility lifecycle succeeds.
 
 The public reference implementation is the
 [50-line Channel Roll / MyLatentOperator example](../../operators/examples/channel-roll/README.md).

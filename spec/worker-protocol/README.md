@@ -1,101 +1,143 @@
-# LatentDeck Worker Protocol 1
+# LatentDeck Worker Protocol 2
 
-Status: normative for the local LatentDeck `0.1.0` worker boundary.
+Status: normative for the generic LatentDeck worker boundary. Protocol 1 is
+retained only as an explicitly selected, Player-only H3 compatibility bridge.
 
-This document defines the typed control messages exchanged by Rust Core and an
-isolated codec worker. The Rust implementation is `latentdeck-control`.
-Operating-system transport, process supervision, decoded-frame shared memory,
-codec algorithms, operators, and resampling are separate contracts.
+This document is for Codec Pack, Deck runtime, and host implementers. After
+reading it, an implementer should be able to build a compatible Protocol 2
+peer, choose the correct Player bridge deliberately, and reject incompatible
+or ambiguous behavior without relying on the former D2/Q4-specific commands.
 
-## Stable boundary
+## Scope and version policy
 
-Worker Protocol 1 carries commands, acknowledgements, bounded errors, and
-events. It never carries latent tensors, decoded RGB frames, model weights, a
-Python module, or executable cartridge content. File paths and duplicated
-operating-system handle values are control descriptors only.
+Worker Protocol 2 is the control plane between Core and one isolated Codec
+Pack worker. It defines bounded commands, acknowledgements, errors, events,
+identity receipts, and operating-system handle descriptors. It does not define
+the LC container, Codec SDK algorithms, Deck operator behavior, package
+installation, the decoded-ring memory layout, process scheduling, or the user
+interface.
 
-The protocol marker is `latentdeck.worker`; the exact protocol version is the
-integer `1`. Unknown versions are not assumed compatible.
+The protocol marker is `latentdeck.worker`; the exact version is the integer
+`2`. There is no version-range negotiation after launch. A Protocol 2 launch
+accepts only Protocol 2, and any Protocol 2 failure is returned to the caller.
+It must never trigger an implicit retry through Protocol 1.
 
-## Framing
+Protocol 2 replaces every production Deck-specific Protocol 1 command. D2,
+Q4, bundled Decks, and external `.ld` Decks all use the same generic
+`deck.*` and `capture.*` command families.
 
-Each message is encoded as:
+## Control data and bulk data
 
-```text
-u32 little-endian MessagePack byte length
-exactly one MessagePack envelope
-```
+Protocol frames never contain:
 
-The payload length is `1..=262144` bytes. A receiver rejects zero and oversized
-lengths before allocating a payload buffer, rejects a truncated prefix or
-payload, and rejects bytes after the first MessagePack object.
+- cartridge archive bytes or latent tensor bytes;
+- decoded RGBA bytes;
+- model weights or external asset bytes;
+- Python modules or Deck package files.
 
-The format uses MessagePack maps with UTF-8 string keys. Duplicate keys,
-unknown fields, invalid UTF-8, extension values, non-finite floats, and schema
-coercion are invalid. Variable-length protocol arrays use type-specific bounds.
-Protocol UUIDs are canonical lowercase hyphenated strings.
+Core first performs codec-neutral LC integrity validation and retains the exact
+archive through a read-only operating-system handle that disallows share-write
+and share-delete. `source.open` carries a handle duplicated into the worker,
+the exact cartridge/archive identity, and a bounded integrity-access receipt.
+The worker consumes that retained object instead of reopening an arbitrary
+path.
 
-The generic Rust `Read`/`Write` framing is transport-independent. The Windows
-release uses a local Named Pipe. Named Pipe creation, ACLs, connection handling,
-and process supervision are implemented by `latentdeck-core`, not by
-`latentdeck-control`.
+Decoded output uses a host-created Ring ABI 2 shared-memory mapping.
+`ring.configure` transfers only duplicated mapping/event handle values and
+bounded geometry. The current Player and Deck runtimes configure a
+`decoded_rgba` ring containing complete CPU `uint8 [N,H,W,4]` batches. The
+control enum also reserves `latent_tensor`, but the production Player and Deck
+flows do not send latent payloads through control frames.
+
+External assets are explicit `asset_id`, path, lowercase SHA-256, and byte
+length bindings. The host selection layer validates and retains the selected
+file before worker launch; the Codec Pack may not discover or substitute an
+asset implicitly.
 
 ## Windows transport and supervision
 
-Core creates one random pipe name per worker session before spawning the
-worker. The server is byte-mode, first-instance-only, rejects remote clients,
-allows exactly one instance, and uses bounded 64 KiB input and output buffers.
-Its protected DACL contains one full-access allow ACE for the current process
-user. Default or inherited broad pipe permissions are not accepted.
+The release transport is a local byte-mode Named Pipe. Core creates a fresh
+random pipe for each worker session with one instance, first-instance-only
+creation, remote-client rejection, 64 KiB input/output buffers, and a DACL
+containing only the current process user. After connection, Core verifies that
+the pipe client PID is the PID of the process it spawned.
 
-The worker command is derived only from a fully integrity-checked
-`ValidatedCodecPack`. Core launches that exact executable directly, without a
-shell or PATH lookup, using only the bounded arguments and working directory
-from the validated pack manifest. The child environment is cleared before
-spawn; only `SystemRoot`, `SystemDrive`, `TEMP`, and `TMP` are copied for the
-Windows and temporary-file runtime contract. Core additionally fixes
-`PYTHONDONTWRITEBYTECODE=1`; it is not inherited from the parent and prevents a
-Python worker from mutating an integrity-checked Codec Pack. In particular,
-`PATH`, other Python and CUDA configuration, user-profile variables, and parent
-credentials are not inherited. A self-contained Codec Pack must not depend on
-them.
+The worker executable, arguments, and working directory come only from the
+exact enabled `.ldcodec` version after package-tree and trust-receipt
+validation. Core launches that executable directly without a shell or PATH
+lookup. The inherited environment is cleared. Only `SystemRoot`,
+`SystemDrive`, `TEMP`, and `TMP` are copied, and
+`PYTHONDONTWRITEBYTECODE=1` is set explicitly. A Codec Pack must therefore be
+self-contained and must not depend on inherited Python, CUDA, PATH, profile,
+or credential variables.
 
-Core generates a separate 32-byte cryptographic authentication token. A single
-bounded bootstrap record containing protocol version, session UUID, pipe name,
-and token is written to the child's piped stdin and stdin is then closed. The
-token is never placed in arguments, environment variables, pipe names, or log
-messages. The first connected client must have the spawned worker PID and its
-first envelope must be `worker.hello` with the same PID, session, and token.
+Before the worker receives any command, Core assigns it to a Job Object with
+`KILL_ON_JOB_CLOSE`. Dropping or force-killing a session terminates the worker
+and its descendants. An orderly stop requires the matching
+`session.shutdown` acknowledgement and process exit before the caller's
+deadline.
 
-The child is assigned to a Windows Job Object configured with
-`KILL_ON_JOB_CLOSE` before bootstrap delivery. Dropping a pending/authenticated
-session therefore terminates the worker and its descendants; explicit force
-kill terminates the entire Job Object. Graceful shutdown requires the typed
-`worker.shutdown` acknowledgement followed by process exit within a caller
-deadline. Any crash, authentication failure, malformed frame, pipe failure, or
-timeout ends that session. Protocol 1 never auto-resumes playback or reuses its
-causal decoder state.
+The worker runs with the current user's authority. Environment clearing,
+package validation, the Named Pipe boundary, and the Job Object are lifecycle
+and integrity controls; they are not a security sandbox for trusted Codec or
+Deck code.
 
-The small Win32 FFI surface for current-user security descriptors, pipe client
-PID verification, and Job Objects is isolated in the Windows supervisor module.
-Its contract tests inspect the exact one-ACE DACL and Job Object flag, then run
-synthetic worker processes through authenticated shutdown, bad-token rejection,
-early-exit observation, and explicit force-kill paths.
+## Bootstrap and authenticated hello
 
-## Envelope
+Core generates a separate 32-byte cryptographic token for each session. It
+writes one closed named-MessagePack bootstrap record to the child's piped
+stdin, then closes stdin. The record is framed with a four-byte little-endian
+payload length, is at most 4096 bytes, and contains exactly:
+
+- `bootstrap_version: 2`;
+- `protocol_version: 2`;
+- canonical non-nil `session_id`;
+- the private pipe name;
+- the token as exactly 64 lowercase hexadecimal characters.
+
+The token never appears in arguments, environment variables, pipe names, or
+normal diagnostics. Its Rust debug representation is redacted.
+
+The first worker-to-host envelope must be an uncaused `worker.hello` event.
+It contains the same token, the nonzero worker PID, bounded worker/runtime
+identities, and `protocol_min = protocol_max = 2`. Any preceding frame,
+repeated hello, wrong PID, wrong token, malformed frame, timeout, or early
+process exit fails the session. Authentication failure does not reopen the
+session and does not select Protocol 1.
+
+## Framing and envelope
+
+The Windows pipe wire format is:
+
+```text
+u32 little-endian named-MessagePack payload length
+exactly one named-MessagePack envelope
+```
+
+The payload length is `1..=262144` bytes. Receivers reject an invalid length
+before allocating the payload buffer and reject truncation, trailing bytes,
+duplicate map fields, unknown schema fields, invalid canonical identities,
+out-of-bound collections, and non-finite numeric controls. Maps use UTF-8 text
+keys. Protocol UUIDs are canonical lowercase hyphenated strings; SHA-256
+values are exactly 64 lowercase hexadecimal characters.
+
+The Rust contract also provides bounded JSON encode/decode for conformance
+corpora and diagnostics. JSON is not the Windows worker transport.
+
+A representative envelope is:
 
 ```json
 {
   "protocol": "latentdeck.worker",
-  "protocol_version": 1,
-  "session_id": "00000000-0000-0000-0000-000000000001",
+  "protocol_version": 2,
+  "session_id": "00000000-0000-4000-8000-000000000001",
   "sequence": 1,
-  "message_id": "00000000-0000-0000-0000-000000000002",
+  "message_id": "00000000-0000-4000-8000-000000000002",
   "sender_uptime_ns": 123,
   "message": {
     "kind": "command",
     "body": {
-      "name": "worker.status",
+      "name": "session.status",
       "payload": {}
     }
   }
@@ -104,385 +146,336 @@ early-exit observation, and explicit force-kill paths.
 
 `kind` is `command`, `ack`, `error`, or `event`.
 
-- Core sends commands; the worker sends acknowledgements, errors, and events.
-- `sequence` starts at one and increases by exactly one independently for each
-  sender.
-- `message_id` is non-nil and unique within the bounded session.
-- Every command receives exactly one terminal acknowledgement or error.
-- An acknowledgement/error body contains `reply_to`. Its typed name must equal
-  the referenced command name.
-- An event may contain `caused_by`, which must reference a command known in the
-  same session.
-- A session is recreated before either its 65,536 inbound-envelope budget or
-  its 65,536 outbound-command budget is exhausted. At most 256 command replies
-  may be pending. A runtime MUST reserve enough budget for an orderly stop and
-  MUST surface controlled session rotation before the cap, never discover the
-  cap by failing a realtime command.
+- Host-to-worker and worker-to-host sequences each start at one and increase
+  by exactly one.
+- Every message ID is non-nil and unique in its direction for the session.
+- Every command receives one terminal acknowledgement or error.
+- An acknowledgement or error names the same command and contains its exact
+  `reply_to` message ID.
+- An event may contain `caused_by`, but only for a command already known in
+  that session.
+- Each direction has a 65,536-message session budget; at most 256 command
+  replies may be pending. The current Rust client is deliberately sequential
+  and has only one command in flight.
+- `sender_uptime_ns` is sender-local monotonic uptime, not a timestamp that can
+  be compared between processes.
 
-## Handshake and events
+The host must rotate or stop a session while enough message budget remains for
+controlled shutdown. It must not discover exhaustion by failing a realtime
+command.
 
-The first worker envelope is `worker.hello`. It carries the fixed 32-byte
-session authentication token, worker/runtime identity, supported protocol
-range, PID, and a bounded adapter list. The token has a redacted Rust `Debug`
-representation.
+## Capabilities and ABI receipts
 
-Core replies with `session.configure`, fixing:
+The closed capability set is:
 
-- protocol version `1`;
-- heartbeat interval and hard timeout;
-- maximum frame size `262144`;
-- exactly one in-flight decode batch.
+| Capability         | Meaning                                        |
+| ------------------ | ---------------------------------------------- |
+| `player`           | open, step, reset, and query one Player source |
+| `realtime`         | run a generic multi-source Deck                |
+| `resample`         | serialize post-operator latent output          |
+| `snapshot_capture` | capture a bounded Snapshot                     |
+| `live_capture`     | capture a bounded live latent stream           |
+| `raw_import`       | optional raw-media preflight and staged import |
 
-The heartbeat hard timeout applies while a command is pending. Time spent with
-no pending command does not consume the next command's heartbeat window; a
-client without a background event pump begins that window when it sends the
-command and drains any queued authenticated events in order.
+A full Codec Pack v2 descriptor must advertise `player`, `realtime`,
+`resample`, `snapshot_capture`, and `live_capture`. `raw_import` is optional.
+The descriptor also binds the exact pack and adapter versions, host API `2.0`,
+and up to 64 supported profile keys. Session configuration requests the
+capabilities needed for that session; the acknowledgement must return them as
+accepted capabilities.
 
-Worker events are:
+Profile inspection is allocation-safe metadata discovery. Profile validation
+returns a `ProfileReceipt` that Core cross-checks before `codec.load`. The
+receipt binds:
 
-| Name                   | Meaning                                   |
-| ---------------------- | ----------------------------------------- |
-| `worker.hello`         | first authenticated worker description    |
-| `worker.heartbeat`     | lightweight liveness and component states |
-| `worker.state_changed` | durable state transition plus reason      |
-| `metrics.snapshot`     | bounded cumulative counters               |
-| `worker.fault`         | stable error plus diagnostic ID           |
+- a unique receipt and exact cartridge/archive/payload identity;
+- exact pack and adapter identity/version;
+- `(codec_family, profile, profile_version)`;
+- channels, latent and decoded dimensions, rational frame rate, and timing
+  contract/version;
+- tensor ABI, decoded ABI, capabilities, and host/device memory estimates.
 
-`sender_uptime_ns` is local monotonic uptime. Values from different processes
-are not directly compared as timestamps.
+The declared tensor ABI requires CPython 3.13, an exact declared Torch
+version, a contiguous `[1,C,1,H,W]` tensor, an explicit CPU or CUDA device, and
+one of `float16`, `bfloat16`, or `float32`. Its channel and spatial dimensions
+must equal the signal receipt. Runtime tensors governed by that ABI must also
+be finite. The decoded ABI is `rgba8` with a maximum batch in `1..=24`. Core
+rejects identity, profile, signal, ABI, capability, or memory differences
+before permitting GPU allocation.
 
-## Commands and acknowledgements
+## Status, events, and errors
 
-| Command                 | Purpose                                                                      |
-| ----------------------- | ---------------------------------------------------------------------------- |
-| `session.configure`     | finish protocol negotiation                                                  |
-| `codec.inspect`         | inspect adapters, CUDA, and devices without loading assets                   |
-| `codec.load`            | load one installed pack/adapter and explicit external assets                 |
-| `slot.load`             | revalidate and load one exact cartridge into a Player slot                   |
-| `slot.reset`            | change generation and clear causal decoder state                             |
-| `slot.decode_cycle`     | decode the next codec-owned timing cycle                                     |
-| `ring.bind`             | bind a previously created RGB-ring mapping and notification handle           |
-| `deck.d2.load`          | bind two exact H3 sources and initialize the trusted LD-D2 operator          |
-| `deck.d2.process_slot`  | process one post-operator latent slot, decode it, and publish its RGB frames |
-| `deck.d2.reset`         | apply a reported D2 reset barrier with a newer generation                    |
-| `deck.d2.restart`       | request a restart barrier without clearing causal state implicitly           |
-| `deck.d2.controls.set`  | atomically replace the closed realtime D2 control block                      |
-| `deck.d2.transport.set` | atomically replace both A/B play and loop flags                              |
-| `deck.d2.seed.set`      | replace the exact deterministic u53 seed                                     |
-| `deck.d2.status`        | return the worker-owned D2 scheduler state                                   |
-| `deck.q4.load`          | bind four exact H3 sources and initialize trusted LD-Q4                       |
-| `deck.q4.process_slot`  | synthesize/decode one carrier-donor slot and publish its RGB frames           |
-| `deck.q4.reset`         | apply a reported Q4 causal-reset barrier with a newer generation              |
-| `deck.q4.restart`       | request a four-playhead restart barrier                                       |
-| `deck.q4.controls.set`  | atomically replace the closed Q4 synthesis controls                           |
-| `deck.q4.roles.set`     | atomically replace the explicit carrier/B/C/D role permutation                |
-| `deck.q4.transport.set` | atomically replace all four play and loop pairs                               |
-| `deck.q4.seed.set`      | replace the exact deterministic Q4 u53 seed                                   |
-| `deck.q4.status`        | return the worker-owned Q4 scheduler state                                    |
-| `deck.q4.capture.start` | arm bounded Snapshot or Live Capture at the next valid reset boundary         |
-| `deck.q4.capture.stop`  | stop or arm stopping of the active Q4 capture                                 |
-| `deck.q4.capture.status`| read the active Q4 capture state without mutation                             |
-| `worker.status`         | return current worker/codec/slot/ring states                                 |
-| `metrics.get`           | return a cumulative metrics snapshot                                         |
-| `worker.shutdown`       | acknowledge orderly shutdown before process exit                             |
+Every acknowledgement includes both its command-specific payload and a common
+status snapshot. Every error includes a common status snapshot. The snapshot
+contains session, codec, Player, Deck, and capture states; the number of open
+sessions; the optional foreground-output session; and whether that output
+lease is pinned. `open_session_count` is bounded by four. A pinned lease must
+name its foreground session.
 
-Every acknowledgement has the same typed name as its command. Long operations
-acknowledge only after their state transition is complete. Progress and
-liveness use events rather than an early acceptance acknowledgement.
+Events are closed to:
 
-## LD-D2 scheduler contract
+| Event              | Purpose                                             |
+| ------------------ | --------------------------------------------------- |
+| `worker.hello`     | first authenticated worker description              |
+| `status.changed`   | durable state transition                            |
+| `worker.heartbeat` | liveness and current common status                  |
+| `worker.fault`     | asynchronous stable failure and diagnostic identity |
 
-The D2 worker is a separate Codec Pack entrypoint. It uses the same framing,
-authentication, session negotiation, codec inspection/load, ring binding, and
-shutdown rules as the Player worker. A valid Player-only pack may omit the D2
-entrypoint; Core then reports D2 as unavailable and does not reuse the Player
-command implicitly.
+The heartbeat hard timeout applies while a command is pending. Idle time before
+the next command does not consume that command's heartbeat window.
 
-Only the trusted host sends D2 commands. The UI supplies cartridge UUID/hash
-identities and realtime controls to the host API; it never supplies a local
-path, `deck_id`, revision, generation, operator identity, processing tick, or
-ring sequence. The application host resolves each source through the Library
-index, performs full LC validation, and places the resulting local path in
-`deck.d2.load`. The low-level `WorkerClient` accepts an already constructed
-typed command and does not perform Library lookup. The worker reopens and
-rehashes each exact archive before allocating its cartridge tensor on the GPU.
+An error reply contains `reply_to`, the command name, and:
 
-`deck.d2.load` contains:
+- stable code;
+- bounded message;
+- `retryable` and `fatal` flags;
+- common status snapshot;
+- non-nil diagnostic UUID;
+- up to 16 unique bounded key/value details.
 
-- a bounded host-owned `deck_id`;
-- the explicitly installed operator ID and version;
-- A and B source bindings, each with local path, canonical cartridge UUID, and
-  expected lowercase archive SHA-256;
-- the complete closed controls and four-flag transport blocks;
-- an integer seed in `0..=9007199254740991`;
-- a nonzero initial `u64` stream generation.
-
-The worker accepts compatible H3 sources with independent temporal lengths.
-It rejects mismatched codec/profile/timing/runtime layout, frame rate, latent
-spatial grid, or decoded geometry. It does not crop, resize, re-encode, select
-a cheaper algorithm, or silently change dtype beyond the profile-authorized
-F32-storage to F16-runtime cast.
-
-The required single-session lifecycle is:
+Stable Protocol 2 error codes are:
 
 ```text
-session.configure -> codec.inspect -> codec.load -> deck.d2.load -> ring.bind
+protocol.invalid_message       protocol.unsupported_version
+protocol.bound_exceeded        session.not_configured
+session.capacity_exceeded      session.output_lease_busy
+session.output_lease_pinned    codec.not_loaded
+codec.untrusted                codec.capability_unsupported
+profile.invalid                profile.incompatible
+source.invalid                 source.not_loaded
+deck.invalid                   deck.incompatible
+capture.invalid_state          capture.not_ready
+capture.limit_exceeded         state.busy
+worker.internal
 ```
 
-`deck.d2.load` is accepted once per worker process and returns the
-worker-assigned nonzero `deck_revision`. The host retains that revision and
-uses it in every later D2 command. Protocol 1 has no D2 unload command;
-changing source cartridges or recovering from a failed deck load recreates the
-isolated worker session.
+## Closed command set
 
-The realtime control block has these exact finite ranges:
+Every acknowledgement uses the same name as its command.
 
-| Control                                   | Values or range                                                                           |
-| ----------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `algorithm`                               | `LINEAR`, `XS1`, `XS2`, `XS3`, `XS4`, `XS5`                                               |
-| `mix`, `interaction`, `preserve`, `chaos` | `0..=1`                                                                                   |
-| `mode`                                    | `HYBRIDIZE`, `INTERACT`                                                                   |
-| `routing`                                 | structural carrier `A` or `B`                                                             |
-| `xs1_channel_a`, `xs1_channel_b`          | distinct channels in `0..=23`                                                             |
-| `xs1_angle_degrees`                       | `-180..=180`                                                                              |
-| `xs2_radius`                              | integer `1..=8`                                                                           |
-| `xs3_high_gain`                           | `-2..=2`                                                                                  |
-| `xs4_epsilon`                             | `0.00000001..=0.001`                                                                      |
-| `xs5_routing`                             | `TOPK` or `SINKHORN`                                                                      |
-| `temperature`                             | `0.02..=1`                                                                                |
-| `top_k`                                   | integer `1..=64`; the worker additionally rejects values larger than the loaded full grid |
-| `sinkhorn_iterations`                     | integer `2..=12`                                                                          |
+| Command                | Purpose / acknowledgement                                                                                                            |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `session.configure`    | Select version 2, heartbeat/frame/in-flight bounds, and requested capabilities; returns negotiated bounds and accepted capabilities. |
+| `session.status`       | Return the common status snapshot.                                                                                                   |
+| `session.shutdown`     | Request orderly shutdown for `user_request`, `host_exit`, or `protocol_fault`; echoes the reason before exit.                        |
+| `codec.descriptor`     | Describe one exact pack/adapter, host API, capabilities, and profiles without loading model assets.                                  |
+| `codec.load`           | Load the exact adapter/device and explicit external assets after receipt validation; returns the exact loaded identity.              |
+| `codec.unload`         | Unload the exact pack version; returns that identity.                                                                                |
+| `source.open`          | Register a retained validated LC handle and integrity receipt; returns exact source/cartridge/archive identity.                      |
+| `source.close`         | Close one exact source ID.                                                                                                           |
+| `ring.configure`       | Bind duplicated mapping and notification handles; returns exact ring kind and geometry.                                              |
+| `ring.release`         | Release one exact ring ID.                                                                                                           |
+| `profile.inspect`      | Return payload hash, profile key, and signal geometry for an opened source.                                                          |
+| `profile.validate`     | Validate expected profile/capabilities and return the exact `ProfileReceipt`.                                                        |
+| `raw_import.preflight` | Inspect one bounded absolute raw source and return a typed source/manifest receipt.                                                  |
+| `raw_import.stage`     | Stage the payload for an exact preflight receipt below a host-owned root.                                                            |
+| `raw_import.abort`     | Abort and clean one exact preflight/stage identity.                                                                                  |
+| `player.open`          | Open one source/receipt as a Player session and return Player status.                                                                |
+| `player.step`          | Decode at most 24 frames and return Player status plus optional output-ring publication.                                             |
+| `player.reset`         | Move to a strictly newer stream generation and return reset Player status.                                                           |
+| `player.status`        | Return current Player status.                                                                                                        |
+| `deck.load`            | Load one exact generic Deck runtime, sources, roles, controls, seed, and generation; returns full Deck status.                       |
+| `deck.process`         | Process one latent slot, capture before decode when active, publish decoded output, and return full status/ring/provenance.          |
+| `deck.controls.set`    | Atomically replace the closed control set; returns full Deck status.                                                                 |
+| `deck.roles.set`       | Atomically replace logical role bindings; returns full Deck status.                                                                  |
+| `deck.transport.set`   | Atomically replace play/pause and loop state for every physical source; returns full Deck status.                                    |
+| `deck.seed.set`        | Replace the deterministic `u64` seed; returns full Deck status.                                                                      |
+| `deck.reset`           | Apply a host-chosen newer generation and explicit playhead-preservation policy; returns full Deck status.                            |
+| `deck.restart`         | Restart an exact Deck revision; the worker advances revision/generation and clears playheads/history.                                |
+| `deck.status`          | Return full Deck status.                                                                                                             |
+| `capture.start`        | Start bounded Snapshot or Live Capture below a host-owned staging root; returns capture status.                                      |
+| `capture.stop`         | Stop/finalize the exact Live Capture identity; returns capture status.                                                               |
+| `capture.status`       | Return the exact active/terminal capture status.                                                                                     |
+| `metrics.get`          | Return cumulative bounded worker counters.                                                                                           |
 
-`deck.d2.process_slot` carries only the current deck identity/revision and
-generation. Its acknowledgement is exactly one of:
+There are no `deck.d2.*` or `deck.q4.*` Protocol 2 commands.
 
-- `decoded_slot`: playheads, the authoritative four-flag transport, stream
-  sequence, decoded frame range, the exact half-open RGB-ring sequence range,
-  and bounded JSON-object provenance;
-- `reset_barrier`: current/minimum-new generations and one or both loop or
-  restart reasons;
-- `paused`: current generation, playheads, and the authoritative four-flag
-  transport, with no decode or publication.
+## Common startup order
 
-For `decoded_slot`, the half-open ring range length must equal the reported
-decoded frame count, which is `1..=4`. Provenance is limited to 32 KiB and
-must parse as a JSON object; malformed JSON, scalar, array, null, and
-non-finite numeric forms are rejected. The F16 latent itself is not returned;
-it reaches decode inside the worker. When an explicit capture is armed, the
-same post-operator slot also reaches the separate bounded resample sink before
-decode. Tensor and RGB bytes never enter capture control replies.
-
-`D2Status.stream_sequence` is the next slot sequence expected by the host. The
-first decoded slot in a generation therefore acknowledges sequence `0`; after
-accepting it the host advances its expected sequence to `1`. While the worker
-publishes a decoded batch, the RGB consumer sequence must remain unchanged and
-occupancy/capacity must change by exactly the acknowledged frame count.
-
-The transport returned by `decoded_slot` and `paused` is authoritative. In
-particular, a non-looping source reaching EOS clears only its own `playing_*`
-flag; when both sources settle, `paused` carries both flags cleared. The host
-adopts these values rather than inferring EOS from stale UI state.
-
-Loop and Restart are two-step state transitions. A barrier never clears state
-by itself. Core chooses a strictly newer nonzero generation and sends
-`deck.d2.reset`; only an acknowledgement with `causal_state_cleared=true` may
-resume processing. Before that acknowledgement, a successful reset clears
-decoder history and operator history, applies the barrier's required playhead
-changes, resets decoded-frame progress, and changes ring generation. A failed
-reset leaves the barrier active for explicit retry or worker termination.
-
-Controls, transport, and seed updates are atomic and report
-`requires_causal_reset=false`. The application may enqueue updates while a
-slot is in flight, but the sequential worker client can apply them only between
-complete commands. The host scheduler MUST stop recurring process requests
-when both playheads are paused and MUST NOT busy-spin.
-
-### D2 post-operator capture
-
-Protocol 1 defines three closed capture commands:
-
-- `deck.d2.capture.start`: deck identity/revision, canonical non-nil capture
-  UUID, `snapshot` or `live_capture`, an existing absolute host-owned temporary
-  root, and explicit latent-slot/visual-byte ceilings;
-- `deck.d2.capture.stop`: deck identity/revision and capture UUID;
-- `deck.d2.capture.status`: the same exact identity block, without mutation.
-
-The protocol ceilings are 1,048,576 latent slots and 15 GiB of visual tensor
-data. An application SHOULD choose smaller product limits. The worker creates
-only capture-ID-derived files below the supplied root. The host treats every
-returned path as untrusted control data and MUST bind it to the exact expected
-root and capture-owned filename before packaging.
-
-Start does not write immediately. It requests a normal restart barrier and
-returns `awaiting_reset`; capture becomes `capturing` only after the existing
-two-step reset handshake reaches a newer generation with both playheads at
-zero. Transport is locked through this boundary and throughout capture.
-Snapshot also freezes controls and seed. Live Capture permits bounded
-between-slot controls/seed changes and records at most 32 ordered events.
-
-The post-operator F16 slot is appended before causal decode. A slot is kept
-only if decode and RGB publication also succeed; a failure aborts and removes
-capture-owned partials. Snapshot ends automatically after one complete
-structural-carrier cycle. Live Capture stops immediately when the accumulated
-temporal length is already codec-valid (`T = 2 + 5n`), otherwise it enters
-`stop_armed` and finishes at the first later valid boundary. There is no hidden
-crop, stretch, padding, or RGB fallback.
-
-For Live Capture the worker derives the last codec-valid boundary that fits
-both host ceilings. If the user has not stopped capture by that boundary, the
-worker finishes automatically after that slot decodes successfully; it never
-turns an ordinary bounded-spool limit into a fatal Deck failure. A limit set
-that cannot contain at least `T=2` is rejected before capture starts.
-
-An input cartridge cannot cross a causal decoder generation, but an active Live
-Capture may retain its post-operator spool across a normal automatic loop
-barrier whose reasons are exclusively `slot_*.loop`. The ordinary two-step Deck
-reset must return a strictly newer generation and a valid structural-carrier
-playhead before capture resumes. Restart, recovery, manual or non-loop reset,
-and an invalid reset mapping still abort Live Capture explicitly; Snapshot does
-not gain this loop-crossing exception.
-
-Capture status is one of `awaiting_reset`, `capturing`, `stop_armed`,
-`finished`, or `aborted`, with state-specific generation, target, stop-boundary,
-reason, and receipt fields. A finished receipt is bounded to 32 KiB and binds:
-
-- capture ID/mode, exact payload path, SHA-256, byte length, F16 dtype,
-  `[1,24,T,H,W]` shape, and decoded frame count;
-- structural carrier and exact A/B cartridge UUID/hash parents;
-- Snapshot frozen controls/seed or Live Capture control-event history;
-- one explicit audio policy: `source_absent`,
-  `copied_from_carrier_exact`, or `omitted_timing_mismatch` with
-  `duration_mismatch`, `temporal_mapping_mismatch`, or
-  `duration_and_mapping_mismatch`.
-
-Copied audio is allowed only for an exact structural-carrier duration and
-temporal mapping. The application finalizer revalidates the spool, constructs
-genealogy, writes and validates a same-directory `.lc.partial`, atomically
-commits the `.lc`, and imports it into Library. A successful finalizer consumes
-the exact spool. Active partials and unconsumed finished spools are removed on
-orderly worker close or replacement; after forced process termination, cleanup
-of the trusted temporary root belongs to the application.
-
-## LD-Q4 carrier-donor contract
-
-Q4 uses a separate explicitly declared Codec Pack entrypoint and the same
-authenticated framing, session, ring, reset, recovery, and shutdown invariants
-as D2. It never substitutes the Player or D2 entrypoint. The UI sends four
-Library identities/hashes; the trusted host resolves and fully validates the
-paths before constructing the low-level `deck.q4.load` command.
-
-Physical slots are always `A`, `B`, `C`, and `D`. A closed `roles` object maps
-one physical slot to `carrier` and the remaining slots to logical `donor_b`,
-`donor_c`, and `donor_d`. The four values must be an exact permutation. This
-assignment is explicit in load/status/process acknowledgements, may be replaced
-atomically with `deck.q4.roles.set`, and is recorded in resample provenance.
-No positional or UI-order inference is allowed.
-
-All four sources must match codec/profile/timing, frame rate, latent spatial
-grid, runtime layout, and decoded geometry. Their temporal lengths may differ
-and retain four independent playheads. The eight transport flags control each
-physical slot independently. Any looping slot or Restart produces a reported
-barrier; only `deck.q4.reset` with a newer generation and
-`causal_state_cleared=true` may resume decode. A non-looping EOS clears only
-that physical slot's `playing_*` flag.
-
-The Q4 control block is closed and finite:
-
-| Control | Values or range |
-| --- | --- |
-| `algorithm` | `LINEAR` or `XS5` |
-| `interaction`, `preserve`, `chaos` | `0..=1`; chaos `0` is the exact unperturbed path |
-| `mode` | `HYBRIDIZE` or `INTERACT` |
-| `influence_mode` | `MANUAL` or `TRIANGLE` |
-| `donor_weight_b/c/d` | each `0..=1`; at least one positive in manual mode |
-| `triangle_x/y` | `0..=1` and inside the B/C/D barycentric field |
-| `xs5_routing` | `TOPK` or `SINKHORN` |
-| `temperature` | `0.02..=1` |
-| `top_k` | integer `1..=64`, additionally bounded by the full loaded grid |
-| `sinkhorn_iterations` | integer `2..=12` |
-
-The global `interaction` value is total donor strength. Manual or triangular
-weights are normalized only to distribute that total among logical donors.
-Each donor affinity is computed against the same unchanged carrier state, then
-the routed states accumulate in fixed logical B/C/D order. Implementations may
-batch or reuse carrier affinity, but may not downscale the grid, omit a donor,
-drop to RGB, or silently change the algorithm to meet a frame-rate target.
-Seeded chaos and identical input/control/event sequences must be deterministic.
-
-`deck.q4.process_slot` returns `decoded_slot`, `reset_barrier`, or `paused` with
-the same ring-range and bounded provenance rules as D2, extended to four
-playheads and explicit roles. Controls, roles, transport, and seed updates are
-applied only between complete slot commands and acknowledge
-`requires_causal_reset=false`.
-
-Q4 capture uses the same bounded post-operator-before-decode spool and valid H3
-stop boundaries as D2. Snapshot freezes roles, controls, seed, and one complete
-structural-carrier cycle. Live Capture records at most 32 ordered events, each
-binding a latent-slot offset to roles, controls, and seed. The receipt binds all
-four UUID/hash parents and the structural carrier. Audio is copied only from
-that carrier when duration and temporal mapping match exactly; otherwise the
-receipt declares the explicit omission policy and reason. The host revalidates
-the worker path, Safetensors payload, hash, dtype/shape, genealogy, and final
-`.lc` before atomic commit and Library import.
-
-## H3 slot timing
-
-The worker owns H3 cadence. Core requests only a sequential `cycle_index`; it
-does not send latent/frame range math back to the adapter.
-
-For a complete H3 clip `T = 2 + 5n`:
+Core validates and selects exact enabled Codec and Deck package versions before
+launch. A production startup then follows this order:
 
 ```text
-cycle 0: 2 latent slots -> 5 decoded frames
-cycles 1..n: 5 latent slots -> 17 decoded frames each
-total cycles: 1 + n
-total frames: 5 + 17n
+worker.hello
+session.configure
+codec.descriptor
+for each source:
+  source.open
+  profile.inspect
+  profile.validate
+codec.load
+ring.configure
+player.open OR deck.load
 ```
 
-The timing acknowledgement reports the exact latent and decoded range plus the
-half-open RGB ring sequence range. Pause is represented by Core sending no new
-cycle. Loop, Restart, and recovery use a strictly newer stream generation and
-`slot.reset`; arbitrary seek has no command in version 1.
+Generic Deck startup follows `deck.load` with `deck.transport.set` so every
+physical source receives the exact host transport intent. The worker cannot
+change package identity, source identity, profile, ABI, or external assets
+during that session. Source replacement creates a bounded replacement session;
+it is not an in-place path swap.
 
-## Ring binding
+Teardown may explicitly close sources, release the ring, and unload the codec,
+but process ownership remains the final cleanup boundary.
 
-`ring.bind` carries only:
+## Player lifecycle
 
-- layout version `1`;
-- a nonzero file-mapping handle valid in the worker process;
-- mapping size from 4096 bytes through 256 MiB;
-- a nonzero frames-ready event handle;
-- a non-nil ring UUID.
+`player.open` binds one physical source and its profile receipt to a nonzero
+stream generation. `player.step` carries only the Player session identity,
+current generation, and a requested maximum decoded batch in `1..=24`.
+Its acknowledgement reports authoritative state, generation, sequence,
+playhead, EOS, decoded ring, output sequence, and decoded frame count. A
+positive decoded count requires a ring ID.
 
-It carries no mapped bytes. Header/slot layout, atomic publication, pixel
-format, and backpressure are defined by the separate RGB ring contract and are
-validated by the runtime before acknowledgement.
+The worker never wraps a causal Player stream invisibly. At EOS it reports
+`end_of_stream`. If host transport requests looping, Core performs an explicit
+generation-increasing `player.reset` before decoding again. Decoder state and
+ring generation therefore change at one visible boundary.
 
-## Error shape
+## Generic Deck lifecycle
 
-An error reply contains:
+`deck.load` supports one to 16 physical sources. Production loads include an
+exact `DeckRuntimeBinding` derived from an enabled `.ld` usage lease: Deck and
+operator identities, canonical Python root, `module:callable` entrypoint, and
+the package-manifest and integrity-catalog hashes. The optional wire form is
+retained for injected conformance runtimes; production installed Decks require
+the hash-bound binding.
+
+Core validates source count, physical slots, logical roles, and typed controls
+against the exact Deck operator descriptor. Role reassignment never moves
+physical playheads or previous-source history. Control values are closed to
+boolean, signed integer, finite number, or bounded text.
+
+`deck.process` is one ordered processing tick:
+
+1. read the current slot for every physical source through its opened handle;
+2. call the selected Deck operator with controls, roles, playheads, generation,
+   sequence, seed, and physical-slot history;
+3. validate the finite, shape/dtype/device-preserving post-operator tensor;
+4. append that tensor to an active capture writer before decode;
+5. decode and publish one complete RGBA batch through Ring ABI 2;
+6. return the full authoritative `DeckStatusSnapshot` and bounded typed
+   provenance.
+
+The acknowledgement preserves Deck identity/revision/generation and advances
+the stream sequence exactly once. Controls, roles, and seed cannot change as a
+side effect. The host validates the returned snapshot rather than trusting a
+partial delta.
+
+Playheads and transport are physical-slot scoped. A looping source may wrap
+from its exact final slot to zero; Core then performs a strictly newer
+`deck.reset` with `preserve_playheads=true` so decoder/ring/previous-source
+state crosses an explicit causal boundary. A non-looping source reaching its
+exact final slot changes only its own `playing` flag to false, retains its last
+playhead, and reports EOS. When all sources settle, the Deck becomes paused but
+the warm session remains valid. Stopping before exact EOS or changing unrelated
+state in a process acknowledgement is a protocol fault.
+
+`deck.controls.set`, `deck.roles.set`, `deck.transport.set`, and
+`deck.seed.set` are sequential atomic replacements. Each returns a complete
+snapshot; the host accepts only the requested mutation. Resuming or pausing a
+source after EOS does not recreate the session. The host scheduler stops
+recurring `deck.process` calls when every source is paused and must not
+busy-spin.
+
+`deck.reset` requires a strictly newer nonzero generation, resets decoder and
+ring generation, clears stream sequence and previous-source history, and
+either preserves or zeroes playheads exactly as requested. `deck.restart` is
+not a synonym: outside active capture it advances the Deck revision and
+generation, clears all playheads/history, and returns the restarted full
+snapshot.
+
+## Capture and resample lifecycle
+
+`capture.start` carries the exact Deck revision and capture UUID, mode,
+absolute host-owned staging root, and explicit limits. Protocol maxima are
+1,048,576 latent slots, 15 GiB of visual tensor data, and 32 reset events. A
+product may choose smaller values.
+
+Capture receives the post-operator tensor before decode. Snapshot asks the
+Codec writer to finish at the first profile-valid boundary. Live Capture keeps
+appending until `capture.stop`, then remains `finalizing` until the writer
+reaches a profile-valid boundary. Normal source-loop resets may be recorded as
+bounded reset events while capture continues. A manual restart is rejected
+during active capture.
+
+A capture acknowledgement never carries tensor bytes. Before completion it
+contains identity, mode, state, latent-slot count, and reset-event count. Only
+`completed` may contain an artifact, and `completed` must contain one. The
+artifact is a staged payload path, lowercase payload SHA-256, byte length,
+latent-slot count, and decoded-frame count.
+
+The staged path remains untrusted control data. Core binds it to the expected
+capture-owned staging root/name, checks the receipt and limits, constructs the
+codec-neutral LC manifest and genealogy, writes with no-clobber semantics,
+reopens and fully validates the resulting `.lc`, then imports it into the
+Library. The adapter never writes directly into the Library. Abort, worker
+fault, or finalization failure removes capture-owned partial state.
+
+## Optional raw import lifecycle
+
+Raw import is available only when the descriptor declares `raw_import`.
+`raw_import.preflight` accepts a non-nil import UUID, absolute source path, and
+a source-size limit no larger than 64 GiB. It returns an exact source hash and
+length plus bounded typed metadata: profile, safe payload entry, one visual
+tensor, at most one matching audio tensor, storage/runtime dtypes, shapes,
+timing, decoded geometry, duration, and audio policy.
+
+`raw_import.stage` is valid only for the exact preflight receipt and a
+host-owned absolute staging root. It returns a staged payload path/hash/length;
+`raw_import.abort` cleans that identity. As with capture, Core constructs and
+revalidates the final LC container. A Codec Pack may not return a ready Library
+cartridge or silently replace the source.
+
+## Protocol 1 Player compatibility bridge
+
+Protocol 1 remains at the crate root for the accepted legacy H3 Player path.
+Its closed command names are:
 
 ```text
-reply_to
-command name
-stable error code
-bounded human message
-retryable / fatal flags
-worker state
-diagnostic UUID
-up to 16 bounded key/value details
+session.configure    codec.inspect      codec.load
+slot.load            slot.reset         slot.decode_cycle
+ring.bind            worker.status      metrics.get
+worker.shutdown
 ```
 
-Stable code namespaces are `protocol.*`, `state.*`, `codec.*`, `slot.*`,
-`decode.*`, `ring.*`, `capture.*`, and `worker.*`. Program logic switches on
-the code, never on the human message. Stack traces, authentication tokens,
-tensor bytes, and RGB bytes are not error details.
+Protocol 1 no longer accepts any Deck command. In particular, legacy
+`deck.d2.*` and `deck.q4.*` names fail schema decoding. It has no generic Deck,
+capture, `.ld` runtime, retained-handle source, or raw-import contract.
 
-## Conformance tests
+The Player runtime has two explicit selections only: the Protocol 1 H3 bridge
+or Protocol 2. There is no `auto` selection. Selecting Protocol 1 invokes only
+the legacy bridge. Selecting Protocol 2 invokes only Protocol 2; handshake,
+capability, profile, runtime, or decode failure is surfaced and never falls
+back to Protocol 1.
 
-Public tests use only synthetic messages and in-memory byte streams. They cover
-round trips, clean EOF, zero/oversized/truncated frames, trailing objects,
-unknown envelope and nested payload fields, unsupported versions, wrong
-sessions, sequence gaps, duplicate command IDs, unmatched replies, mismatched
-reply names, directionality, fixed authentication-token length, and bounded
-arrays. No cartridge, latent, weight, or local machine path is a fixture.
+Protocol 1 and Protocol 2 have distinct typed command, acknowledgement, event,
+error, and bootstrap schemas even where their framing and Windows supervision
+principles are similar. Implementers must not mix their payloads or infer one
+version from the other's command names.
+
+## Conformance requirements
+
+A conforming implementation must exercise both JSON and named-MessagePack
+round trips for the typed Protocol 2 corpus, and the actual worker transport
+must use length-prefixed named MessagePack. At minimum, tests must cover:
+
+- all 32 command names and matching acknowledgement names;
+- cross-language Rust/Python fixtures;
+- unknown/duplicate fields, trailing bytes, bad UUID/hash text, non-finite
+  controls, and every collection/frame bound;
+- first-frame hello, token/PID/session checks, contiguous sequences, duplicate
+  IDs, reply correlation, heartbeat timeout, process crash, and Job cleanup;
+- retained-handle source transfer with no cartridge/tensor/RGBA bytes in a
+  control frame;
+- exact descriptor and ProfileReceipt cross-check before `codec.load`;
+- Player step/EOS/reset and explicit no-fallback bridge selection;
+- one-, two-, four-, and sixteen-source Deck scheduling, role changes,
+  independent loops/EOS, generation resets, and exact mutation snapshots;
+- Snapshot/Live Capture bounds, loop reset events, staged artifact validation,
+  abort cleanup, and replay of the finalized cartridge;
+- a synthetic non-H3 Codec Pack and external `.ld` Deck, so the contract is
+  proved independently of H3, D2, and Q4.
+
+The authoritative wire types are the Protocol 2 module of
+`latentdeck-control`; the Python Codec SDK and generic worker runtime must stay
+byte-for-byte compatible with its closed representations.

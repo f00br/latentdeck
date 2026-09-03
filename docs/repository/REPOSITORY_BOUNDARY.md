@@ -56,5 +56,8 @@ The Apache-2.0 project license covers original LatentDeck code and
 documentation only. It does not change the terms of model weights, codec packs,
 cartridges, external operators, or third-party assets.
 
-The future Codec Manager must show source and license information before any
-external download. The source repository must not silently vendor those assets.
+The current Extensions Manager shows self-declared publisher, source, license,
+and exact package identity for local `.ld` and `.ldcodec` packages. It performs
+no URL installation or external asset download. Required decoder/model assets
+remain explicit user selections with their own identity and terms; the source
+repository must not silently vendor them.

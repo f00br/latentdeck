@@ -1,7 +1,8 @@
 # Local release engineering
 
-These runbooks define the local Windows `0.1.0` release-candidate path. They do
-not authorize publication, Git tags, remote changes, signing, or uploads.
+These runbooks define the local Windows `0.1.0` application release-candidate
+path and the independently versioned extension lifecycle. They do not
+authorize publication, Git tags, remote changes, signing, or uploads.
 
 - [Current release-preparation handoff](continue.md)
 - [Master-user test guide](MASTER_USER_TEST.md)
@@ -14,7 +15,7 @@ Application installers and Codec Packs are independent artifacts with
 independent install, update, and removal lifecycles. The public Windows H3
 artifact set contains a small
 `LatentDeck-H3-CodecPack-<version>-setup.exe` and its exact required adjacent
-`LatentDeck-H3-CodecPack-<version>-windows-x64.zip`. The user runs setup; it is
+`LatentDeck-H3-CodecPack-<version>-windows-x64.ldcodec`. The user runs setup; it is
 offline, current-user only, fixed-path, registered for exact-version removal in
 Windows Installed Apps, and requires no elevation, PowerShell, system Python,
 decoder, or model. Setup and maintenance receipts remain outside the
@@ -32,6 +33,7 @@ Local unsigned setup proof does not satisfy publisher trust or clean-machine
 acceptance. Authenticated signing and the offline clean Windows lifecycle remain
 release gates and do not authorize publication by themselves.
 
-The owner accepted the complete local functional surface on 2026-09-01. A
-documentation change after the accepted `dbe310a` artifact set requires a new
-clean RC before publication review; the retained binaries remain evidence only.
+The owner accepted the completed Protocol 2 modular runtime and final local
+functional pass on 2026-09-03 at implementation commit `3648e7c`. The current
+application installers and H3 Codec Pack must be rebuilt from the final clean
+documentation commit before the first-install UAT and publication review.

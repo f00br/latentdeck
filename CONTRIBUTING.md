@@ -1,7 +1,8 @@
 # Contributing
 
-LatentDeck 0.1 owner UAT is complete. The repository is in coordinated release
-and publication preparation; uncoordinated feature work is not open yet.
+LatentDeck 0.1 owner UAT and the Protocol 2 modular-runtime milestone are
+complete. The repository is in coordinated release and publication
+preparation; uncoordinated feature work is not open yet.
 
 For any explicitly assigned change:
 

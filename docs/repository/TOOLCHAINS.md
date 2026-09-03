@@ -6,14 +6,14 @@ a developer machine.
 
 ## Required runtimes
 
-| Runtime | Pin | Repository contract |
-| --- | --- | --- |
-| Node.js | 24.20.0 LTS (Krypton) | `.node-version`, `.nvmrc`, `tools/Get-PinnedNode.ps1` |
-| pnpm | 11.24.0 | `package.json`, `pnpm-lock.yaml` |
-| Rust | 1.93.1 MSVC | `rust-toolchain.toml`, `Cargo.lock` |
-| Python | 3.13.x | `.python-version`, `pyproject.toml`, `uv.lock` |
-| uv | 0.11.8 or compatible | validates and installs `uv.lock` |
-| NSIS | 3.11 | `tools/Get-PinnedNsis.ps1`, `tools/Build-H3CodecPackInstaller.ps1` |
+| Runtime | Pin                   | Repository contract                                                             |
+| ------- | --------------------- | ------------------------------------------------------------------------------- |
+| Node.js | 24.20.0 LTS (Krypton) | `.node-version`, `.nvmrc`, `tools/Get-PinnedNode.ps1`                           |
+| pnpm    | 11.24.0               | `package.json`, `pnpm-lock.yaml`                                                |
+| Rust    | 1.93.1 MSVC           | `rust-toolchain.toml`, `Cargo.lock`                                             |
+| Python  | 3.13.x                | `.python-version`, `pyproject.toml`, `uv.lock`                                  |
+| uv      | 0.11.8                | validates/installs `uv.lock`; H3 enforces it and app RC preparation verifies it |
+| NSIS    | 3.11                  | `tools/Get-PinnedNsis.ps1`, `tools/Build-H3CodecPackInstaller.ps1`              |
 
 The Node archive bootstrap verifies the official Windows x64 SHA-256 before
 extracting into the ignored `.tools/` directory. Node 25 is EOL and is rejected
@@ -32,7 +32,7 @@ The aggregate `tools/Check-Workspace.ps1` may bootstrap this exact pinned
 build tool when the cache is absent; the Codec Pack builder itself remains
 offline unless `-AllowNetwork` is explicit. NSIS is not an end-user
 prerequisite: the resulting setup is self-contained apart from its exact
-required adjacent Codec Pack ZIP.
+required adjacent `.ldcodec` payload.
 
 ## Python codec boundary
 

@@ -29,9 +29,9 @@ C++ build tools. The build helper acquires the pinned Node/pnpm runtime, runs a
 frozen dependency install, prepares the hash-pinned Spout2 source, and invokes
 the pinned Tauri CLI. The CLI version is checked only after the frozen install,
 so a clean machine does not depend on a previously populated `node_modules`.
-Generating the mandatory SBOM also requires `uv 0.11.8` on `PATH`; this is the
-validated release-tool version and provides the locked CycloneDX 1.5 export
-used here.
+Generating the mandatory SBOM also requires `uv 0.11.8` on `PATH`. Verify the
+exact `uv --version` before the build: the current application builder binds
+`uv.lock` but does not record or enforce the uv executable version itself.
 
 Keep the clean source/build root short, for example directly below a drive root.
 A deeply nested throwaway clone can exceed MSVC FileTracker path limits before
@@ -57,7 +57,16 @@ and extracts it into a fresh private build directory for the two Tauri builds.
 
 ## Build
 
-From the repository root:
+First run the aggregate gate from the exact clean short-path clone selected for
+the RC:
+
+```powershell
+pwsh -NoProfile -File tools/Check-Workspace.ps1
+```
+
+`Build-ReleaseCandidate.ps1` runs the public-tree audit before and after its own
+build, but it does not replace this mandatory aggregate gate. After it passes,
+build from the same repository root:
 
 ```powershell
 pwsh -NoProfile -File tools/Build-ReleaseCandidate.ps1
@@ -194,22 +203,25 @@ hardware and without ComfyUI:
 7. Attempt a silent `/S` downgrade and verify that it is rejected. Then run the
    same older installer interactively and verify that it warns and requires an
    explicit uninstall-before-install choice before the downgrade can proceed.
-8. Keep `LatentDeck-H3-CodecPack-0.1.1-setup.exe` beside its exact matching
-   `LatentDeck-H3-CodecPack-0.1.1-windows-x64.zip`, then install through setup
+8. Keep `LatentDeck-H3-CodecPack-0.2.0-setup.exe` beside its exact matching
+   `LatentDeck-H3-CodecPack-0.2.0-windows-x64.ldcodec`, then install through setup
    without elevation, PowerShell, system Python, a model, or setup-time network
-   access. Select an external decoder weight, then test playback, D2/Q4, native
-   output, and Spout receiver shutdown.
+   access. In Extensions, enable H3 `0.2.0`, choose it for Player, enable bundled
+   D2/Q4 `0.2.1`, select an external decoder weight, then test playback, Deck
+   synthesis, native output, and Spout receiver shutdown.
 9. Remove each application and prove the independently installed Codec Pack is
-   unaffected; then remove only Codec Pack `0.1.1` through its Windows Installed
+   unaffected; then remove only Codec Pack `0.2.0` through its Windows Installed
    Apps entry and prove both applications and user data remain.
 
 ## Current publication boundary
 
-The owner accepted the complete local `0.1.0` functional surface and the
-unsigned H3 Codec Pack `0.1.1` lifecycle built from clean commit `dbe310a` on
-2026-09-01. That set remains durable UAT evidence. Any later documentation or
-release-preparation commit requires a new clean application and Codec Pack
-build from the final commit before publication review.
+The owner accepted the Protocol 2 product surface through implementation commit
+`3648e7c634c4310767165ce8975129323a5c09f2` on 2026-09-03, including Player,
+generic Deck runtime, H3 `0.2.0`, D2/Q4 `0.2.1`, realtime controls, capture,
+MP4, fullscreen, Spout, extension lifecycle, warm sessions, and output leases.
+The final unsigned application and Codec Pack candidates must still be rebuilt
+from the documentation-complete commit in a new clean clone before the next
+first-install acceptance pass.
 
 A real clean-machine install of the final signed artifacts, including the H3
 setup/adjacent-payload and exact-version uninstall path, NVIDIA runtime test,

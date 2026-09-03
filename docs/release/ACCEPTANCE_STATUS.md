@@ -1,201 +1,165 @@
 # LatentDeck 0.1.0 acceptance status
 
-This is the current release-status record. It separates owner-accepted local
-behavior from release-presentation and publication gates. It does not authorize
-a remote, push, tag, upload, signing action, or public release.
+This is the current release-status record. It separates accepted local product
+behavior from fresh-install, publisher-trust, and publication gates. It does
+not authorize a remote, push, tag, upload, signing action, or public release.
 
-Status on 2026-09-01: the owner explicitly accepted the complete local `0.1.0`
-functional surface with no remaining product defects. Player, Library,
-Collections, LD-D2, LD-Q4, Resample, Snapshot, long Live Capture, hot insertion,
-upright MP4 output, Spout2, 9:16 and 16:9 presentation, LatentPlayer PREPARE,
-and H3 Codec Pack setup/runtime behavior work as intended on the owner test
-machine.
+Status on 2026-09-03: the owner accepted the completed Protocol 2 modular
+runtime and final manual application pass with no known product defect
+remaining. The accepted implementation checkpoint is clean `main` commit
+`3648e7c634c4310767165ce8975129323a5c09f2`.
 
-The repository is now in release-documentation and publication preparation.
-The ComfyUI all-nodes gallery is a required task for that next phase, not a
-missing functional fix. Clean-machine, signing, security-contact, archive,
-legal, and owner-authorized publication gates remain open.
+## Version and format baseline
 
-## Owner-accepted functional baseline
+| Surface                         | Accepted identity |
+| ------------------------------- | ----------------- |
+| LatentDeck App and LatentPlayer | `0.1.0`           |
+| LC specification and H3 profile | `0.1.0`           |
+| H3 Codec Pack and adapter       | `0.2.0`           |
+| Bundled D2 and Q4 Deck packages | `0.2.1`           |
+| Worker control protocol         | `2`               |
+| Codec manifest                  | `2.0.0`           |
+| Deck manifest                   | `1.0.0`           |
+| Codec and Deck Python SDKs      | `0.2.0`           |
 
-The accepted unsigned local artifact set was built from clean `main` commit
-`dbe310a2b8c0a9f78a11ab8217f07c8c91a39db4`. Both application installers and
-H3 Codec Pack `0.1.1` receipts record `git_dirty=false` and the same public
-source snapshot:
+The installable Deck extension is `.ld`. The installable Codec extension is
+`.ldcodec`. `.lddeck` is not an alias, and the Protocol 2 H3 setup no longer
+uses a separately named ZIP payload.
 
-- file count: `490`;
-- SHA-256:
-  `1c7ff1d524b2451d313f24a36bf6b8dc9910ee88aeada8fb943e07ae6db8456a`.
+## Current clean-clone engineering evidence
 
-### Application artifacts
+The exact `3648e7c` clone passed the aggregate workspace and public-tree gates:
 
-| Artifact | Bytes | SHA-256 |
-| --- | ---: | --- |
-| `LatentDeck-0.1.0-windows-x64-unsigned-setup.exe` | 6,564,636 | `9bbdc405b7f49345c64941b00b65133855e0894e01797ebd2366d2c5edced25f` |
-| `LatentPlayer-0.1.0-windows-x64-unsigned-setup.exe` | 5,200,446 | `2edfcc304563bfff06b60f956036a7263bbd54d149baebcc7a82ead4de545a86` |
-| `latentdeck-0.1.0-sbom.cdx.json` | 385,134 | `0d6122e7af26d01478bc9bd2615ed2b548dc80ff8eb1b612580cc9e4a3093d27` |
-| `THIRD_PARTY_NOTICES.md` | 3,621 | `f99db3adcf79512f4ee8f753b168919a42e475fc46aefe70ef3751db48232991` |
+- LatentDeck frontend: 172 passed;
+- LatentPlayer frontend: 49 passed;
+- Rust: 694 passed, 0 failed, 21 expected ignored;
+- Python: 422 passed;
+- Codec Pack curator: 7 passed;
+- Rust formatting and Clippy: passed;
+- frontend checks/builds, package lifecycle, H3 setup tooling, Protocol 2
+  conformance, diagnostics, and linked development-pack contracts: passed.
 
-The schema-3 application receipt records pinned Node 24.20.0, pnpm 11.24.0,
-Tauri CLI 2.11.4, Rust 1.93.1, Spout2 2.007.017 at commit
-`f49e2f469f8cb25f559a6eaa61a3f5b8173fc100`, and a CycloneDX 1.5 SBOM with
-745 components. Neither application installer contains a Codec Pack, decoder,
-model weight, or cartridge.
+Private media/GPU tests and child-process fixtures remain intentionally outside
+the aggregate test count. The aggregate gate does not claim a signed artifact
+or clean-machine install.
 
-### H3 Codec Pack artifacts
+## Accepted package and runtime architecture
 
-| Artifact | Bytes | SHA-256 |
-| --- | ---: | --- |
-| `LatentDeck-H3-CodecPack-0.1.1-setup.exe` | 1,102,404 | `7f8af08cfbb4ad2a66091bcd510d4ba11a360921c2c37fff3199a02618300dbb` |
-| `LatentDeck-H3-CodecPack-0.1.1-windows-x64.zip` | 1,942,790,075 | `b2a04a4d42caaa4ac148c3ce30ab9a90ec3e83adcafb446d9b5609dcba491742` |
-
-The ZIP expands to 2,911,144,233 bytes. The immutable pack version is `0.1.1`;
-the H3 adapter and Player/D2/Q4 worker contract version remains `0.1.0`. Setup
-is current-user, offline, fixed-path, and bound to the exact adjacent ZIP name,
-length, SHA-256, pack identity, and version. It requires no elevation,
-PowerShell, system Python, network access, decoder, or model.
-
-The accepted local physical lifecycle covered removal of the defective
-engineering pack, fixed setup install, same-version setup retry without
-overwriting immutable files, exact-version removal behavior, and reinstall.
-Installed-runtime smoke passed `codec.inspect` for Player, D2, and Q4 with CUDA
-on the local RTX 4070 and Torch `2.13.0+cu130`. The pack contains no model
-weight, generator, ComfyUI, cartridge, or private media; the TAEH3 decoder is a
-separate explicit user selection.
-
-The `dbe310a` artifact directories remain preserved as functional UAT evidence.
-Any later accepted source change, including release documentation or the
-all-nodes gallery, makes them an older source snapshot. Do not publish or mix
-them with new metadata; rebuild the complete artifact set from the final clean
-commit.
+- One common Extensions lifecycle handles `.ld` and `.ldcodec`: inspect,
+  explicit expected SHA-256, install disabled, verify, enable, disable, repair,
+  remove, list, and matrix.
+- Installation remeasures the local archive, extracts into a bounded sibling,
+  validates a closed integrity tree, atomically publishes one immutable exact
+  version, and atomically records trust. Publisher metadata remains
+  self-declared.
+- Exact versions coexist side by side and are selected explicitly. There is no
+  overwrite, URL install, inherited trust, or automatic newest selection.
+- The compatibility resolver reports stable reasons including trust, asset,
+  package, protocol, host API, tensor ABI, profile, signal, timing, and
+  capability incompatibility. It performs no hidden conversion or fallback.
+- Core retains an integrity-validated cartridge handle. Codec-specific profile
+  validation and memory estimates come from the selected adapter and are
+  cross-checked before GPU allocation.
+- Worker Protocol 2 carries authenticated bounded control messages only.
+  Latent/RGBA bytes do not travel through control IPC. Protocol 1 remains only
+  as an explicit Player bridge and is never a fallback for a Protocol 2 fault.
+- D2, Q4, and external Decks share the same Deck SDK, declarative host-rendered
+  faceplate, generic scheduler, capture finalizer, and session broker.
+- A faceplate can change layout and controls without owning Tauri, Win32, DX12,
+  worker launch, package trust, or cartridge validation.
 
 ## Owner-accepted functional behavior
 
-### Cartridge creation, conversion, and Player
+### Player, Library, and Extensions
 
-- The official Comfy Recorder produced and validated H3 AV `.lc` cartridges
-  while retaining latent passthrough.
-- `latentdeck-convert` and LatentPlayer PREPARE preflight raw H3 AV payloads,
-  preserve source bytes and geometry, enforce no-clobber destinations, report
-  per-item progress/errors, support stop-after-current, and open completed
-  cartridges directly in Player.
-- Conversion is bound to the preflight payload SHA-256. A changed source fails
-  without producing a destination cartridge.
-- LatentPlayer playback, embedded output, fullscreen, aspect fit, diagnostics,
-  and Spout2 passed with portrait and landscape cartridges.
+- LatentPlayer opens and presents a selected `.lc` through an exact enabled
+  Codec version and explicit decoder binding.
+- Raw import is an optional selected-codec capability; Core builds and reopens
+  the final `.lc` rather than trusting an adapter-written Library file.
+- Library and Collections preserve search, tags, favorites, ordering, virtual
+  banks, active filters, and exact cartridge identities.
+- Installed compatible and incompatible external Decks become visible without
+  an application rebuild or restart. Incompatible packages remain inspectable
+  and display the stable reason without a selectable fallback.
 
-### Library, Collections, and Deck source lifecycle
+### D2, Q4, and declarative controls
 
-- Library imports and completed captures invalidate active Deck source views
-  automatically; no Active Collection toggle is required to reveal new
-  cartridges.
-- Refresh preserves currently playing and edited next-load identities and
-  ignores stale asynchronous responses.
-- A finished capture can be inserted immediately into D2 A/B or Q4 A/B/C/D
-  through the explicit `Use capture in ...` action. The bounded worker
-  replacement retains the other draft sources, controls, roles, seed,
-  transport intent, and an active decoded-video recorder.
-- When a next-load draft differs from the runtime identity, `Load + Play`
-  applies the compatible draft and starts that slot. Matching identities keep
-  ordinary transport-only `Play`/`Pause` behavior.
-- Many-to-many Collections and virtual `All` and `Unassigned` banks behaved as
-  documented.
+- Bundled D2/Q4 are exact trusted `.ld` packages, not hardcoded production
+  runtimes. Their `0.2.1` faceplates use the same renderer as an external Deck.
+- Realtime synthesis controls update the running output immediately. Controls
+  that do not apply to the current algorithm/mode are not rendered.
+- Role permutations, independent transport, seed, restart, loop, and natural
+  non-loop EOF remain authoritative worker state. EOF pauses only the exhausted
+  source and does not destroy the warm session or output surface.
+- Compatible sources play smoothly on the accepted CUDA/H3 system. Per-frame
+  ZIP/Safetensors revalidation, CPU staging, and synchronous finite checks are
+  not repeated in the realtime slot loop.
+- Exact geometry/timing/profile differences produce a visible refusal. No
+  source is resized, cropped, aligned, cast, re-encoded, or substituted.
 
-### LD-D2, LD-Q4, Live Capture, and MP4
+### Capture, MP4, output, and sessions
 
-- D2 and Q4 preserve latent Live Capture across expected automatic source-loop
-  reset barriers until explicit Stop or a validated large spool safety limit.
-  Arbitrary resets still abort instead of joining unrelated latent state.
-- The owner reproduced the previous one-loop D2 defect, installed the corrected
-  H3 Codec Pack `0.1.1`, and then confirmed the long-capture behavior works as
-  intended.
-- D2 and Q4 write no-clobber, video-only H.264 MP4 at intrinsic geometry and
-  24 fps. The corrected top-down RGBA path produces upright video.
-- D2 Linear/XS behavior, deterministic replay, Snapshot, Live Capture,
-  validation, Library import, and replay passed.
-- Strict Q4 proof used four distinct compatible cartridges and covered TOPK,
-  Sinkhorn, carrier reassignment, donor influence, deterministic replay,
-  Snapshot, Live Capture, validation, reload, and partial-file cleanup. The
-  path-free receipt SHA-256 is
-  `b2b22294a8081ea03f8179b1f904ef0946a2e809654746a9aa0892b07e21964e`.
-- Incompatible geometry produces an explicit refusal. Neither Deck performs a
-  hidden resize, crop, alignment, re-encode, or source substitution.
+- Snapshot and Live Capture record the post-operator latent before decode,
+  finalize atomically, import into Library, and can be loaded into a slot
+  immediately without reloading the Deck.
+- Live Capture remains active across valid automatic source loops and stops only
+  through the explicit bounded capture lifecycle.
+- D2/Q4 MP4 is upright video-only H.264 at intrinsic geometry. Capture and MP4
+  remain mutually exclusive while normal playback continues.
+- Embedded output uses a compact sticky program monitor; scrolling controls no
+  longer make the native output disappear. Fullscreen hides the surrounding
+  faceplate and restores the same session on exit.
+- Spout uses the intrinsic shared output and retains its explicit sender
+  lifecycle.
+- Four sessions may remain warm. A fifth receives
+  `session.capacity_exceeded`; no session is evicted. Close releases a session.
+- Live Capture and MP4 independently pin the single foreground output lease.
+  Switching is refused with `session.output_lease_pinned` until the owning job
+  stops.
 
-### Stability, native output, and Spout2
+## ComfyUI acceptance
 
-- The owner-approved stability suite ran D2 XS5, Q4 TOPK, and Q4 Sinkhorn for
-  360 seconds each. Measured output rates were 23.8279, 23.8862, and 23.9577
-  fps; control-to-processed-frame p95 was 61.714, 55.7192, and 52.0285 ms;
-  intervals over two frames were 0.0979%, 0.1535%, and 0.0278%.
-- Each mode ended with zero ring backpressure, an empty queue, no progressive
-  host/worker/CUDA allocator growth, and no `.partial` residue. Receipt SHA-256:
-  `e2aff6b59939772f395f75de62b97252f31cb35ec01adb9809e3411dd29b64ca`.
-- The owner accepted those six-minute results for 0.1. A 30-minute run is not
-  an open gate.
-- The pinned official D3D12 receiver observed the native Spout2 sender with the
-  declared name, RGBA8 format, correct portrait and landscape dimensions,
-  advancing frames, and responsive shutdown in Player, D2, and Q4. See
-  [Spout acceptance](../repository/SPOUT_ACCEPTANCE.md).
+- The isolated environment discovers all repository-owned nodes.
+- `00_ALL_NODES_GALLERY.json` contains exactly one instance of each of the 33
+  Toolkit nodes, one Recorder node, and two reviewed Channel Roll nodes.
+- Automated strict equality against the combined three `NODE_CLASS_MAPPINGS`
+  registries passes; the graph is public, data-free, and non-queueable.
+- The owner accepted the isolated CPU Fit View with no missing or red cards.
+- Recorder and the eight executable public workflows retain their independent
+  tests; the gallery is a discovery canvas, not an execution graph.
 
-## Automated and local engineering evidence
+## Evidence classification
 
-- The final clean `dbe310a` clone passed
-  `pwsh -NoProfile -File tools/Check-Workspace.ps1` and the public-tree audit.
-- Frontend suites reported 108 LatentDeck and 32 LatentPlayer tests passing.
-- Rust application suites reported 111 LatentDeck and 36 LatentPlayer tests
-  passing.
-- The Python workspace reported 382 passing tests with two optional CUDA tests
-  skipped in that aggregate run. Separate accepted CUDA parity evidence remains
-  recorded for the local RTX 4070.
-- Focused tests cover long D2/Q4 capture ownership across source loops, MP4 row
-  orientation, Library invalidation, capture hot insertion, PLAY/PREPARE,
-  Codec Pack version coherence, setup lifecycle, packaging, diagnostics, and
-  public-tree safeguards.
-- Private cartridges, weights, raw latent data, test renders, and machine-local
-  diagnostics remain outside Git.
+The earlier unsigned `dbe310a` application/H3 `0.1.1` artifacts and the private
+Protocol 2 GPU run at `bf1e189` are historical evidence only. Later source
+changes superseded those artifact identities, and the private receipt was not
+retained. They must not be mixed with current receipts or presented as the
+final release candidate.
 
-## ComfyUI surfaces and open gallery task
-
-Verified local evidence:
-
-- a fresh isolated profile discovered all 33 Toolkit nodes, the official
-  Recorder node, and both reviewed Channel Roll example nodes;
-- Recorder E2E preserved H3 visual/audio cadence, passed full Rust cartridge
-  validation, and left no temporary residue;
-- eight public, data-free workflows (`01` through `07`, plus `99`) exist and
-  load under the isolated workflow contract.
-
-`comfy/toolkit/workflows/00_ALL_NODES_GALLERY.json` does not yet exist and has
-not been visually accepted. The owner assigned it to the next agent as a
-required release-documentation and presentation task. It must contain exactly
-the 36 repository-owned node types, pass strict equality against the combined
-`NODE_CLASS_MAPPINGS` registries, and open in the isolated CPU profile as a
-readable Fit View canvas with no missing or red cards. The complete contract is
-in the [current handoff](continue.md). Do not describe this item as completed
-until the file, automated test, and visual evidence exist.
+The final manual pass used the current application implementation and the real
+H3/CUDA path. It is accepted product UAT, but it is not a signed clean-machine
+receipt. Fresh installer identities are generated after the final
+documentation commit, and their own receipts and `SHA256SUMS.txt` are the
+authority for exact bytes.
 
 ## Open release and publication gates
 
-- **Release presentation and documentation:** create and verify the all-nodes
-  gallery; prepare detailed public onboarding, release notes, repository copy,
-  and any other owner-assigned release documentation.
-- **Final clean build:** after all accepted documentation and gallery changes,
-  create a fresh short-path clone, run the aggregate gate, and rebuild both
-  applications and H3 Codec Pack from the same final clean commit.
-- **Clean-machine lifecycle:** verify the final signed application installers
-  and H3 setup plus adjacent payload, maintenance/upgrade/downgrade behavior,
-  independent application removal, exact-version Codec Pack removal, recovery,
-  external decoder selection, and Spout2 on a clean non-admin Windows 11 NVIDIA
-  account without PowerShell 7, system Python, ComfyUI, or setup-time network
-  access.
-- **Security and publisher trust:** configure a private vulnerability-reporting
-  channel and an authenticated signing path for both application installers,
-  H3 setup, and its generated uninstaller.
-- **Publication review:** inspect the exact Git archive and history, finish the
-  attribution/license/SBOM/asset review, and complete the
-  [public release checklist](../repository/PUBLIC_RELEASE_CHECKLIST.md).
-- **Publication authority:** obtain explicit owner authorization before
-  creating or changing a remote, pushing, tagging, uploading, or releasing.
+- **Fresh first-install UAT:** install the new two application setups and H3
+  setup/adjacent `.ldcodec` from a clean local state; configure Extensions and
+  the external decoder; spot-check Player, D2, and Q4.
+- **Final public documentation:** complete onboarding, SDK/architecture prose,
+  release notes, limitations, and repository presentation assigned by the
+  owner.
+- **Clean-machine lifecycle:** repeat the final signed install/update/remove
+  matrix offline on a clean non-admin Windows 11 NVIDIA account.
+- **Security and publisher trust:** configure a private vulnerability channel
+  and authenticated signing for both application installers, H3 setup, and its
+  generated uninstaller.
+- **Publication review:** inspect the exact Git archive and history and finish
+  attribution, license, SBOM, and distributed-asset review.
+- **Publication authority:** obtain explicit owner authorization before any
+  remote change, push, tag, upload, or release.
 
-Current classification: **owner-accepted local unsigned 0.1.0 functional
-baseline; not signed or published**.
+Current classification: **owner-accepted local unsigned 0.1 application and
+Protocol 2 modular-runtime milestone; fresh installer UAT and publication gates
+remain open**.

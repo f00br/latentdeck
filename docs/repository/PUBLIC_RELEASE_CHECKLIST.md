@@ -4,10 +4,10 @@ Checked items record durable evidence only. Completing a local release candidate
 or this checklist does not authorize publication; the owner must still
 explicitly approve every action in the Publication authority section.
 
-Current phase: the owner accepted the complete local `0.1.0` functional surface
-on 2026-09-01. The accepted unsigned `dbe310a` artifacts are UAT evidence, not a
-publication candidate after subsequent documentation changes. Every unchecked
-item below remains open.
+Current phase: the owner accepted the completed Protocol 2 modular runtime and
+final local `0.1.0` application pass on 2026-09-03 at implementation commit
+`3648e7c`. Fresh unsigned installers must be rebuilt from the final documentation
+commit for a first-install UAT. Every unchecked item below remains open.
 
 ## Ownership and legal
 
@@ -39,7 +39,7 @@ item below remains open.
       a substitute for permission.
 - [ ] Documentation contains no private absolute paths, tokens, internal URLs,
       or unsupported benchmark claims.
-- [ ] `comfy/toolkit/workflows/00_ALL_NODES_GALLERY.json` exists as a public,
+- [x] `comfy/toolkit/workflows/00_ALL_NODES_GALLERY.json` exists as a public,
       data-free presentation canvas, passes strict registry equality, and opens
       without missing or red node cards in the isolated ComfyUI profile.
 

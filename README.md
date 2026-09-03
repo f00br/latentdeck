@@ -10,16 +10,16 @@ state into a new cartridge.
 
 ## Repository status
 
-On 2026-09-01 the owner accepted the complete local `0.1.0` functional surface
-on `main` with no remaining product defects. The repository is now in
-release-documentation and publication preparation. The separate ComfyUI
-all-nodes presentation canvas and the public-release gates are still open. The
-repository contains:
+On 2026-09-03 the owner accepted the completed Protocol 2 modular-runtime
+milestone and the final local `0.1.0` application behavior on `main` at
+implementation commit `3648e7c`. The repository is now in release-documentation
+and publication preparation. The repository contains:
 
 - public-repository boundaries and agent instructions;
 - pinned Cargo, pnpm, uv, Tauri, Svelte, and Python workspaces;
-- complete LatentDeck application and a LatentPlayer that can both play `.lc`
-  cartridges and prepare raw H3 latent files for them;
+- complete LatentDeck and LatentPlayer applications that play `.lc` cartridges,
+  manage extensions, and prepare raw latent files when the selected Codec Pack
+  declares that optional capability;
 - normative LC 0.1 and H3 0.1 specifications;
 - a deterministic Rust cartridge SDK and command-line tool;
 - the native Python SDK binding, raw H3 `latentdeck-pack` authoring command,
@@ -27,7 +27,13 @@ repository contains:
 - the independent `Save Latent Cartridge (.lc)` ComfyUI recorder;
 - the clean-room LatentDeck Comfy Toolkit research nodes and explicit-install
   external Operator API;
-- isolated H3 Player, LD-D2, and LD-Q4 workers with native DX12 presentation;
+- one exact-hash lifecycle for local `.ld` Deck and `.ldcodec` Codec packages,
+  including trust receipts, immutable side-by-side versions, explicit enable,
+  verification, repair, removal, and a compatibility matrix;
+- Codec and Deck SDKs, retained validated cartridge handles, and an authenticated
+  Protocol 2 worker runtime shared by Player, bundled Decks, and external Decks;
+- H3 Codec Pack/adapter `0.2.0` plus declarative LD-D2 and LD-Q4 packages
+  `0.2.1`, all using the same generic runtime and native DX12 presentation;
 - a shared SQLite Library with many-to-many Collections and virtual `All` and
   `Unassigned` banks;
 - deterministic Snapshot and bounded Live Capture resampling back into `.lc`,
@@ -35,25 +41,29 @@ repository contains:
   large application safety limits;
 - upright video-only H.264 MP4 recording of D2/Q4 decoded output at intrinsic
   geometry;
-- automatic Library-to-Deck invalidation and explicit hot insertion of newly
-  captured cartridges through a bounded worker replacement;
+- automatic Library-to-Deck invalidation and immediate use of a newly captured
+  cartridge without reloading the Deck;
+- up to four explicit warm Deck sessions with no LRU eviction and one foreground
+  output lease that is pinned independently by Live Capture and MP4 recording;
 - Spout2 output, structured diagnostics, database backup/migration, Windows
-  application packaging, an independent current-user H3 Codec Pack setup and
-  exact-version uninstall lifecycle, and SBOM generation;
+  application packaging, an independent current-user H3 Codec Pack setup, and
+  SBOM generation;
+- a public, data-free ComfyUI gallery with exactly 36 repository-owned nodes,
+  strict registry equality, and isolated CPU visual acceptance;
 - a policy for local-only, non-binding interface references.
 
-The owner-accepted functional artifact baseline is the clean, unsigned local RC
-built from commit `dbe310a2b8c0a9f78a11ab8217f07c8c91a39db4`, together with
-H3 Codec Pack `0.1.1` built from that same source. It does not bundle a decoder,
-model weight, or cartridge. Strict four-source Q4 acceptance, the
-owner-approved six-minute D2/Q4 stability suite, application playback, long
-Live Capture across source loops, upright MP4 output, portrait and landscape
-presentation, Spout2, and the public Codec Pack setup lifecycle were verified
-locally. Any later documentation commit makes those binaries a retained UAT
-evidence snapshot rather than the current publication candidate, so the final
-RC must be rebuilt from the final clean commit. Clean-machine lifecycle,
-authenticated signing, detailed publication review, and owner-authorized
-publication remain open. See the
+The exact `3648e7c` clean clone passed the aggregate workspace gate: 172 Deck
+frontend tests, 49 Player frontend tests, 694 Rust tests, and 422 Python tests,
+with the expected private/child-process tests ignored. The owner then accepted
+Player, D2, Q4, realtime controls, smooth playback, roles, finite non-loop EOF,
+Snapshot, Live Capture and replay, MP4, fullscreen, Spout, external compatible
+and incompatible Deck lifecycle, four warm sessions, output-lease pinning, and
+the final compact declarative UI on the real CUDA/H3 runtime.
+
+No current installer is a public release. Fresh unsigned application installers
+and H3 `0.2.0` setup/adjacent `.ldcodec` are built only after the final
+documentation commit. First-install UAT, authenticated signing, detailed
+publication review, and owner-authorized publication remain open. See the
 [0.1.0 acceptance status](docs/release/ACCEPTANCE_STATUS.md). There is no
 published release or supported bundled model in this repository.
 
@@ -94,8 +104,8 @@ or remove either of the others.
 
 The public H3 path is user-facing: keep
 `LatentDeck-H3-CodecPack-<version>-setup.exe` beside the exact matching
-`LatentDeck-H3-CodecPack-<version>-windows-x64.zip`, then run the setup. The
-large ZIP remains adjacent rather than being embedded in the small setup, and
+`LatentDeck-H3-CodecPack-<version>-windows-x64.ldcodec`, then run the setup. The
+large package remains adjacent rather than being embedded in the small setup, and
 the setup accepts only the filename, byte length, SHA-256, pack identity, and
 version bound into that executable. It installs for the current user at the
 fixed `%LOCALAPPDATA%\LatentDeck\CodecPacks` root and registers exact-version
@@ -103,9 +113,13 @@ removal in Windows Installed Apps. It needs no administrator elevation,
 network access, system Python, or PowerShell.
 
 The Codec Pack does not contain a decoder weight or model. After installation,
-select an accepted external TAEH3 decoder explicitly in Codec Manager. The
-PowerShell lifecycle scripts remain engineering and recovery tools; they are
-not part of normal public onboarding. See the
+open Extensions, refresh, enable the exact H3 version, choose it for Player or a
+compatible Deck, and select an accepted external TAEH3 decoder. Bundled D2/Q4
+are provisioned as exact trusted `.ld` packages; third-party Decks use the same
+inspect, expected-SHA, install, and explicit-enable flow. No compatible version
+is selected merely because it is newest. The PowerShell lifecycle scripts
+remain engineering and recovery tools; they are not part of normal public
+onboarding. See the
 [H3 Codec Pack runbook](docs/release/H3_CODEC_PACK.md).
 
 ## Start here
@@ -117,8 +131,11 @@ not part of normal public onboarding. See the
 - [Latent Cartridge Specification 0.1](spec/latent-cartridge/README.md)
 - [LC Manifest JSON Schema 0.1](spec/latent-cartridge/manifest.schema.json)
 - [MiniMax H3 Codec Profile 0.1](spec/codec-h3/README.md)
-- [Codec Pack installation contract 0.1](spec/codec-pack/README.md)
-- [Worker Protocol 1](spec/worker-protocol/README.md)
+- [Codec Package (`.ldcodec`) v2](spec/codec-pack/README.md)
+- [Worker Protocol 2 and legacy Player bridge](spec/worker-protocol/README.md)
+- [Deck Package (`.ld`) v1](spec/deck-package/README.md)
+- [Python Codec SDK 0.2.0](sdk/codec-python/README.md)
+- [Python Deck SDK 0.2.0](sdk/deck-python/README.md)
 - [Deck Signal Contract 0.1](spec/deck-api/README.md)
 - [Decoded MP4 output boundary](crates/output-mp4/README.md)
 - [LatentPlayer PLAY/PREPARE workflow](apps/latentplayer/README.md)

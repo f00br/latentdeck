@@ -4,13 +4,14 @@ This guide is for the owner performing visual and user-path acceptance. It does
 not require knowledge of Rust, Python internals, or latent mathematics. Report
 what the product shows and does; the engineer can diagnose the implementation.
 
-The owner-accepted functional baseline is the clean, unsigned local RC and H3
-Codec Pack `0.1.1` built from commit
-`dbe310a2b8c0a9f78a11ab8217f07c8c91a39db4`. It is not a published or signed
-release. The H3 Codec Pack, TAEH3 decoder weight, test cartridges, and Spout
-receiver are separate local test inputs and are not bundled in either
-application. The owner completed this functional pass on 2026-09-01; keep this
-guide as the reproducible regression and clean-machine acceptance sequence.
+The owner-accepted implementation baseline is clean `main` commit
+`3648e7c634c4310767165ce8975129323a5c09f2`: application `0.1.0`, H3 Codec
+Pack/adapter `0.2.0`, and bundled D2/Q4 Decks `0.2.1`. It is not a published or
+signed release. The H3 Codec Pack, TAEH3 decoder weight, test cartridges, and
+Spout receiver are separate local test inputs and are not bundled in either
+application. The owner completed the full functional pass on 2026-09-03; keep
+this guide as the reproducible regression and clean-machine acceptance
+sequence.
 
 ## Prepare the test set
 
@@ -19,7 +20,7 @@ Use visually distinct inputs so a wrong source is immediately obvious:
 - at least two portrait cartridges;
 - at least two landscape cartridges;
 - one existing raw H3 AV `.safetensors` file for conversion;
-- the matching H3 Codec Pack setup and adjacent payload ZIP, plus an explicitly
+- the matching H3 Codec Pack setup and adjacent `.ldcodec`, plus an explicitly
   selected compatible TAEH3 decoder asset;
 - the official Spout2 D3D12 receiver for output verification.
 
@@ -29,25 +30,25 @@ separate acceptance has already passed.
 
 ## Install and start the local RC
 
-1. Use the engineer-provided artifact set identified in the current handoff.
-   Verify its receipt and checksums, then install LatentDeck App and
+1. Start from a clean current-user state. Use the engineer-provided artifact
+   sets identified by their generated receipts in the current handoff. Verify
+   their checksums, then install LatentDeck App and
    LatentPlayer independently. The full procedure and artifact contract are in
    the [Windows RC runbook](WINDOWS_LOCAL_RC.md).
-2. Keep `LatentDeck-H3-CodecPack-0.1.1-setup.exe` and the exact matching
-   `LatentDeck-H3-CodecPack-0.1.1-windows-x64.zip` in one folder, then run the
+2. Keep `LatentDeck-H3-CodecPack-0.2.0-setup.exe` and the exact matching
+   `LatentDeck-H3-CodecPack-0.2.0-windows-x64.ldcodec` in one folder, then run the
    setup. It must install for the current user without UAC, a network request,
    PowerShell, system Python, or either application already being installed.
    Follow the [Codec Pack runbook](H3_CODEC_PACK.md) for the complete contract.
-3. Confirm Windows Installed Apps contains `LatentDeck H3 Codec Pack 0.1.1`.
+3. Confirm Windows Installed Apps contains `LatentDeck H3 Codec Pack 0.2.0`.
    Installing or removing either application must not install, replace, or
-   remove this entry or its pack. The old local `0.1.0` pack contains the D2
-   loop defect and is not a rollback; remove it through the documented
-   engineer recovery path if it remains on a local test machine.
-4. Restart both applications, open Codec Manager, refresh discovery, and
-   confirm the compatible `0.1.1` pack is selected. Select the compatible
-   external TAEH3 decoder. Confirm the UI shows ready status plus the selected
-   variant, SHA-256 identity, source, and license. Repeat the status check in
-   Player, D2, and Q4.
+   remove this entry or its pack.
+4. Start both applications, open Extensions, refresh discovery, and confirm H3
+   `0.2.0` plus bundled D2/Q4 `0.2.1` are visible. Enable each exact required
+   version; do not rely on an automatic newest selection. Choose H3 for Player
+   and select the compatible external TAEH3 decoder. Confirm the UI shows ready
+   status plus the selected variant, SHA-256 identity, source, and license.
+   Repeat the ready check in Player, D2, and Q4.
 5. Keep the official D3D12 receiver available for the Spout section. The exact
    tested upstream boundary is recorded in
    [Spout acceptance](../repository/SPOUT_ACCEPTANCE.md).
@@ -59,17 +60,17 @@ it by copying a weight into an undocumented application directory.
 ## H3 Codec Pack setup lifecycle
 
 Perform this short lifecycle once on a disposable current-user test account;
-reinstall `0.1.1` afterward for the functional sections below:
+reinstall `0.2.0` afterward for the functional sections below:
 
-1. Temporarily separate the setup from its required ZIP and run it. It must
+1. Temporarily separate the setup from its required `.ldcodec` and run it. It must
    report the exact missing adjacent filename, create no visible pack version,
    and create no Windows Installed Apps entry.
-2. Put the exact matching ZIP back beside setup and install. Confirm the fixed
-   path `%LOCALAPPDATA%\LatentDeck\CodecPacks\org.latentdeck.h3\0.1.1` exists
-   and Codec Manager discovers it after refresh/restart.
+2. Put the exact matching `.ldcodec` back beside setup and install. Confirm the
+   fixed path `%LOCALAPPDATA%\LatentDeck\CodecPacks\org.latentdeck.h3\0.2.0`
+   exists and Extensions discovers it after refresh/restart.
 3. Run the same setup again. It may restore its external maintenance metadata,
    but must not overwrite or silently repair the immutable installed pack.
-4. Remove `LatentDeck H3 Codec Pack 0.1.1` through Windows Installed Apps.
+4. Remove `LatentDeck H3 Codec Pack 0.2.0` through Windows Installed Apps.
    Confirm only that exact version disappears; LatentDeck, LatentPlayer,
    Library/cartridge data, and decoder selection remain.
 5. Reinstall from the same setup/payload pair and continue the product test.
@@ -84,7 +85,14 @@ Changing the filename extension is not conversion. An `.lc` is a validated
 ZIP64 cartridge containing `manifest.json`, the Safetensors payload, and bound
 hashes.
 
-From the repository root, prepare the locked Python workspace once:
+For the normal user path, select and enable an exact Codec Pack that advertises
+`raw_import`, choose **Use in Player**, and use the PREPARE workspace described
+below. The adapter performs bounded CPU preflight and stages profile-valid
+payload bytes; Core creates and reopens the final `.lc` before it becomes a
+Library item.
+
+The repository CLI remains an engineering surface. From the repository root,
+prepare the locked Python workspace once:
 
 ```powershell
 uv sync --locked
@@ -109,6 +117,7 @@ Expected result:
 - each output ends in `.lc` and the command returns a successful JSON receipt;
 - visual and optional audio tensor identity, dtype, shape, timing, and payload
   hash are derived and validated without crop, resize, cast, or re-encode;
+- the selected adapter never writes directly into Library;
 - importing the new `.lc` into Library and opening it in LatentPlayer works like
   a Recorder-produced cartridge.
 
@@ -146,6 +155,11 @@ audio playback or synthesis controls.
 
 ## LatentPlayer
 
+Begin with **Extensions → H3 0.2.0 → Player device: CUDA → Use in Player**.
+Return to PLAY and select the accepted decoder if the profile has no binding.
+The exact enabled Codec identity must remain visible; a different installed
+version must never replace it automatically.
+
 Repeat the sequence with one portrait and one landscape cartridge:
 
 1. Open the cartridge and confirm the visible name/identity belongs to that
@@ -163,7 +177,8 @@ Repeat the sequence with one portrait and one landscape cartridge:
    cartridge or relaunch the app as the visible status directs. The Player's
    `Restart` control resets playback and causal state, not the worker process.
 
-Then test the `Prepare` workspace without a decoder or GPU requirement:
+Then test the PREPARE workspace. The selected enabled codec must advertise
+`raw_import`; preflight itself does not require the decoder or GPU:
 
 8. Add two explicit raw H3 `.safetensors` files and one folder. Confirm nested
    folders are excluded by default and included only after enabling the visible
@@ -176,7 +191,7 @@ Then test the `Prepare` workspace without a decoder or GPU requirement:
     case-insensitive destination. Preflight must reject the batch before any
     new output is written and must not overwrite either file.
 11. Validate one source, replace it with a different valid H3 Safetensors file,
-    then start conversion. That item must fail with `payload_hash_mismatch`,
+    then start conversion. That item must fail with `raw_import.source_changed`,
     preserve the preflight identity shown in the queue, and create no `.lc`.
 12. Convert a clean multi-file plan. Progress must be sequential and every
     successful item must be atomically complete, fully validated, and free of
@@ -216,14 +231,39 @@ Then test the `Prepare` workspace without a decoder or GPU requirement:
     active: its membership filter must remain selected and must not silently
     admit the new unassigned cartridge.
 
+## Extensions and modular Deck lifecycle
+
+1. Open Extensions and confirm the exact enabled H3 `0.2.0` plus bundled D2
+   and Q4 `0.2.1` identities. The matrix must show the compatible pairs and no
+   implicit newest-version selection.
+2. Inspect a local test `.ld`, independently compare its SHA-256, enter that
+   exact value, and install it. Installation must finish disabled; enable is a
+   separate explicit action.
+3. Enable a compatible external Deck. It must become selectable and use the
+   same declarative renderer and generic runtime without rebuilding or
+   restarting the application.
+4. Install an intentionally incompatible external Deck. It must remain visible
+   with the stable matrix reason, must not offer a loadable H3 combination, and
+   must not fall back to another profile, protocol, or Deck.
+5. Verify, disable, re-enable, close any warm session using the package, then
+   disable and remove its exact version. Other packages and sessions must remain
+   healthy.
+
 ## LD-D2
 
 1. Select two visually distinct compatible cartridges and confirm both source
    names and identities are shown.
 2. Play both slots and verify independent Pause, Loop, and Restart behavior.
+   With Loop off, natural EOF must pause only the exhausted source; it must not
+   destroy the warm session or replace the output with `No active output`.
 3. Compare Linear with XS5. The visual result should be observably different.
-4. Exercise `HYBRIDIZE`, `INTERACT`, routing A/B, and a few bounded control
-   changes. The UI must stay responsive and the selected sources must not swap.
+4. Exercise `HYBRIDIZE`, `INTERACT`, swap the `carrier`/`donor` role mapping,
+   select TOPK and Sinkhorn where applicable, and change a few bounded controls.
+   Each valid synthesis control must affect the running output in real time
+   without an Apply button or a transient layout-changing wait message. Only
+   controls relevant to the selected algorithm/mode should be visible. The UI
+   must stay responsive and the physical sources/playheads must not swap when
+   their logical roles change.
 5. Create a Snapshot resample. It must validate, appear in Library immediately,
    and play in LatentPlayer.
 6. Create a Live Capture while changing controls and let a short looping source
@@ -249,13 +289,15 @@ Then test the `Prepare` workspace without a decoder or GPU requirement:
 4. Move each donor influence independently, then use the triangular influence
    macro. The three donor weights must remain understandable and predictable.
 5. Compare TOPK and Sinkhorn and repeat the same seed/settings after Restart.
-   The replay should be deterministic.
+   Valid controls must update the running output immediately, and the panel must
+   render only controls relevant to the chosen algorithm/mode. The replay
+   should be deterministic.
 6. Create both Snapshot and Live Capture results. Select a finished capture as
    a next-load draft and confirm that slot becomes `Load + Play`; press it and
    verify that the complete compatible Q4 draft loads and the requested slot
    starts without reloading the application. Repeat the insertion path in each
    required A/B/C/D slot, using either the contextual action or `Use capture in
-   …`; other sources, controls, roles, seed, and transport intent must remain.
+…`; other sources, controls, roles, seed, and transport intent must remain.
 7. Repeat once with a compatible portrait set and once with a compatible
    landscape set.
 
@@ -285,15 +327,31 @@ Repeat once in each Deck while no capture is active:
 1. Load known sources, choose a collection, set controls/seed/loops, and save a
    preset through the native dialog.
 2. Change the next-load source draft and controls, then load the saved preset.
-3. Confirm the preset restores collection, exact cartridge identities, routing,
-   controls, seed, and loop choices as a **draft**. The currently playing Deck
-   must not change yet.
-4. In D2 press `Load A + B`; in Q4 press `Load Q4`. The contextual `Load + Play`
-   shown on a changed slot is an equivalent explicit apply action that also
-   starts that slot. Only an explicit apply action should replace the playing
-   sources and activate the loaded preset.
+3. Confirm the preset restores collection, exact cartridge identities, logical
+   role bindings, controls, seed, and loop choices as a **draft**. The currently
+   playing Deck must not change yet.
+4. Press `Load exact Deck draft`. The contextual `Load + Play` shown on a
+   changed slot is an equivalent explicit source-apply action that also starts
+   that slot. Only an explicit source-load action should replace the playing
+   sources and activate the loaded preset; synthesis controls remain realtime.
 5. If a saved cartridge is unavailable, the UI must warn about the missing
    identity and must never substitute another cartridge silently.
+
+## Warm sessions and foreground output lease
+
+1. Begin with `Warm sessions 0/4`. Load four distinct exact Deck drafts and
+   confirm all four remain listed and reusable.
+2. Attempt a fifth load. It must fail with `session.capacity_exceeded`; no
+   existing session may be evicted or silently reused.
+3. Close one listed session and confirm capacity returns. Close must release
+   the worker and must not leave a recurring `session.not_found` status.
+4. Start Live Capture in the foreground session and try to switch output to
+   another warm session. The switch must fail with
+   `session.output_lease_pinned`. Stop capture and confirm switching works.
+5. Repeat the same pin test during MP4 recording, independently of the latent
+   capture path.
+6. Stop every output job and close every session. Finish at
+   `Warm sessions 0/4` with no worker process left behind.
 
 ## Spout2 in all applications
 
@@ -333,15 +391,10 @@ pwsh -NoProfile -File tools/Test-IsolatedComfyEnvironment.ps1 -ServerSmoke
 pwsh -NoProfile -File tools/Start-IsolatedComfyEnvironment.ps1 -Cpu -OpenBrowser
 ```
 
-The accepted functional baseline discovered all repository-owned nodes and
-contains eight public workflows, but it does not contain the requested
-all-nodes gallery. The owner assigned
-`comfy/toolkit/workflows/00_ALL_NODES_GALLERY.json` to the next agent as a
-required release-documentation and presentation task. Do not report the gallery
-as implemented or tested until it exists, passes strict registry equality, and
-opens successfully in the isolated profile.
-
-When the gallery is available:
+The accepted baseline contains eight executable public workflows and the
+separate data-free `00_ALL_NODES_GALLERY.json`. Automated strict equality and
+the isolated CPU visual pass are complete; retain these steps as regression
+coverage:
 
 1. Open `00_ALL_NODES_GALLERY.json` and use Fit View.
 2. Confirm one readable canvas shows all 33 Toolkit nodes, the one official
@@ -360,7 +413,7 @@ When the gallery is available:
 Send one finding per item with:
 
 ```text
-Surface: Player / Library / Codec / D2 / Q4 / Preset / Spout / Converter / Comfy / Diagnostics
+Surface: Player / Library / Extensions / D2 / Q4 / Sessions / Preset / Spout / Converter / Comfy / Diagnostics
 Build: installer receipt commit or current source commit
 Input geometry: decoded width x height and portrait/landscape
 Exact steps:
@@ -376,9 +429,9 @@ absolute paths into a public issue or committed document.
 
 ## Owner acceptance and publication follow-up
 
-The owner completed the local functional pass on 2026-09-01 and confirmed there
-are no remaining product defects. That acceptance does not claim that the
-all-nodes gallery, clean-machine lifecycle, authenticated signing, or
-publication review has passed. After the gallery and release documentation are
-committed, build a fresh clean RC from the final commit before clean-machine and
-publication review.
+The owner completed the Protocol 2 and final local functional pass on
+2026-09-03 and confirmed there are no remaining product defects. The all-nodes
+gallery is also accepted. That acceptance does not claim that the fresh
+first-install lifecycle, authenticated signing, clean-machine signed lifecycle,
+or publication review has passed. After this documentation is committed, build
+fresh artifacts from the exact final commit before those remaining gates.

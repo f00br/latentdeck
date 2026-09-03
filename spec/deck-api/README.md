@@ -14,6 +14,37 @@ H3 is merely the first implementation.
 The service reports facts and compatibility. It never crops, stretches,
 resizes, changes dtype, re-encodes, or substitutes a source.
 
+## Current Deck extension boundary
+
+Third-party Decks are a current `0.1.x` capability, not a future placeholder.
+An author distributes one `.ld` Deck Package containing a strict
+`deck-pack.json` signal/runtime manifest, `operator.json`, declarative
+`faceplate.json`, integrity catalog, notice, and Python operator modules. The
+[Deck Package contract](../deck-package/README.md) defines its archive, trust,
+installation, activation, and compatibility lifecycle.
+
+The current `latentdeck-deck-sdk` `0.2.0` supplies the generic one-to-sixteen
+source operator boundary:
+
+```python
+process_sources(
+    sources: tuple[torch.Tensor, ...],
+    controls: dict[str, object],
+    context: DeckOperatorContext,
+) -> DeckOperatorResult
+```
+
+The generic Protocol 2 worker loads this callable only from an enabled,
+revalidated, compatibility-approved package. The host derives package paths,
+entrypoints, identities, roles, and typed controls from the package contracts;
+presets, cartridges, and faceplate events cannot inject them.
+
+This Deck SDK is distinct from the older
+[Comfy Toolkit Explicit-Install Operator API](../operator-api/README.md). The
+Toolkit registry is useful for offline/research operator experiments, but its
+descriptor, context, result type, trust action, and execution host are not a
+Deck Package and cannot be substituted for this runtime contract.
+
 ## Signal geometry
 
 `SignalGeometry` contains the complete visual contract required before a Deck
@@ -39,11 +70,11 @@ the same cartridge consistently.
 
 Every Deck/operator chooses one Core policy before accepting sources:
 
-| Policy | Shared spatial/runtime contract | Clip length |
-| --- | --- | --- |
-| `playback` | One validated source plays at its intrinsic geometry. | Intrinsic. |
-| `spatial_synthesis` | Codec/profile/version, runtime dtype, batch, channels, latent `H/W`, decoded `W/H`, timing contract/version, and frame rate must match. | Independent `T` and decoded frame counts are allowed. |
-| `full_tensor_synthesis` | All `spatial_synthesis` fields must match. | Latent `T` and decoded frame count must also match exactly. |
+| Policy                  | Shared spatial/runtime contract                                                                                                         | Clip length                                                 |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `playback`              | One validated source plays at its intrinsic geometry.                                                                                   | Intrinsic.                                                  |
+| `spatial_synthesis`     | Codec/profile/version, runtime dtype, batch, channels, latent `H/W`, decoded `W/H`, timing contract/version, and frame rate must match. | Independent `T` and decoded frame counts are allowed.       |
+| `full_tensor_synthesis` | All `spatial_synthesis` fields must match.                                                                                              | Latent `T` and decoded frame count must also match exactly. |
 
 LD-D2 and LD-Q4 use `spatial_synthesis`: each playhead may loop a different
 length clip, while every operator slot still sees an exact common spatial grid.
@@ -71,10 +102,10 @@ source already retained by a live Deck session.
 For the current private H3 development corpus, representative intrinsic
 geometries include:
 
-| Orientation | Exact ratio | Latent grid | Decoded extent | Playback | Direct D2/Q4 mixing |
-| --- | --- | --- | --- | --- | --- |
-| Portrait | `14:25` | `28×50` | `448×800` | Yes | Only with the same shared geometry. |
-| Landscape | `7:4` | `84×48` | `1344×768` | Yes | Only with the same shared geometry. |
+| Orientation | Exact ratio | Latent grid | Decoded extent | Playback | Direct D2/Q4 mixing                 |
+| ----------- | ----------- | ----------- | -------------- | -------- | ----------------------------------- |
+| Portrait    | `14:25`     | `28×50`     | `448×800`      | Yes      | Only with the same shared geometry. |
+| Landscape   | `7:4`       | `84×48`     | `1344×768`     | Yes      | Only with the same shared geometry. |
 
 Those two rows are intentionally incompatible for direct spatial synthesis.
 The UI must keep an incompatible cartridge visible, mark it with the exact Core
@@ -97,22 +128,22 @@ decision and are never baked into the shared texture. A receiver therefore sees
 the exact decoded width, height, format, sender name, and frame sequence.
 
 Decoded MP4 recording is a separate viewing derivative of that same intrinsic
-Deck output. The bundled D2/Q4 implementations submit each validated frame
-consumed by the authoritative presentation sequence, including when local
-window presentation is temporarily skipped, preserve its decoded width and
-height without resize or crop, and write video-only H.264 at the 0.1 cadence of
-24 fps. The result is not a cartridge and does not contain latent or audio
-payloads. Encoding runs behind a bounded queue; encoder failure or overflow
-terminates only the recording and must not stall or terminate Deck playback.
-The final `.mp4` is no-clobber and becomes visible only after safe finalization
-of a sibling partial file. Latent Snapshot/Live Capture and decoded MP4
-recording are mutually exclusive in 0.1.
+Deck output. The generic Deck runtime used by the bundled D2 and Q4 packages
+submits each validated frame consumed by the authoritative presentation
+sequence, including when local window presentation is temporarily skipped,
+preserves its decoded width and height without resize or crop, and writes
+video-only H.264 at the 0.1 cadence of 24 fps. The result is not a cartridge
+and does not contain latent or audio payloads. Encoding runs behind a bounded
+queue; encoder failure or overflow terminates only the recording and must not
+stall or terminate Deck playback. The final `.mp4` is no-clobber and becomes
+visible only after safe finalization of a sibling partial file. Latent
+Snapshot/Live Capture and decoded MP4 recording are mutually exclusive in 0.1.
 
 Library changes are invalidation-driven. Import or successful capture must
-refresh an active D2/Q4 source list without requiring the user to toggle Active
-Collection, while an older asynchronous Library response must not replace a
-newer view. Refresh preserves the currently playing identities and an explicit
-next-load draft.
+refresh the active Deck source list without requiring the user to toggle
+Active Collection, while an older asynchronous Library response must not
+replace a newer view. Refresh preserves the currently playing identities and
+an explicit next-load draft.
 
 Changing a source picker edits only the next-load draft. A newly captured
 cartridge enters a running Deck only through an explicit `Use capture in …`,
@@ -152,9 +183,10 @@ is an intentional split rather than a D2/Q4 implementation detail:
 
 The reference frontend capability is `DeckEmbeddedOutputHost`; the reference
 native implementation is `latentdeck_native_output::NativeOutput::new_embedded`.
-LD-D2 and LD-Q4 currently adapt their typed command namespaces to that same
-capability. Command prefixes and faceplate CSS are replaceable adapters, not
-separate presentation contracts.
+The generic Deck workspace binds that capability to any accepted faceplate's
+single `monitor` widget. D2 and Q4 use the same generic command and output path
+as an external Deck; command prefixes and faceplate layout are replaceable
+adapters, not separate presentation contracts.
 
 Bounds use a host-issued session epoch plus client revisions that are mapped to
 host-monotonic applied revisions. Stale epochs or revisions are rejected, and
@@ -165,34 +197,42 @@ native placement, and a final state check succeed. A Deck must not enable
 loading or fullscreen presentation until its first visible viewport request is
 acknowledged.
 
-The faceplate layout must also keep that acknowledged video area usable while
-the operator controls are being edited. A long scrolling control surface must
-not create a deadlock where `Load` is reachable only after the required video
-anchor has left the client area. The bundled D2 and Q4 references use a sticky
-program monitor; a split-pane custom Deck may satisfy the same requirement.
+The host-rendered faceplate must also keep that acknowledged video area usable
+while operator controls are edited. A long control surface must not create a
+deadlock where `Load` is reachable only after the required video anchor has
+left the client area. The generic workspace keeps the program monitor in its
+dedicated output region while rendering package-declared controls separately.
 
-This 0.1 source tree proves the contract with the two bundled Decks. Loading an
-arbitrary third-party Deck package is a separate installation and trust
-boundary; when exposed by a future Deck SDK, it must wrap this host capability
-rather than ask community Decks to copy Win32/wgpu code or create their own
-top-level output windows.
+The bundled D2 and Q4 packages prove the same boundary used by an external
+Deck. A third-party package declares one `monitor` widget and receives this
+host capability through the current generic runtime. Community Decks neither
+copy Win32/wgpu output code nor create their own top-level output windows.
 
 ## Requirements for a custom Deck
 
 A custom Deck targeting the 0.1 contract must:
 
-1. obtain geometry from a validated codec profile;
-2. declare the applicable Core compatibility policy for each operator path;
-3. use the Core report for source admission and retain its stable mismatch
-   codes for UI/diagnostics;
-4. keep transport and latent math independent from faceplate state;
-5. process the intrinsic latent grid without hidden conversion;
-6. use shared aspect-fit presentation when it owns a native output surface;
-7. bind its faceplate video anchor through the shared embedded-output host
-   capability instead of creating a second program window;
+1. package a strict `deck-pack.json`, `operator.json`, schema-v2
+   `faceplate.json`, integrity catalog, notice, and operator modules in one
+   deterministic `.ld`;
+2. obtain geometry from a validated codec profile and declare exact compatible
+   geometries, timing, runtime ABI, roles, and required capabilities;
+3. implement the current Deck SDK callable and preserve input shape, dtype,
+   device, contiguity, finiteness, and bounded provenance;
+4. use the Core compatibility report for source admission and retain its stable
+   mismatch reason for UI and diagnostics;
+5. keep transport and latent math independent from presentation state, and
+   process the intrinsic latent grid without hidden conversion;
+6. expose each source, role, typed operator control, transport, seed, and
+   monitor exactly as required by the declarative faceplate contract;
+7. bind the faceplate monitor through the shared embedded-output host instead
+   of creating a native window or private application command surface;
 8. treat explicit conversion as a separate provenance-bearing authoring
-   operation.
+   operation;
+9. pass deterministic package inspection, install, verify, explicit enable,
+   and exact Deck-versus-Codec compatibility before launch.
 
-Input count, carrier/donor order, controls, bypass state, determinism, and
-streaming support remain properties of the Deck/operator contract. Geometry
-compatibility does not silently infer or change them.
+Input count, logical roles, control defaults and ranges, identity/bypass
+semantics, determinism, and streaming behavior remain properties of the
+Deck/operator contract. Geometry compatibility does not silently infer or
+change them.

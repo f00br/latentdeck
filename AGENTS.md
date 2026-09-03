@@ -1,8 +1,9 @@
 # LatentDeck agent runway
 
-The owner accepted the complete local `0.1.0` functional surface on
-2026-09-01. This repository is now in coordinated release-documentation and
-publication preparation. The current operational handoff is
+The owner accepted the completed Protocol 2 modular runtime and the full local
+`0.1.0` application surface on 2026-09-03. This repository is now in
+coordinated release-documentation and publication preparation. The current
+operational handoff is
 `docs/release/continue.md`, and accepted evidence versus open publication gates
 are tracked in `docs/release/ACCEPTANCE_STATUS.md`. Repository safeguards,
 specifications, and component boundaries remain mandatory through release.
@@ -146,6 +147,14 @@ this tree merely because they are useful for development.
 - Inputs are untrusted media: validate schema, tensor layout, dtype, sizes,
   hashes, finite values, compatibility, and memory limits before runtime
   allocation.
+- Deck extensions use only `.ld`; Codec Pack extensions use only `.ldcodec`.
+  Do not reintroduce the retired `.lddeck` alias or the legacy adjacent ZIP
+  payload name.
+- Worker Protocol 2 is the authoritative Player and generic Deck runtime.
+  Protocol 1 remains only as an explicit Player-compatible bridge; a Protocol
+  2 error must never trigger a hidden fallback.
+- Installed Deck and Codec versions are immutable, explicitly enabled, and
+  selected by exact identity. Never auto-select the newest version.
 
 ## Change quality
 
