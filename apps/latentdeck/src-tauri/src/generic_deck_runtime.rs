@@ -1126,9 +1126,10 @@ impl RuntimeActor {
         controls: Vec<ControlBinding>,
     ) -> Result<GenericDeckRuntimeView, GenericDeckRuntimeError> {
         prevalidate_dynamic_state(&self.session, self.status.roles.as_slice(), &controls)?;
-        let expected = controls;
-        let controls = LimitedVec::<_, MAX_CONTROLS>::try_from_vec(expected.clone())
+        let controls = LimitedVec::<_, MAX_CONTROLS>::try_from_vec(controls)
             .map_err(|_| GenericDeckRuntimeError::input())?;
+        let mut expected_status = self.status.clone();
+        expected_status.controls = controls.clone();
         let ack = self
             .session
             .client_mut()
@@ -1145,10 +1146,7 @@ impl RuntimeActor {
         let Ack::DeckControlsSet(status) = ack else {
             return Err(GenericDeckRuntimeError::protocol());
         };
-        validate_mutation_status(&self.status, &status, &self.slot_counts)?;
-        if status.controls.as_slice() != expected {
-            return Err(GenericDeckRuntimeError::protocol());
-        }
+        validate_exact_mutation_status(&expected_status, &status, &self.slot_counts)?;
         self.pending_frames.clear();
         self.status = *status;
         self.publish_status()?;
@@ -1160,9 +1158,10 @@ impl RuntimeActor {
         roles: Vec<RoleBinding>,
     ) -> Result<GenericDeckRuntimeView, GenericDeckRuntimeError> {
         prevalidate_dynamic_state(&self.session, &roles, self.status.controls.as_slice())?;
-        let expected = roles;
-        let roles = LimitedVec::<_, MAX_ROLES>::try_from_vec(expected.clone())
+        let roles = LimitedVec::<_, MAX_ROLES>::try_from_vec(roles)
             .map_err(|_| GenericDeckRuntimeError::input())?;
+        let mut expected_status = self.status.clone();
+        expected_status.roles = roles.clone();
         let ack = self
             .session
             .client_mut()
@@ -1179,10 +1178,7 @@ impl RuntimeActor {
         let Ack::DeckRolesSet(status) = ack else {
             return Err(GenericDeckRuntimeError::protocol());
         };
-        validate_mutation_status(&self.status, &status, &self.slot_counts)?;
-        if status.roles.as_slice() != expected {
-            return Err(GenericDeckRuntimeError::protocol());
-        }
+        validate_exact_mutation_status(&expected_status, &status, &self.slot_counts)?;
         self.pending_frames.clear();
         self.status = *status;
         self.publish_status()?;
@@ -1213,10 +1209,7 @@ impl RuntimeActor {
         let Ack::DeckTransportSet(status) = ack else {
             return Err(GenericDeckRuntimeError::protocol());
         };
-        validate_mutation_status(&self.status, &status, &self.slot_counts)?;
-        if status.source_transport.as_slice() != expected {
-            return Err(GenericDeckRuntimeError::protocol());
-        }
+        validate_transport_mutation_status(&self.status, &status, &expected, &self.slot_counts)?;
         self.pending_frames.clear();
         self.status = *status;
         self.publish_status()?;
@@ -1230,6 +1223,8 @@ impl RuntimeActor {
         if seed > 9_007_199_254_740_991 {
             return Err(GenericDeckRuntimeError::input());
         }
+        let mut expected_status = self.status.clone();
+        expected_status.seed = seed;
         let ack = self
             .session
             .client_mut()
@@ -1246,10 +1241,7 @@ impl RuntimeActor {
         let Ack::DeckSeedSet(status) = ack else {
             return Err(GenericDeckRuntimeError::protocol());
         };
-        validate_mutation_status(&self.status, &status, &self.slot_counts)?;
-        if status.seed != seed {
-            return Err(GenericDeckRuntimeError::protocol());
-        }
+        validate_exact_mutation_status(&expected_status, &status, &self.slot_counts)?;
         self.pending_frames.clear();
         self.status = *status;
         self.publish_status()?;
@@ -1999,7 +1991,7 @@ fn validate_process_status(
             .is_none_or(|expected| expected != current.stream_sequence)
         || current.roles != previous.roles
         || current.controls != previous.controls
-        || current.source_transport != previous.source_transport
+        || !valid_process_transport_transition(previous, current, slot_counts)
         || current.seed != previous.seed
         || !valid_process_capture_transition(previous.capture_state, current.capture_state)
         || matches!(
@@ -2010,6 +2002,58 @@ fn validate_process_status(
         return Err(GenericDeckRuntimeError::protocol());
     }
     validate_playhead_bounds(current, slot_counts)
+}
+
+fn valid_process_transport_transition(
+    previous: &DeckStatusSnapshot,
+    current: &DeckStatusSnapshot,
+    slot_counts: &[(u8, u64)],
+) -> bool {
+    if previous.source_transport.len() != current.source_transport.len() {
+        return false;
+    }
+    previous
+        .source_transport
+        .as_slice()
+        .iter()
+        .zip(current.source_transport.as_slice())
+        .all(|(before, after)| {
+            if before.physical_slot != after.physical_slot
+                || before.loop_enabled != after.loop_enabled
+            {
+                return false;
+            }
+            if before.playing == after.playing {
+                return true;
+            }
+            if !before.playing || after.playing || before.loop_enabled {
+                return false;
+            }
+            let Some(slot_count) = slot_counts.iter().find_map(|(physical_slot, count)| {
+                (*physical_slot == before.physical_slot).then_some(*count)
+            }) else {
+                return false;
+            };
+            let before_playhead = previous
+                .playheads
+                .as_slice()
+                .iter()
+                .find(|playhead| playhead.physical_slot == before.physical_slot);
+            let after_playhead = current
+                .playheads
+                .as_slice()
+                .iter()
+                .find(|playhead| playhead.physical_slot == after.physical_slot);
+            let (Some(before_playhead), Some(after_playhead)) = (before_playhead, after_playhead)
+            else {
+                return false;
+            };
+            slot_count > 0
+                && before_playhead.latent_slot.checked_add(1) == Some(slot_count)
+                && !before_playhead.end_of_stream
+                && after_playhead.latent_slot == before_playhead.latent_slot
+                && after_playhead.end_of_stream
+        })
 }
 
 const fn valid_process_capture_transition(previous: CaptureState, current: CaptureState) -> bool {
@@ -2030,20 +2074,70 @@ const fn valid_process_capture_transition(previous: CaptureState, current: Captu
     )
 }
 
-fn validate_mutation_status(
-    previous: &DeckStatusSnapshot,
+fn validate_exact_mutation_status(
+    expected: &DeckStatusSnapshot,
     current: &DeckStatusSnapshot,
     slot_counts: &[(u8, u64)],
 ) -> Result<(), GenericDeckRuntimeError> {
+    if current != expected {
+        return Err(GenericDeckRuntimeError::protocol());
+    }
+    validate_playhead_bounds(current, slot_counts)
+}
+
+fn validate_transport_mutation_status(
+    previous: &DeckStatusSnapshot,
+    current: &DeckStatusSnapshot,
+    expected: &[SourceTransportBinding],
+    slot_counts: &[(u8, u64)],
+) -> Result<(), GenericDeckRuntimeError> {
+    let expected_state = if expected.iter().any(|source| source.playing) {
+        DeckState::Playing
+    } else {
+        DeckState::Paused
+    };
     if current.deck_session_id != previous.deck_session_id
         || current.deck_revision != previous.deck_revision
         || current.stream_generation != previous.stream_generation
         || current.stream_sequence != previous.stream_sequence
-        || current.playheads != previous.playheads
         || current.capture_state != previous.capture_state
-        || current.state != previous.state
+        || current.roles != previous.roles
+        || current.controls != previous.controls
+        || current.seed != previous.seed
+        || current.source_transport.as_slice() != expected
+        || current.state != expected_state
+        || current.playheads.len() != previous.playheads.len()
     {
         return Err(GenericDeckRuntimeError::protocol());
+    }
+    for transport in expected {
+        let before = previous
+            .playheads
+            .as_slice()
+            .iter()
+            .find(|playhead| playhead.physical_slot == transport.physical_slot)
+            .ok_or_else(GenericDeckRuntimeError::protocol)?;
+        let after = current
+            .playheads
+            .as_slice()
+            .iter()
+            .find(|playhead| playhead.physical_slot == transport.physical_slot)
+            .ok_or_else(GenericDeckRuntimeError::protocol)?;
+        let slot_count = slot_counts
+            .iter()
+            .find_map(|(physical_slot, count)| {
+                (*physical_slot == transport.physical_slot).then_some(*count)
+            })
+            .ok_or_else(GenericDeckRuntimeError::protocol)?;
+        let expected_end_of_stream = !transport.playing
+            && !transport.loop_enabled
+            && before.latent_slot.saturating_add(1) >= slot_count;
+        if after.latent_slot != before.latent_slot
+            || after.loop_enabled != transport.loop_enabled
+            || after.end_of_stream != expected_end_of_stream
+        {
+            return Err(GenericDeckRuntimeError::protocol());
+        }
     }
     validate_playhead_bounds(current, slot_counts)
 }
@@ -2694,6 +2788,72 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    struct SourceStatusFixture {
+        physical_slot: u8,
+        latent_slot: u64,
+        playing: bool,
+        loop_enabled: bool,
+        end_of_stream: bool,
+    }
+
+    const fn source_status(
+        physical_slot: u8,
+        latent_slot: u64,
+        playing: bool,
+        loop_enabled: bool,
+        end_of_stream: bool,
+    ) -> SourceStatusFixture {
+        SourceStatusFixture {
+            physical_slot,
+            latent_slot,
+            playing,
+            loop_enabled,
+            end_of_stream,
+        }
+    }
+
+    fn set_sources(status: &mut DeckStatusSnapshot, sources: &[SourceStatusFixture]) {
+        status.playheads = LimitedVec::try_from_vec(
+            sources
+                .iter()
+                .map(|source| PlayheadSnapshot {
+                    physical_slot: source.physical_slot,
+                    latent_slot: source.latent_slot,
+                    loop_enabled: source.loop_enabled,
+                    end_of_stream: source.end_of_stream,
+                })
+                .collect(),
+        )
+        .expect("playheads");
+        status.source_transport = LimitedVec::try_from_vec(
+            sources
+                .iter()
+                .map(|source| SourceTransportBinding {
+                    physical_slot: source.physical_slot,
+                    playing: source.playing,
+                    loop_enabled: source.loop_enabled,
+                })
+                .collect(),
+        )
+        .expect("transport");
+    }
+
+    fn set_d2_roles(status: &mut DeckStatusSnapshot, carrier_slot: u8) {
+        let donor_slot = if carrier_slot == 1 { 2 } else { 1 };
+        status.roles = LimitedVec::try_from_vec(vec![
+            RoleBinding {
+                role: "carrier".to_owned(),
+                physical_slot: carrier_slot,
+            },
+            RoleBinding {
+                role: "donor".to_owned(),
+                physical_slot: donor_slot,
+            },
+        ])
+        .expect("roles");
+    }
+
     fn capture_status_fixture(
         deck: &DeckStatusSnapshot,
         capture_id: Uuid,
@@ -2769,6 +2929,92 @@ mod tests {
             &[CaptureState::Capturing],
         )
         .expect("capture receipt records the causal reset event");
+    }
+
+    #[test]
+    fn deck_process_accepts_non_looping_sources_stopping_at_exact_end_of_stream() {
+        let mut previous = status(2, 1, 9);
+        set_sources(
+            &mut previous,
+            &[
+                source_status(1, 2, true, false, false),
+                source_status(2, 2, true, false, false),
+            ],
+        );
+        set_d2_roles(&mut previous, 1);
+
+        let mut completed = previous.clone();
+        completed.stream_sequence = 10;
+        completed.state = DeckState::Paused;
+        set_sources(
+            &mut completed,
+            &[
+                source_status(1, 2, false, false, true),
+                source_status(2, 2, false, false, true),
+            ],
+        );
+
+        validate_process_status(&previous, &completed, &[(1, 3), (2, 3)])
+            .expect("natural non-looping EOF must pause without faulting the Deck session");
+
+        let mut premature = previous.clone();
+        premature.stream_sequence = 10;
+        set_sources(
+            &mut premature,
+            &[
+                source_status(1, 2, false, false, false),
+                source_status(2, 2, true, false, false),
+            ],
+        );
+        let error = validate_process_status(&previous, &premature, &[(1, 4), (2, 3)])
+            .expect_err("a worker cannot stop a source before its exact EOF");
+        assert_eq!(error.code, "deck.protocol_fault");
+    }
+
+    #[test]
+    fn transport_mutation_accepts_resuming_a_non_looping_source_after_eof() {
+        let mut previous = status(2, 1, 9);
+        previous.state = DeckState::Paused;
+        set_sources(&mut previous, &[source_status(1, 2, false, false, true)]);
+
+        let mut resumed = previous.clone();
+        resumed.state = DeckState::Playing;
+        set_sources(&mut resumed, &[source_status(1, 2, true, false, false)]);
+        let expected = resumed.source_transport.as_slice().to_vec();
+
+        validate_transport_mutation_status(&previous, &resumed, &expected, &[(1, 3)])
+            .expect("Play after natural EOF must not destroy the warm Deck session");
+
+        let mut paused = resumed.clone();
+        paused.state = DeckState::Paused;
+        set_sources(&mut paused, &[source_status(1, 2, false, false, true)]);
+        let expected_pause = paused.source_transport.as_slice().to_vec();
+        validate_transport_mutation_status(&resumed, &paused, &expected_pause, &[(1, 3)])
+            .expect("pausing the final active source must keep the warm Deck session alive");
+    }
+
+    #[test]
+    fn role_mutation_accepts_only_the_exact_returned_snapshot() {
+        let mut previous = status(0, 1, 9);
+        set_sources(
+            &mut previous,
+            &[
+                source_status(1, 0, true, true, false),
+                source_status(2, 0, true, true, false),
+            ],
+        );
+        set_d2_roles(&mut previous, 1);
+
+        let mut expected = previous.clone();
+        set_d2_roles(&mut expected, 2);
+        validate_exact_mutation_status(&expected, &expected, &[(1, 3), (2, 3)])
+            .expect("an exact role permutation acknowledgement remains live");
+
+        let mut smuggled = expected.clone();
+        smuggled.seed += 1;
+        let error = validate_exact_mutation_status(&expected, &smuggled, &[(1, 3), (2, 3)])
+            .expect_err("a role acknowledgement cannot mutate unrelated Deck state");
+        assert_eq!(error.code, "deck.protocol_fault");
     }
 
     #[test]
