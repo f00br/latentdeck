@@ -2280,7 +2280,7 @@ fn map_client_error(error: WorkerClientV2Error) -> GenericDeckRuntimeError {
 
 fn map_startup_client_error(error: WorkerClientV2Error) -> GenericDeckRuntimeError {
     match error {
-        WorkerClientV2Error::Supervisor(error) => map_supervisor_error(error),
+        WorkerClientV2Error::Supervisor(error) => map_supervisor_error(&error),
         WorkerClientV2Error::UnexpectedReply | WorkerClientV2Error::UnexpectedAck { .. } => {
             GenericDeckRuntimeError::protocol()
         }
@@ -2288,7 +2288,7 @@ fn map_startup_client_error(error: WorkerClientV2Error) -> GenericDeckRuntimeErr
     }
 }
 
-fn map_supervisor_error(error: WorkerSupervisorError) -> GenericDeckRuntimeError {
+fn map_supervisor_error(error: &WorkerSupervisorError) -> GenericDeckRuntimeError {
     match error {
         WorkerSupervisorError::ConnectTimeout
         | WorkerSupervisorError::HandshakeTimeout
@@ -2325,7 +2325,7 @@ fn map_supervisor_error(error: WorkerSupervisorError) -> GenericDeckRuntimeError
 fn map_source_error(error: WorkerSourceV2Error) -> GenericDeckRuntimeError {
     match error {
         WorkerSourceV2Error::Client(error) => map_startup_client_error(error),
-        WorkerSourceV2Error::Supervisor(error) => map_supervisor_error(error),
+        WorkerSourceV2Error::Supervisor(error) => map_supervisor_error(&error),
         WorkerSourceV2Error::Receipt(_)
         | WorkerSourceV2Error::CartridgeIdentity
         | WorkerSourceV2Error::ReceiptEncoding
@@ -2338,7 +2338,7 @@ fn map_startup_error(error: DeckSessionV2Error) -> GenericDeckRuntimeError {
     match error {
         DeckSessionV2Error::ProtocolMismatch => GenericDeckRuntimeError::protocol(),
         DeckSessionV2Error::Client(error) => map_startup_client_error(error),
-        DeckSessionV2Error::Supervisor(error) => map_supervisor_error(error),
+        DeckSessionV2Error::Supervisor(error) => map_supervisor_error(&error),
         DeckSessionV2Error::Source(error) => map_source_error(error),
         DeckSessionV2Error::Ring(_) => GenericDeckRuntimeError::ring(),
         DeckSessionV2Error::InvalidHostContract(_)
