@@ -1,11 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use atomicwrites::replace_atomic;
 use fs2::FileExt;
-use semver::Version;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -17,10 +16,9 @@ use crate::archive::{
 };
 use crate::error::{ErrorCode, ExtensionError, Result};
 use crate::model::{
-    ActiveInstalledPackage, BundledPackageIndex, CodecCapability, CompatibilityPair,
-    CompatibilityReason, ExtensionInventory, InstallReceipt, InstalledPackageSummary,
-    PackageHealth, PackageKind, PackageManifest, PackageReference, TrustReceipt,
-    ValidatedInstalledPackage,
+    ActiveInstalledPackage, BundledPackageIndex, CompatibilityPair, ExtensionInventory,
+    InstallReceipt, InstalledPackageSummary, PackageHealth, PackageKind, PackageManifest,
+    PackageReference, TrustReceipt, ValidatedInstalledPackage,
 };
 use crate::runtime_seal::{self, EncodedRuntimeSeal};
 use crate::schema::{
@@ -1454,33 +1452,12 @@ pub(crate) fn compatibility_matrix_from_inventory(
     let mut pairs = Vec::with_capacity(decks.len().saturating_mul(codecs.len()));
     for deck in decks {
         for codec in &codecs {
-            let (reason, compatible_profile) = if deck.health == PackageHealth::Corrupt
-                || codec.health == PackageHealth::Corrupt
-            {
-                (CompatibilityReason::PackageInvalid, None)
-            } else if !deck.enabled
-                || !codec.enabled
-                || deck.health == PackageHealth::Untrusted
-                || codec.health == PackageHealth::Untrusted
-                || deck.health == PackageHealth::VerificationRequired
-                || codec.health == PackageHealth::VerificationRequired
-            {
-                (CompatibilityReason::Untrusted, None)
-            } else {
-                match (manifests.get(&deck.package), manifests.get(&codec.package)) {
-                    (
-                        Some(PackageManifest::Deck(deck_manifest)),
-                        Some(PackageManifest::Codec(codec_manifest)),
-                    ) => resolve_pair(deck_manifest, codec_manifest),
-                    _ => (CompatibilityReason::PackageInvalid, None),
-                }
-            };
-            pairs.push(CompatibilityPair {
-                deck: deck.package.clone(),
-                codec: codec.package.clone(),
-                reason,
-                compatible_profile,
-            });
+            pairs.push(crate::compatibility::resolve_inventory_pair(
+                deck,
+                manifests.get(&deck.package),
+                codec,
+                manifests.get(&codec.package),
+            ));
         }
     }
     pairs
@@ -2212,67 +2189,6 @@ fn summarize_version_locked(
             )
         }
     }
-}
-
-fn resolve_pair(
-    deck: &crate::model::DeckPackManifest,
-    codec: &crate::model::CodecPackManifest,
-) -> (CompatibilityReason, Option<crate::model::ProfileKey>) {
-    if deck.compatibility.worker_protocol != codec.compatibility.worker_protocol {
-        return (CompatibilityReason::UnsupportedProtocol, None);
-    }
-    let app = Version::parse(env!("CARGO_PKG_VERSION")).expect("crate version is SemVer");
-    if !version_in_range(
-        &app,
-        &deck.compatibility.app_min_inclusive,
-        &deck.compatibility.app_max_exclusive,
-    ) || !version_in_range(
-        &app,
-        &codec.compatibility.app_min_inclusive,
-        &codec.compatibility.app_max_exclusive,
-    ) {
-        return (CompatibilityReason::UnsupportedHostApi, None);
-    }
-    if deck.compatibility.tensor_abi != codec.compatibility.tensor_abi
-        || deck.compatibility.python != codec.compatibility.python
-        || deck.compatibility.torch_exact_build != codec.compatibility.torch_exact_build
-    {
-        return (CompatibilityReason::UnsupportedTensorAbi, None);
-    }
-    let profile_candidates: Vec<_> = codec
-        .compatibility
-        .profiles
-        .iter()
-        .filter(|profile| {
-            deck.signal
-                .profile_allowlist
-                .as_ref()
-                .is_none_or(|allowlist| allowlist.contains(profile))
-        })
-        .collect();
-    if profile_candidates.is_empty() {
-        return (CompatibilityReason::UnsupportedProfile, None);
-    }
-    let provided: HashSet<CodecCapability> = codec.capabilities.iter().copied().collect();
-    if deck
-        .signal
-        .required_capabilities
-        .iter()
-        .any(|required| !provided.contains(required))
-    {
-        return (CompatibilityReason::UnsupportedCapability, None);
-    }
-    (
-        CompatibilityReason::Compatible,
-        Some((*profile_candidates[0]).clone()),
-    )
-}
-
-fn version_in_range(version: &Version, minimum: &str, maximum: &str) -> bool {
-    Version::parse(minimum)
-        .ok()
-        .zip(Version::parse(maximum).ok())
-        .is_some_and(|(minimum, maximum)| version >= &minimum && version < &maximum)
 }
 
 fn corrupt_summary(package: PackageReference, code: &str, detail: &str) -> InstalledPackageSummary {

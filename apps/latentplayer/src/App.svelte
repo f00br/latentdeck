@@ -1997,13 +1997,12 @@
               >
               <strong>
                 {compatibilityReasonLabel(pair.reason)}
-                {#if pair.compatibleProfile !== null}
+                {#each pair.compatibleProfiles as profile (`${profile.codecFamily}:${profile.profile}:${profile.profileVersion}`)}
                   <small
-                    >{pair.compatibleProfile.codecFamily} /
-                    {pair.compatibleProfile.profile} /
-                    {pair.compatibleProfile.profileVersion}</small
+                    >{profile.codecFamily} / {profile.profile} /
+                    {profile.profileVersion}</small
                   >
-                {/if}
+                {/each}
               </strong>
             </article>
           {/each}

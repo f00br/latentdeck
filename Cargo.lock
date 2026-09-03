@@ -2190,6 +2190,7 @@ dependencies = [
  "clap",
  "fs2",
  "hex",
+ "latentdeck-deck-runtime-contracts",
  "semver",
  "serde",
  "serde_jcs",

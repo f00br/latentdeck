@@ -77,6 +77,13 @@ function snapshot(codecId: string): ExtensionsSnapshot {
           packageVersion: "2.0.0",
         },
         reason: "compatible",
+        compatibleProfiles: [
+          {
+            codecFamily: "test",
+            profile: "latent",
+            profileVersion: "1.0.0",
+          },
+        ],
         compatibleProfile: {
           codecFamily: "test",
           profile: "latent",

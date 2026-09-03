@@ -17,7 +17,8 @@ use latentdeck_control::{
 use latentdeck_core::{
     deck_selection_v2::{
         DeckPackageSelectionV2, DeckSelectionV2Error, DeckSourceSelectionV2,
-        PreparedDeckSelectionV2, check_indexed_deck_source_compatibility,
+        IndexedDeckSourceSelection, PreparedDeckSelectionV2,
+        check_indexed_deck_source_compatibility, check_indexed_deck_source_set_compatibility,
         prepare_exact_deck_selection_with_cache,
     },
     deck_session_v2::DeckSessionV2LoadRequest,
@@ -30,7 +31,9 @@ use latentdeck_deck_runtime_contracts::{
 use latentdeck_extension_manager::{
     ActiveInstalledPackage, ActivePackageCache, CompatibilityReason,
     ErrorCode as ExtensionErrorCode, ExtensionError, ExtensionRoots, ExternalAssetDescriptor,
-    PackageKind, PackageManifest, PackageReference,
+    PackageKind, PackageManifest, PackageReference, SelectedSourceScope,
+    TensorDevice as ManifestTensorDevice, resolve_package_compatibility,
+    resolve_selected_compatibility,
 };
 use latentdeck_library::{CartridgeKey, DeckSourceIdentity, ResolvedDeckSource};
 use latentdeck_native_output::{HostFullscreenController, NativeSpoutStatus};
@@ -688,6 +691,8 @@ pub(crate) struct GenericRuntimeOptionsRequest {
     device_ordinal: u8,
     #[serde(default)]
     sources: Vec<GenericDeckSourceInput>,
+    #[serde(default)]
+    selected_sources: Vec<GenericDeckSourceInput>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1039,7 +1044,8 @@ pub(crate) async fn deck_generic_runtime_options(
                 (deck.manifest(), codec.manifest())
             {
                 reason =
-                    discovery_reason(deck, codec, request.device, CompatibilityReason::Compatible);
+                    resolve_package_compatibility(deck, codec, latentdeck_core::product_version())
+                        .reason;
                 (Some(deck.clone()), Some(codec.clone()))
             } else {
                 reason = CompatibilityReason::PackageInvalid;
@@ -1051,14 +1057,13 @@ pub(crate) async fn deck_generic_runtime_options(
     let profiles = deck_manifest
         .as_ref()
         .zip(codec_manifest.as_ref())
-        .map_or_else(Vec::new, |(deck, codec)| compatible_profiles(deck, codec));
-    if reason == CompatibilityReason::Compatible && profiles.is_empty() {
-        reason = CompatibilityReason::UnsupportedProfile;
-    } else if let Some(selected) = &request.profile_key
-        && !profiles.iter().any(|profile| profile == selected)
-    {
-        reason = CompatibilityReason::UnsupportedProfile;
-    }
+        .map_or_else(Vec::new, |(deck, codec)| {
+            resolve_package_compatibility(deck, codec, latentdeck_core::product_version())
+                .compatible_profiles
+                .iter()
+                .map(GenericProfileKeyInput::from)
+                .collect()
+        });
 
     let bound_assets = {
         let mut controller = state.controller.lock().await;
@@ -1097,15 +1102,39 @@ pub(crate) async fn deck_generic_runtime_options(
             })
             .collect()
     });
+    let assets_present = codec_manifest.as_ref().is_none_or(|manifest| {
+        manifest
+            .external_assets
+            .iter()
+            .all(|asset| !asset.required || bound_assets.contains_key(&asset.asset_id))
+    });
     if reason == CompatibilityReason::Compatible
-        && codec_manifest.as_ref().is_some_and(|manifest| {
-            manifest
-                .external_assets
-                .iter()
-                .any(|asset| asset.required && !bound_assets.contains_key(&asset.asset_id))
-        })
+        && (!assets_present || request.profile_key.is_some())
+        && let (Some(deck), Some(codec)) = (&deck_manifest, &codec_manifest)
     {
-        reason = CompatibilityReason::MissingAsset;
+        let selected_profile =
+            request
+                .profile_key
+                .as_ref()
+                .map(|profile| latentdeck_extension_manager::ProfileKey {
+                    codec_family: profile.codec_family.clone(),
+                    profile: profile.profile.clone(),
+                    profile_version: profile.profile_version.clone(),
+                });
+        reason = resolve_selected_compatibility(
+            deck,
+            codec,
+            latentdeck_core::product_version(),
+            assets_present,
+            selected_profile.as_ref(),
+            match request.device {
+                DeviceKind::Cpu => ManifestTensorDevice::Cpu,
+                DeviceKind::Cuda => ManifestTensorDevice::Cuda,
+            },
+            &[],
+            SelectedSourceScope::Candidate,
+        )
+        .reason;
     }
 
     let slots = deck_manifest
@@ -1165,6 +1194,17 @@ pub(crate) async fn deck_generic_runtime_options(
             reason: source_reason,
         });
     }
+    if reason == CompatibilityReason::Compatible && !request.selected_sources.is_empty() {
+        reason = selected_source_set_reason(
+            &library,
+            &request.selected_sources,
+            request.profile_key.as_ref(),
+            deck_manifest.as_ref(),
+            codec_manifest.as_ref(),
+            request.device,
+        )
+        .await;
+    }
     Ok(GenericRuntimeOptionsView {
         deck: exact_package_view(&request.deck_id, &request.deck_version),
         codec: exact_package_view(&request.codec_id, &request.codec_version),
@@ -1196,8 +1236,72 @@ fn align_indexed_source_results<T>(
 
 fn runtime_options_request_is_bounded(request: &GenericRuntimeOptionsRequest) -> bool {
     request.sources.len() <= MAX_SOURCE_OPTIONS
-        && (request.profile_key.is_some() || request.sources.is_empty())
+        && request.selected_sources.len() <= 16
+        && (request.profile_key.is_some()
+            || (request.sources.is_empty() && request.selected_sources.is_empty()))
         && (request.device != DeviceKind::Cpu || request.device_ordinal == 0)
+}
+
+async fn selected_source_set_reason(
+    library: &AppState,
+    sources: &[GenericDeckSourceInput],
+    profile: Option<&GenericProfileKeyInput>,
+    deck: Option<&latentdeck_extension_manager::DeckPackManifest>,
+    codec: Option<&latentdeck_extension_manager::CodecPackManifest>,
+    device: DeviceKind,
+) -> CompatibilityReason {
+    let (Some(profile), Some(deck), Some(codec)) = (profile, deck, codec) else {
+        return CompatibilityReason::PackageInvalid;
+    };
+    let identities = sources
+        .iter()
+        .map(source_identity)
+        .collect::<Result<Vec<_>, _>>();
+    let Ok(identities) = identities else {
+        return CompatibilityReason::PackageInvalid;
+    };
+    let Ok(indexed) = library
+        .indexed_deck_source_manifests(identities.clone())
+        .await
+    else {
+        return CompatibilityReason::PackageInvalid;
+    };
+    let manifests = indexed.into_iter().collect::<Result<Vec<_>, _>>();
+    let Ok(manifests) = manifests else {
+        return CompatibilityReason::PackageInvalid;
+    };
+    let selected = manifests
+        .iter()
+        .zip(identities.iter())
+        .map(|(manifest, identity)| IndexedDeckSourceSelection {
+            manifest,
+            expected_cartridge_id: identity.cartridge_id(),
+            archive_sha256: identity.archive_sha256().as_str(),
+        })
+        .collect::<Vec<_>>();
+    check_indexed_deck_source_set_compatibility(codec, deck, &selected, &profile.to_wire(), device)
+        .map_or_else(compatibility_reason_from_selection_error, |()| {
+            CompatibilityReason::Compatible
+        })
+}
+
+const fn compatibility_reason_from_selection_error(
+    error: DeckSelectionV2Error,
+) -> CompatibilityReason {
+    match error {
+        DeckSelectionV2Error::Untrusted => CompatibilityReason::Untrusted,
+        DeckSelectionV2Error::MissingAsset => CompatibilityReason::MissingAsset,
+        DeckSelectionV2Error::PackageInvalid | DeckSelectionV2Error::ExtensionLifecycle(_) => {
+            CompatibilityReason::PackageInvalid
+        }
+        DeckSelectionV2Error::UnsupportedProtocol => CompatibilityReason::UnsupportedProtocol,
+        DeckSelectionV2Error::UnsupportedHostApi => CompatibilityReason::UnsupportedHostApi,
+        DeckSelectionV2Error::UnsupportedTensorAbi => CompatibilityReason::UnsupportedTensorAbi,
+        DeckSelectionV2Error::UnsupportedProfile => CompatibilityReason::UnsupportedProfile,
+        DeckSelectionV2Error::UnsupportedSignal => CompatibilityReason::UnsupportedSignal,
+        DeckSelectionV2Error::UnsupportedTiming => CompatibilityReason::UnsupportedTiming,
+        DeckSelectionV2Error::UnsupportedCapability => CompatibilityReason::UnsupportedCapability,
+    }
 }
 
 fn indexed_source_option_reason(
@@ -1224,24 +1328,6 @@ fn indexed_source_option_reason(
         |error| error.code().to_owned(),
         |()| "compatible".to_owned(),
     )
-}
-
-fn compatible_profiles(
-    deck: &latentdeck_extension_manager::DeckPackManifest,
-    codec: &latentdeck_extension_manager::CodecPackManifest,
-) -> Vec<GenericProfileKeyInput> {
-    codec
-        .compatibility
-        .profiles
-        .iter()
-        .filter(|profile| {
-            deck.signal
-                .profile_allowlist
-                .as_ref()
-                .is_none_or(|allowlist| allowlist.contains(profile))
-        })
-        .map(GenericProfileKeyInput::from)
-        .collect()
 }
 
 enum DiscoveryPackage {
@@ -1283,85 +1369,6 @@ const fn discovery_reason_for_extension_error(
         | ExtensionErrorCode::LifecycleConflict
         | ExtensionErrorCode::Io => None,
     }
-}
-
-fn discovery_reason(
-    deck: &latentdeck_extension_manager::DeckPackManifest,
-    codec: &latentdeck_extension_manager::CodecPackManifest,
-    device: DeviceKind,
-    base: CompatibilityReason,
-) -> CompatibilityReason {
-    if base != CompatibilityReason::Compatible {
-        return base;
-    }
-    if deck.manifest_version != "1.0.0"
-        || codec.manifest_version != "2.0.0"
-        || deck.compatibility.worker_protocol != 2
-        || codec.compatibility.worker_protocol != 2
-    {
-        return CompatibilityReason::UnsupportedProtocol;
-    }
-    let Ok(app) = Version::parse(latentdeck_core::product_version()) else {
-        return CompatibilityReason::UnsupportedHostApi;
-    };
-    if !version_in_range(
-        &app,
-        &deck.compatibility.app_min_inclusive,
-        &deck.compatibility.app_max_exclusive,
-    ) || !version_in_range(
-        &app,
-        &codec.compatibility.app_min_inclusive,
-        &codec.compatibility.app_max_exclusive,
-    ) {
-        return CompatibilityReason::UnsupportedHostApi;
-    }
-    if deck.compatibility.deck_host_api != 1
-        || deck.compatibility.deck_operator_api != 1
-        || codec.compatibility.codec_adapter_api != 1
-        || deck.compatibility.tensor_abi != "latentdeck.tensor.v1"
-        || codec.compatibility.tensor_abi != "latentdeck.tensor.v1"
-        || deck.compatibility.python != codec.compatibility.python
-        || deck.compatibility.torch_exact_build != codec.compatibility.torch_exact_build
-    {
-        return CompatibilityReason::UnsupportedTensorAbi;
-    }
-    if !geometry_allowlist_supports_device(deck, device) {
-        return CompatibilityReason::UnsupportedTensorAbi;
-    }
-    if deck
-        .signal
-        .required_capabilities
-        .iter()
-        .any(|required| !codec.capabilities.contains(required))
-    {
-        return CompatibilityReason::UnsupportedCapability;
-    }
-    CompatibilityReason::Compatible
-}
-
-fn geometry_allowlist_supports_device(
-    deck: &latentdeck_extension_manager::DeckPackManifest,
-    device: DeviceKind,
-) -> bool {
-    deck.signal.geometry_allowlist.iter().any(|geometry| {
-        matches!(
-            (geometry.device, device),
-            (
-                latentdeck_extension_manager::TensorDevice::Cpu,
-                DeviceKind::Cpu
-            ) | (
-                latentdeck_extension_manager::TensorDevice::Cuda,
-                DeviceKind::Cuda
-            )
-        )
-    })
-}
-
-fn version_in_range(version: &Version, minimum: &str, maximum: &str) -> bool {
-    Version::parse(minimum)
-        .ok()
-        .zip(Version::parse(maximum).ok())
-        .is_some_and(|(minimum, maximum)| version >= &minimum && version < &maximum)
 }
 
 const fn compatibility_reason_code(reason: CompatibilityReason) -> &'static str {
@@ -2507,17 +2514,78 @@ mod tests {
     }
 
     #[test]
-    fn ui_discovery_uses_any_exact_allowlisted_geometry_for_the_selected_device() {
+    fn bundled_d2_device_discovery_uses_the_authoritative_selected_resolver() {
         let deck: latentdeck_extension_manager::DeckPackManifest =
             serde_json::from_str(include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../../operators/builtin/d2/package/deck-pack.json"
             )))
             .expect("bundled D2 manifest");
+        let codec: latentdeck_extension_manager::CodecPackManifest =
+            serde_json::from_value(serde_json::json!({
+                "manifest_version": "2.0.0",
+                "kind": "codec_pack",
+                "pack_id": "com.example.codec",
+                "pack_version": "0.2.0",
+                "display_name": "Test Codec",
+                "summary": "Metadata-only resolver fixture.",
+                "publisher": {"name": "Test", "url": null, "identity_claim": "self_declared"},
+                "license": {"spdx_or_label": "test-only", "notice_path": "NOTICE.txt"},
+                "platform": {"os": "windows", "arch": "x86_64"},
+                "compatibility": {
+                    "app_min_inclusive": "0.1.0",
+                    "app_max_exclusive": "1.0.0",
+                    "worker_protocol": 2,
+                    "codec_adapter_api": 1,
+                    "tensor_abi": "latentdeck.tensor.v1",
+                    "python": {"implementation": "cpython", "version": "3.13", "platform_tag": "win_amd64"},
+                    "torch_exact_build": "2.13.0+cu130",
+                    "lc_spec_versions": ["0.1.0"],
+                    "profiles": [{"codec_family": "synthetic", "profile": "latent", "profile_version": "0.1.0"}]
+                },
+                "adapter": {"adapter_id": "com.example.adapter", "adapter_version": "0.2.0", "entrypoint": "adapter:load"},
+                "worker": {"executable": "runtime/python.exe", "arguments": [], "working_directory": "runtime", "start_timeout_ms": 1000, "heartbeat_timeout_ms": 5000},
+                "capabilities": ["player", "realtime", "resample", "snapshot_capture", "live_capture"],
+                "external_assets": [],
+                "runtime_lock": {"path": "runtime/runtime.lock", "sha256": "aa"},
+                "integrity": {"catalog_path": "integrity.json", "catalog_sha256": "bb"}
+            }))
+            .expect("closed Codec fixture");
+        let profile = latentdeck_extension_manager::ProfileKey {
+            codec_family: "synthetic".to_owned(),
+            profile: "latent".to_owned(),
+            profile_version: "0.1.0".to_owned(),
+        };
 
         assert_eq!(deck.signal.geometry_allowlist.len(), 4);
-        assert!(geometry_allowlist_supports_device(&deck, DeviceKind::Cuda));
-        assert!(!geometry_allowlist_supports_device(&deck, DeviceKind::Cpu));
+        assert_eq!(
+            resolve_selected_compatibility(
+                &deck,
+                &codec,
+                latentdeck_core::product_version(),
+                true,
+                Some(&profile),
+                ManifestTensorDevice::Cuda,
+                &[],
+                SelectedSourceScope::Candidate,
+            )
+            .reason,
+            CompatibilityReason::Compatible
+        );
+        assert_eq!(
+            resolve_selected_compatibility(
+                &deck,
+                &codec,
+                latentdeck_core::product_version(),
+                true,
+                Some(&profile),
+                ManifestTensorDevice::Cpu,
+                &[],
+                SelectedSourceScope::Candidate,
+            )
+            .reason,
+            CompatibilityReason::UnsupportedTensorAbi
+        );
     }
 
     #[test]
@@ -2676,12 +2744,22 @@ mod tests {
                 };
                 source_count
             ],
+            selected_sources: Vec::new(),
         };
 
         assert!(runtime_options_request_is_bounded(&request(257)));
         assert!(runtime_options_request_is_bounded(&request(1_000)));
         assert!(runtime_options_request_is_bounded(&request(1_004)));
         assert!(!runtime_options_request_is_bounded(&request(1_005)));
+        let mut too_many_selected = request(1);
+        too_many_selected.selected_sources = vec![
+            GenericDeckSourceInput {
+                cartridge_id: "550e8400-e29b-41d4-a716-446655440001".to_owned(),
+                archive_sha256: "aa".repeat(32),
+            };
+            17
+        ];
+        assert!(!runtime_options_request_is_bounded(&too_many_selected));
     }
 
     #[test]

@@ -53,6 +53,7 @@ export interface GenericRuntimeOptionsRequest {
   device: GenericDevice;
   deviceOrdinal: number;
   sources: GenericDeckSourceIdentity[];
+  selectedSources?: GenericDeckSourceIdentity[];
 }
 
 export interface GenericRuntimeExternalAsset {

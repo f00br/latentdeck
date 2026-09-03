@@ -80,6 +80,18 @@ const MATRIX: ExtensionCompatibilityPair[] = [
     deck: DECK_COMPATIBLE,
     codec: CODEC,
     reason: "compatible",
+    compatibleProfiles: [
+      {
+        codecFamily: "example",
+        profile: "latent",
+        profileVersion: "1.0.0",
+      },
+      {
+        codecFamily: "example",
+        profile: "latent-wide",
+        profileVersion: "2.0.0",
+      },
+    ],
     compatibleProfile: {
       codecFamily: "example",
       profile: "latent",
@@ -90,6 +102,7 @@ const MATRIX: ExtensionCompatibilityPair[] = [
     deck: DECK_INCOMPATIBLE,
     codec: CODEC,
     reason: "unsupported_signal",
+    compatibleProfiles: [],
     compatibleProfile: null,
   },
 ];
@@ -716,6 +729,8 @@ describe("mounted LatentPlayer Extensions Manager", () => {
     });
     expect(target.textContent).toContain("Compatible");
     expect(target.textContent).toContain("Unsupported signal geometry");
+    expect(text(target)).toContain("example / latent / 1.0.0");
+    expect(text(target)).toContain("example / latent-wide / 2.0.0");
 
     let codecCard = extensionCard(target, CODEC.packageId);
     const snapshotsBeforeVerify = native.invoke.mock.calls.filter(

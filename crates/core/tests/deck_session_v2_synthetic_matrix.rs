@@ -89,6 +89,9 @@ const COMPATIBLE_DECK4_ID: &str = "dev.latentdeck.synthetic.deck4";
 const SIGNAL_DECK_ID: &str = "dev.latentdeck.synthetic.bad-signal";
 const TIMING_DECK_ID: &str = "dev.latentdeck.synthetic.bad-timing";
 const CAPABILITY_DECK_ID: &str = "dev.latentdeck.synthetic.bad-capability";
+const PROFILE_DECK_ID: &str = "dev.latentdeck.synthetic.bad-profile";
+const DTYPE_DECK_ID: &str = "dev.latentdeck.synthetic.bad-dtype";
+const DEVICE_DECK_ID: &str = "dev.latentdeck.synthetic.bad-device";
 const BUNDLED_D2_ID: &str = "org.latentdeck.deck.d2";
 const BUNDLED_Q4_ID: &str = "org.latentdeck.deck.q4";
 const CARTRIDGE_ID: &str = "550e8400-e29b-41d4-a716-446655440042";
@@ -109,6 +112,9 @@ struct DeckFixture<'a> {
     latent_width: u32,
     fps_numerator: u32,
     required_capability: CodecCapability,
+    profile_name: &'a str,
+    tensor_dtype: ManifestTensorDtype,
+    tensor_device: TensorDevice,
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -126,6 +132,9 @@ async fn installed_non_h3_codec_runs_external_decks_without_p1_fallback() {
             latent_width: 45,
             fps_numerator: 24,
             required_capability: CodecCapability::Realtime,
+            profile_name: PROFILE_NAME,
+            tensor_dtype: ManifestTensorDtype::Fp16,
+            tensor_device: TensorDevice::Cuda,
         },
         DeckFixture {
             id: COMPATIBLE_DECK4_ID,
@@ -133,6 +142,9 @@ async fn installed_non_h3_codec_runs_external_decks_without_p1_fallback() {
             latent_width: 45,
             fps_numerator: 24,
             required_capability: CodecCapability::Realtime,
+            profile_name: PROFILE_NAME,
+            tensor_dtype: ManifestTensorDtype::Fp16,
+            tensor_device: TensorDevice::Cuda,
         },
         DeckFixture {
             id: SIGNAL_DECK_ID,
@@ -140,6 +152,9 @@ async fn installed_non_h3_codec_runs_external_decks_without_p1_fallback() {
             latent_width: 44,
             fps_numerator: 24,
             required_capability: CodecCapability::Realtime,
+            profile_name: PROFILE_NAME,
+            tensor_dtype: ManifestTensorDtype::Fp16,
+            tensor_device: TensorDevice::Cuda,
         },
         DeckFixture {
             id: TIMING_DECK_ID,
@@ -147,6 +162,9 @@ async fn installed_non_h3_codec_runs_external_decks_without_p1_fallback() {
             latent_width: 45,
             fps_numerator: 25,
             required_capability: CodecCapability::Realtime,
+            profile_name: PROFILE_NAME,
+            tensor_dtype: ManifestTensorDtype::Fp16,
+            tensor_device: TensorDevice::Cuda,
         },
         DeckFixture {
             id: CAPABILITY_DECK_ID,
@@ -154,6 +172,39 @@ async fn installed_non_h3_codec_runs_external_decks_without_p1_fallback() {
             latent_width: 45,
             fps_numerator: 24,
             required_capability: CodecCapability::RawImport,
+            profile_name: PROFILE_NAME,
+            tensor_dtype: ManifestTensorDtype::Fp16,
+            tensor_device: TensorDevice::Cuda,
+        },
+        DeckFixture {
+            id: PROFILE_DECK_ID,
+            source_count: 2,
+            latent_width: 45,
+            fps_numerator: 24,
+            required_capability: CodecCapability::Realtime,
+            profile_name: "other_profile",
+            tensor_dtype: ManifestTensorDtype::Fp16,
+            tensor_device: TensorDevice::Cuda,
+        },
+        DeckFixture {
+            id: DTYPE_DECK_ID,
+            source_count: 2,
+            latent_width: 45,
+            fps_numerator: 24,
+            required_capability: CodecCapability::Realtime,
+            profile_name: PROFILE_NAME,
+            tensor_dtype: ManifestTensorDtype::Fp32,
+            tensor_device: TensorDevice::Cuda,
+        },
+        DeckFixture {
+            id: DEVICE_DECK_ID,
+            source_count: 2,
+            latent_width: 45,
+            fps_numerator: 24,
+            required_capability: CodecCapability::Realtime,
+            profile_name: PROFILE_NAME,
+            tensor_dtype: ManifestTensorDtype::Fp16,
+            tensor_device: TensorDevice::Cpu,
         },
     ] {
         install_deck(&roots, temp.path(), fixture);
@@ -167,27 +218,46 @@ async fn installed_non_h3_codec_runs_external_decks_without_p1_fallback() {
 
     assert_refused(
         &roots,
+        &marker,
         SIGNAL_DECK_ID,
         &sources,
         DeckSelectionV2Error::UnsupportedSignal,
     );
     assert_refused(
         &roots,
+        &marker,
         TIMING_DECK_ID,
         &sources,
         DeckSelectionV2Error::UnsupportedTiming,
     );
     assert_refused(
         &roots,
+        &marker,
         CAPABILITY_DECK_ID,
         &sources,
         DeckSelectionV2Error::UnsupportedCapability,
     );
-    assert!(
-        !marker.exists(),
-        "preflight refusals must not spawn Protocol 2 or fall back to Protocol 1"
+    assert_refused(
+        &roots,
+        &marker,
+        PROFILE_DECK_ID,
+        &sources,
+        DeckSelectionV2Error::UnsupportedProfile,
     );
-
+    assert_refused(
+        &roots,
+        &marker,
+        DTYPE_DECK_ID,
+        &sources,
+        DeckSelectionV2Error::UnsupportedTensorAbi,
+    );
+    assert_refused(
+        &roots,
+        &marker,
+        DEVICE_DECK_ID,
+        &sources,
+        DeckSelectionV2Error::UnsupportedTensorAbi,
+    );
     let exact = selection(COMPATIBLE_DECK_ID);
     let active_packages = ActivePackageCache::new();
     let prepared = prepare_exact_deck_selection_with_cache(
@@ -557,6 +627,9 @@ async fn finalized_capture_replays_through_exact_synthetic_codec() {
             latent_width: 45,
             fps_numerator: 24,
             required_capability: CodecCapability::Realtime,
+            profile_name: PROFILE_NAME,
+            tensor_dtype: ManifestTensorDtype::Fp16,
+            tensor_device: TensorDevice::Cuda,
         },
     );
 
@@ -1133,6 +1206,7 @@ fn player_host_contract() -> PlayerSessionV2HostContract {
 
 fn assert_refused(
     roots: &ExtensionRoots,
+    worker_marker: &Path,
     deck_id: &str,
     sources: &[DeckSourceSelectionV2<'_>],
     expected: DeckSelectionV2Error,
@@ -1142,6 +1216,10 @@ fn assert_refused(
         .expect("incompatible pair must be rejected");
     assert_eq!(error, expected);
     assert_eq!(error.code(), expected.code());
+    assert!(
+        !worker_marker.exists(),
+        "{deck_id} must be refused before any Protocol 2 spawn attempt or Protocol 1 fallback"
+    );
 }
 
 fn selection(deck_id: &str) -> DeckPackageSelectionV2 {
@@ -1524,8 +1602,8 @@ fn install_deck(roots: &ExtensionRoots, root: &Path, fixture: DeckFixture<'_>) {
                 .collect(),
             structural_carrier_role: "source_1".to_owned(),
             geometry_allowlist: vec![ManifestSignalGeometry {
-                dtype: ManifestTensorDtype::Fp16,
-                device: TensorDevice::Cuda,
+                dtype: fixture.tensor_dtype,
+                device: fixture.tensor_device,
                 batch: 1,
                 channels: 24,
                 temporal: 1,
@@ -1538,7 +1616,10 @@ fn install_deck(roots: &ExtensionRoots, root: &Path, fixture: DeckFixture<'_>) {
                 samples_per_slot: 24,
             },
             required_capabilities: vec![fixture.required_capability],
-            profile_allowlist: Some(vec![manifest_profile()]),
+            profile_allowlist: Some(vec![ManifestProfileKey {
+                profile: fixture.profile_name.to_owned(),
+                ..manifest_profile()
+            }]),
         },
         faceplate_path: "faceplate.json".to_owned(),
         integrity: IntegrityDescriptor {

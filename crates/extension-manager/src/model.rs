@@ -1,5 +1,6 @@
 use std::{fs::File, path::PathBuf, sync::Arc};
 
+pub use latentdeck_deck_runtime_contracts::CompatibilityReason;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -606,26 +607,13 @@ impl ActiveInstalledPackage {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CompatibilityReason {
-    Compatible,
-    Untrusted,
-    MissingAsset,
-    PackageInvalid,
-    UnsupportedProtocol,
-    UnsupportedHostApi,
-    UnsupportedTensorAbi,
-    UnsupportedProfile,
-    UnsupportedSignal,
-    UnsupportedTiming,
-    UnsupportedCapability,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CompatibilityPair {
     pub deck: PackageReference,
     pub codec: PackageReference,
     pub reason: CompatibilityReason,
+    pub compatible_profiles: Vec<ProfileKey>,
+    /// Backward-compatible deterministic witness for older UI clients. New
+    /// consumers must use the complete `compatible_profiles` intersection.
     pub compatible_profile: Option<ProfileKey>,
 }

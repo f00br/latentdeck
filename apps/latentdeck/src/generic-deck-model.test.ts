@@ -139,6 +139,7 @@ describe("generic exact Deck frontend model", () => {
       reason: reason as Parameters<
         typeof codecOptionsForExactDeck
       >[1][number]["reason"],
+      compatibleProfiles: [],
       compatibleProfile: null,
     }));
 

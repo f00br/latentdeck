@@ -93,6 +93,16 @@ function initialSnapshot(): ExtensionsSnapshot {
         packageVersion: `${index + 1}.0.0`,
       },
       reason,
+      compatibleProfiles:
+        reason === "compatible"
+          ? [
+              {
+                codecFamily: "synthetic",
+                profile: "grid",
+                profileVersion: "1.0.0",
+              },
+            ]
+          : [],
       compatibleProfile:
         reason === "compatible"
           ? {

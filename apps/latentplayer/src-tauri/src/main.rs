@@ -434,6 +434,7 @@ struct ExtensionCompatibilityPairView {
     deck: ExtensionPackageReferenceView,
     codec: ExtensionPackageReferenceView,
     reason: CompatibilityReason,
+    compatible_profiles: Vec<ExtensionProfileView>,
     compatible_profile: Option<ExtensionProfileView>,
 }
 
@@ -443,6 +444,15 @@ impl From<CompatibilityPair> for ExtensionCompatibilityPairView {
             deck: (&value.deck).into(),
             codec: (&value.codec).into(),
             reason: value.reason,
+            compatible_profiles: value
+                .compatible_profiles
+                .into_iter()
+                .map(|profile| ExtensionProfileView {
+                    codec_family: profile.codec_family,
+                    profile: profile.profile,
+                    profile_version: profile.profile_version,
+                })
+                .collect(),
             compatible_profile: value
                 .compatible_profile
                 .map(|profile| ExtensionProfileView {

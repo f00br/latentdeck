@@ -37,6 +37,7 @@
     retainExactSelection,
     sessionCapacityState,
     type GenericCodecOption,
+    type GenericDeckSourceIdentity,
   } from "./generic-deck-model";
   import {
     createDeckUiDraft,
@@ -396,6 +397,7 @@
         device,
         deviceOrdinal,
         sources: [],
+        selectedSources: [],
       });
       nextDiscovery = next;
       discovery = next;
@@ -425,6 +427,7 @@
     codec: GenericCodecOption | undefined = selectedCodec,
     profile: GenericProfileKey | undefined = selectedProfile,
     device: GenericDevice | "" = selectedDevice,
+    selectedSources: GenericDeckSourceIdentity[] = selectedSourceSet(draft),
   ): Promise<void> {
     if (codec === undefined || profile === undefined || device === "" || busy) {
       runtimeOptions = null;
@@ -445,6 +448,7 @@
             cartridgeId: cartridge.cartridgeId,
             archiveSha256: cartridge.archiveSha256,
           })),
+        selectedSources,
       });
       message =
         runtimeOptions.reason === "compatible"
@@ -499,6 +503,7 @@
                 cartridgeId: cartridge.cartridgeId,
                 archiveSha256: cartridge.archiveSha256,
               })),
+      selectedSources: profile === undefined ? [] : selectedSourceSet(draft),
     });
     if (profile === undefined) {
       discovery = next;
@@ -540,6 +545,43 @@
       available: cartridge.availability === "present",
       ...(incompatibilityReason === undefined ? {} : { incompatibilityReason }),
     };
+  }
+
+  function selectedSourceSet(value: DeckUiDraft): GenericDeckSourceIdentity[] {
+    if (
+      value.sourceArchiveSha256s.length !== model.slots ||
+      value.sourceArchiveSha256s.some((archiveSha256) => archiveSha256 === "")
+    ) {
+      return [];
+    }
+    const selected = value.sourceArchiveSha256s.map((archiveSha256) =>
+      library.cartridges.find(
+        (cartridge) =>
+          cartridge.archiveSha256 === archiveSha256 &&
+          cartridge.availability === "present",
+      ),
+    );
+    if (selected.some((cartridge) => cartridge === undefined)) return [];
+    return selected.map((cartridge) => ({
+      cartridgeId: cartridge!.cartridgeId,
+      archiveSha256: cartridge!.archiveSha256,
+    }));
+  }
+
+  function updateDraft(next: DeckUiDraft): void {
+    const sourcesChanged = next.sourceArchiveSha256s.some(
+      (archiveSha256, index) =>
+        archiveSha256 !== draft.sourceArchiveSha256s[index],
+    );
+    draft = next;
+    if (sourcesChanged) {
+      void refreshSourceEligibility(
+        selectedCodec,
+        selectedProfile,
+        selectedDevice,
+        selectedSourceSet(next),
+      );
+    }
   }
 
   function exactRuntimeAvailable(
@@ -1573,9 +1615,7 @@
         capture.state === "capturing"}
       {captureUnavailableReason}
       {outputFullscreen}
-      onDraftChange={(next) => {
-        draft = next;
-      }}
+      onDraftChange={updateDraft}
       onLoad={openDeck}
       onRestart={restart}
       onProcessOnce={processOnce}

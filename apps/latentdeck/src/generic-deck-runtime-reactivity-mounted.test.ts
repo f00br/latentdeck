@@ -135,6 +135,22 @@ function library(): LibraryView {
   };
 }
 
+function secondCartridge(): CartridgeView {
+  const source = cartridge();
+  return {
+    ...source,
+    archiveSha256: "c".repeat(64),
+    cartridgeId: "source-b",
+    paths: [
+      {
+        ...source.paths[0],
+        path: "source-b.lc",
+        fileName: "source-b.lc",
+      },
+    ],
+  };
+}
+
 function runtimeOptions(
   profileKey: GenericProfileKey | null,
   assetBound: boolean,
@@ -294,6 +310,7 @@ describe("generic Deck runtime negotiation reactivity", () => {
                     packageVersion: CODEC_VERSION,
                   },
                   reason: "compatible",
+                  compatibleProfiles: [PROFILE],
                   compatibleProfile: PROFILE,
                 },
               ],
@@ -492,6 +509,140 @@ describe("generic Deck runtime negotiation reactivity", () => {
     target.remove();
   });
 
+  it("sends the exact selected slot set and disables Load for a mixed-signal refusal", async () => {
+    const sourceB = secondCartridge();
+    invokeMock.mockImplementation(
+      (command: string, args?: Record<string, unknown>) => {
+        switch (command) {
+          case "extensions_snapshot":
+            return Promise.resolve({
+              packages: [],
+              matrix: [
+                {
+                  deck: {
+                    kind: "deck_pack",
+                    packageId: d2DeckPack.deck_id,
+                    packageVersion: d2DeckPack.deck_version,
+                  },
+                  codec: {
+                    kind: "codec_pack",
+                    packageId: CODEC_ID,
+                    packageVersion: CODEC_VERSION,
+                  },
+                  reason: "compatible",
+                  compatibleProfiles: [PROFILE],
+                  compatibleProfile: PROFILE,
+                },
+              ],
+            });
+          case "deck_generic_sessions_get":
+            return Promise.resolve({
+              sessions: [],
+              foregroundOutput: null,
+              outputPin: null,
+              recentFaults: [],
+            });
+          case "deck_generic_runtime_options": {
+            const request = args?.request as
+              | {
+                  profileKey: GenericProfileKey | null;
+                  selectedSources?: Array<{
+                    cartridgeId: string;
+                    archiveSha256: string;
+                  }>;
+                }
+              | undefined;
+            const options = runtimeOptions(request?.profileKey ?? null, true);
+            options.sources =
+              request?.profileKey === null
+                ? []
+                : [
+                    ...options.sources,
+                    {
+                      cartridgeId: sourceB.cartridgeId,
+                      archiveSha256: sourceB.archiveSha256,
+                      reason: "compatible",
+                    },
+                  ];
+            if (
+              request?.selectedSources?.length === 2 &&
+              request.selectedSources[0].archiveSha256 !==
+                request.selectedSources[1].archiveSha256
+            ) {
+              options.reason = "unsupported_signal";
+            }
+            return Promise.resolve(options);
+          }
+          case "deck_generic_viewport_session_begin":
+            return Promise.resolve({ epoch: 1 });
+          case "deck_generic_viewport_set_bounds":
+          case "deck_generic_viewport_hide":
+            return Promise.resolve();
+          default:
+            return Promise.reject(new Error(`unexpected command: ${command}`));
+        }
+      },
+    );
+
+    const deck = model();
+    const nextLibrary = library();
+    nextLibrary.cartridges = [nextLibrary.cartridges[0], sourceB];
+    nextLibrary.recent = nextLibrary.cartridges;
+    nextLibrary.totalIndexed = 2;
+    nextLibrary.activeMemberCount = 2;
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(GenericDeckWorkspace, {
+      target,
+      props: {
+        model: deck,
+        models: [deck],
+        library: nextLibrary,
+        active: true,
+        registerLeave: () => undefined,
+      },
+    });
+    await settleUi();
+
+    const configSelects = target.querySelectorAll<HTMLSelectElement>(
+      ".runtime-config .config-grid select",
+    );
+    changeSelect(configSelects[0], `${CODEC_ID}@${CODEC_VERSION}`);
+    await settleUi();
+    changeSelect(configSelects[1], "cuda");
+    await settleUi();
+    changeSelect(
+      configSelects[2],
+      [PROFILE.codecFamily, PROFILE.profile, PROFILE.profileVersion].join(
+        "\u0000",
+      ),
+    );
+    await settleUi();
+    const sourceSelects = target.querySelectorAll<HTMLSelectElement>(
+      '[data-widget-kind="source_picker"] select',
+    );
+    changeSelect(sourceSelects[0], SOURCE_HASH);
+    await settleUi();
+    changeSelect(sourceSelects[1], sourceB.archiveSha256);
+    await settleUi();
+
+    const selectedCall = invokeMock.mock.calls
+      .filter(([command]) => command === "deck_generic_runtime_options")
+      .at(-1);
+    const selectedRequest = selectedCall?.[1] as {
+      request: { selectedSources?: unknown[] };
+    };
+    expect(selectedRequest.request.selectedSources).toEqual([
+      { cartridgeId: "source-a", archiveSha256: SOURCE_HASH },
+      { cartridgeId: "source-b", archiveSha256: sourceB.archiveSha256 },
+    ]);
+    expect(target.textContent).toContain("Unsupported signal geometry");
+    expect(findLoadButton(target).disabled).toBe(true);
+
+    await unmount(component);
+    target.remove();
+  });
+
   it("bootstraps visible native bounds before enabling or opening the first Deck session", async () => {
     const viewportBegin = deferred<{ epoch: number }>();
     const firstBounds = deferred<void>();
@@ -515,6 +666,7 @@ describe("generic Deck runtime negotiation reactivity", () => {
                     packageVersion: CODEC_VERSION,
                   },
                   reason: "compatible",
+                  compatibleProfiles: [PROFILE],
                   compatibleProfile: PROFILE,
                 },
               ],
@@ -655,6 +807,7 @@ describe("generic Deck runtime negotiation reactivity", () => {
                     packageVersion: CODEC_VERSION,
                   },
                   reason: "compatible",
+                  compatibleProfiles: [PROFILE],
                   compatibleProfile: PROFILE,
                 },
               ],
@@ -786,6 +939,7 @@ describe("generic Deck runtime negotiation reactivity", () => {
                     packageVersion: CODEC_VERSION,
                   },
                   reason: "compatible",
+                  compatibleProfiles: [PROFILE],
                   compatibleProfile: PROFILE,
                 },
               ],

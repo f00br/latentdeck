@@ -271,12 +271,12 @@ fn validate_deck_manifest(manifest: &DeckPackManifest) -> Result<()> {
         &manifest.compatibility.app_max_exclusive,
         "Deck app compatibility",
     )?;
-    if manifest.compatibility.deck_host_api != 1
-        || manifest.compatibility.worker_protocol != 2
-        || manifest.compatibility.deck_operator_api != 1
+    if manifest.compatibility.deck_host_api == 0
+        || manifest.compatibility.worker_protocol == 0
+        || manifest.compatibility.deck_operator_api == 0
     {
         return Err(invalid(
-            "Deck compatibility must declare host API 1, worker protocol 2, and operator API 1",
+            "Deck compatibility API and protocol versions must be nonzero",
         ));
     }
     validate_runtime_constraints(
@@ -388,10 +388,10 @@ fn validate_codec_manifest(manifest: &CodecPackManifest) -> Result<()> {
         &manifest.compatibility.app_max_exclusive,
         "Codec app compatibility",
     )?;
-    if manifest.compatibility.worker_protocol != 2 || manifest.compatibility.codec_adapter_api != 1
+    if manifest.compatibility.worker_protocol == 0 || manifest.compatibility.codec_adapter_api == 0
     {
         return Err(invalid(
-            "Codec compatibility must declare worker protocol 2 and adapter API 1",
+            "Codec compatibility API and protocol versions must be nonzero",
         ));
     }
     validate_runtime_constraints(
@@ -518,13 +518,46 @@ fn validate_runtime_constraints(
     platform_tag: &str,
     torch_exact_build: &str,
 ) -> Result<()> {
-    if tensor_abi != "latentdeck.tensor.v1" {
-        return Err(invalid("tensor_abi must be latentdeck.tensor.v1"));
+    validate_contract_name(tensor_abi, "tensor_abi")?;
+    validate_python_version(python_version)?;
+    validate_local_id(platform_tag, "Python platform tag")?;
+    if platform_tag.eq_ignore_ascii_case("any") {
+        return Err(invalid(
+            "Python platform tag must be an explicit closed identifier",
+        ));
     }
-    if python_version != "3.13" || platform_tag != "win_amd64" {
-        return Err(invalid("runtime must declare CPython 3.13 on win_amd64"));
+    validate_semver(torch_exact_build, "exact Torch build")
+}
+
+fn validate_contract_name(value: &str, name: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 128
+        || value == "*"
+        || value.eq_ignore_ascii_case("any")
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+    {
+        return Err(invalid(format!(
+            "{name} is not a bounded explicit contract identifier"
+        )));
     }
-    validate_bounded_text(torch_exact_build, "exact Torch build", 1, 120)
+    Ok(())
+}
+
+fn validate_python_version(value: &str) -> Result<()> {
+    validate_bounded_text(value, "Python version", 3, 32)?;
+    let parts = value.split('.').collect::<Vec<_>>();
+    if !(2..=3).contains(&parts.len())
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err(invalid(
+            "Python version must contain two or three numeric components",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_capability_set(capabilities: &[CodecCapability], require_v2: bool) -> Result<()> {
@@ -588,6 +621,11 @@ fn validate_timing(timing: &TimingDescriptor) -> Result<()> {
 fn validate_profile_key(profile: &ProfileKey) -> Result<()> {
     validate_local_id(&profile.codec_family, "codec family")?;
     validate_local_id(&profile.profile, "profile")?;
+    if profile.codec_family.eq_ignore_ascii_case("any")
+        || profile.profile.eq_ignore_ascii_case("any")
+    {
+        return Err(invalid("ProfileKey must not use an any constraint"));
+    }
     validate_semver(&profile.profile_version, "profile version")
 }
 

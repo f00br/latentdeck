@@ -42,6 +42,7 @@ export interface ExtensionCompatibilityPair {
   deck: ExtensionPackageReference;
   codec: ExtensionPackageReference;
   reason: ExtensionCompatibilityReason;
+  compatibleProfiles: ExtensionProfileKey[];
   compatibleProfile: ExtensionProfileKey | null;
 }
 

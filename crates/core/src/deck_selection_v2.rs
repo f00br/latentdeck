@@ -6,7 +6,7 @@
 //! handle before a worker or GPU allocation is attempted.
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::BTreeMap,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -20,9 +20,11 @@ use latentdeck_control::v2::{
     TensorDtype,
 };
 use latentdeck_extension_manager::{
-    ActiveInstalledPackage, ActivePackageCache, CodecPackManifest, DeckPackManifest,
-    ErrorCode as ExtensionErrorCode, ExtensionError, ExtensionRoots, PackageKind, PackageManifest,
-    PackageReference, TensorDevice, TensorDtype as ManifestTensorDtype,
+    ActiveInstalledPackage, ActivePackageCache, CodecPackManifest, CompatibilityReason,
+    DeckPackManifest, ErrorCode as ExtensionErrorCode, ExtensionError, ExtensionRoots, PackageKind,
+    PackageManifest, PackageReference, SelectedSourceCompatibility, SelectedSourceScope,
+    SignalGeometry as ManifestSignalGeometry, TensorDevice, TensorDtype as ManifestTensorDtype,
+    resolve_package_compatibility, resolve_selected_compatibility,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -129,11 +131,22 @@ pub struct DeckSourceSelectionV2<'a> {
 pub struct DeckSourceFactsV2 {
     pub cartridge_id: String,
     pub archive_sha256: String,
+    pub lc_spec_version: String,
     pub profile_key: ProfileKey,
     pub signal_geometry: SignalGeometry,
     pub tensor_dtype: TensorDtype,
     pub latent_slot_count: u64,
     pub tensor_storage_bytes: u64,
+}
+
+/// One immutable Library-index entry supplied to metadata-only Deck
+/// compatibility preflight. Exact launch still reopens and retains the LC
+/// bytes before starting a worker.
+#[derive(Clone, Copy)]
+pub struct IndexedDeckSourceSelection<'a> {
+    pub manifest: &'a ManifestV0_1,
+    pub expected_cartridge_id: &'a str,
+    pub archive_sha256: &'a str,
 }
 
 /// Fully retained inputs which can be passed directly to
@@ -248,14 +261,71 @@ pub fn check_indexed_deck_source_compatibility(
     selected_profile: &ProfileKey,
     device: DeviceKind,
 ) -> Result<(), DeckSelectionV2Error> {
-    let source = source_facts_from_manifest(manifest, archive_sha256, 0)?;
-    if source.cartridge_id != expected_cartridge_id {
-        return Err(DeckSelectionV2Error::PackageInvalid);
-    }
-    if source.profile_key != *selected_profile {
-        return Err(DeckSelectionV2Error::UnsupportedProfile);
-    }
-    validate_profile(codec, deck, &source, device)
+    validate_indexed_deck_sources(
+        codec,
+        deck,
+        &[IndexedDeckSourceSelection {
+            manifest,
+            expected_cartridge_id,
+            archive_sha256,
+        }],
+        selected_profile,
+        device,
+        SelectedSourceScope::Candidate,
+    )
+}
+
+/// Check one complete selected Library-index source set with the same exact
+/// slot/profile/signal/timing policy used immediately before worker launch.
+///
+/// # Errors
+///
+/// Returns the stable compatibility reason for the complete selection.
+pub fn check_indexed_deck_source_set_compatibility(
+    codec: &CodecPackManifest,
+    deck: &DeckPackManifest,
+    sources: &[IndexedDeckSourceSelection<'_>],
+    selected_profile: &ProfileKey,
+    device: DeviceKind,
+) -> Result<(), DeckSelectionV2Error> {
+    validate_indexed_deck_sources(
+        codec,
+        deck,
+        sources,
+        selected_profile,
+        device,
+        SelectedSourceScope::CompleteSet,
+    )
+}
+
+fn validate_indexed_deck_sources(
+    codec: &CodecPackManifest,
+    deck: &DeckPackManifest,
+    sources: &[IndexedDeckSourceSelection<'_>],
+    selected_profile: &ProfileKey,
+    device: DeviceKind,
+    scope: SelectedSourceScope,
+) -> Result<(), DeckSelectionV2Error> {
+    let sources = sources
+        .iter()
+        .map(|input| {
+            let source = source_facts_from_manifest(input.manifest, input.archive_sha256, 0)?;
+            if source.cartridge_id != input.expected_cartridge_id {
+                return Err(DeckSelectionV2Error::PackageInvalid);
+            }
+            Ok(source)
+        })
+        .collect::<Result<Vec<_>, DeckSelectionV2Error>>()?;
+    validate_selected_compatibility(
+        codec,
+        deck,
+        &sources,
+        Some(selected_profile),
+        device,
+        true,
+        crate::product_version(),
+        scope,
+    )
 }
 
 /// Resolve and retain one exact Deck/Codec pair and all source cartridges.
@@ -319,21 +389,41 @@ pub fn prepare_exact_deck_selection_with_cache(
         PackageManifest::Deck(manifest) => manifest,
         PackageManifest::Codec(_) => return Err(DeckSelectionV2Error::PackageInvalid),
     };
-    validate_package_contracts(codec_manifest, deck_manifest, selection, app_version)?;
+    validate_package_contracts(codec_manifest, deck_manifest, app_version)?;
     if usize::from(deck_manifest.signal.slots) != source_inputs.len()
         || usize::from(deck_runtime.operator_descriptor().source_count) != source_inputs.len()
     {
         return Err(DeckSelectionV2Error::UnsupportedSignal);
     }
 
+    if !required_assets_are_bound(codec_manifest, selection) {
+        validate_selected_compatibility(
+            codec_manifest,
+            deck_manifest,
+            &[],
+            None,
+            selection.device,
+            false,
+            app_version,
+            SelectedSourceScope::Candidate,
+        )?;
+    }
     let external_assets = external_asset_bindings(codec_manifest, selection)?;
     let retained_external_assets = retained_external_asset_bindings(&external_assets, selection)?;
     let (cartridges, sources, validation_work) = open_sources(source_inputs)?;
     let first = sources
         .first()
         .ok_or(DeckSelectionV2Error::PackageInvalid)?;
-    validate_source_set(first, &sources[1..])?;
-    validate_profile(codec_manifest, deck_manifest, first, selection.device)?;
+    validate_selected_compatibility(
+        codec_manifest,
+        deck_manifest,
+        &sources,
+        Some(&first.profile_key),
+        selection.device,
+        true,
+        app_version,
+        SelectedSourceScope::CompleteSet,
+    )?;
 
     let host = build_host(
         codec_manifest,
@@ -358,36 +448,6 @@ pub fn prepare_exact_deck_selection_with_cache(
             ..validation_work
         },
     })
-}
-
-fn validate_source_set(
-    first: &DeckSourceFactsV2,
-    remaining: &[DeckSourceFactsV2],
-) -> Result<(), DeckSelectionV2Error> {
-    for source in remaining {
-        if source.profile_key != first.profile_key {
-            return Err(DeckSelectionV2Error::UnsupportedProfile);
-        }
-        if source.tensor_dtype != first.tensor_dtype
-            || source.signal_geometry.channels != first.signal_geometry.channels
-            || source.signal_geometry.latent_height != first.signal_geometry.latent_height
-            || source.signal_geometry.latent_width != first.signal_geometry.latent_width
-            || source.signal_geometry.decoded_height != first.signal_geometry.decoded_height
-            || source.signal_geometry.decoded_width != first.signal_geometry.decoded_width
-        {
-            return Err(DeckSelectionV2Error::UnsupportedSignal);
-        }
-        if source.signal_geometry.frame_rate_numerator != first.signal_geometry.frame_rate_numerator
-            || source.signal_geometry.frame_rate_denominator
-                != first.signal_geometry.frame_rate_denominator
-            || source.signal_geometry.timing_contract != first.signal_geometry.timing_contract
-            || source.signal_geometry.timing_contract_version
-                != first.signal_geometry.timing_contract_version
-        {
-            return Err(DeckSelectionV2Error::UnsupportedTiming);
-        }
-    }
-    Ok(())
 }
 
 fn open_sources(
@@ -523,124 +583,117 @@ fn build_host(
 fn validate_package_contracts(
     codec: &CodecPackManifest,
     deck: &DeckPackManifest,
-    selection: &DeckPackageSelectionV2,
     app_version: &str,
 ) -> Result<(), DeckSelectionV2Error> {
-    if codec.manifest_version != "2.0.0"
-        || deck.manifest_version != "1.0.0"
-        || codec.compatibility.worker_protocol != 2
-        || deck.compatibility.worker_protocol != 2
-    {
-        return Err(DeckSelectionV2Error::UnsupportedProtocol);
-    }
-    let app = semver::Version::parse(app_version)
-        .map_err(|_| DeckSelectionV2Error::UnsupportedHostApi)?;
-    if !version_in_range(
-        &app,
-        &codec.compatibility.app_min_inclusive,
-        &codec.compatibility.app_max_exclusive,
-    ) || !version_in_range(
-        &app,
-        &deck.compatibility.app_min_inclusive,
-        &deck.compatibility.app_max_exclusive,
-    ) {
-        return Err(DeckSelectionV2Error::UnsupportedHostApi);
-    }
-    if codec.compatibility.codec_adapter_api != 1
-        || deck.compatibility.deck_host_api != 1
-        || deck.compatibility.deck_operator_api != 1
-        || codec.compatibility.tensor_abi != "latentdeck.tensor.v1"
-        || deck.compatibility.tensor_abi != "latentdeck.tensor.v1"
-        || codec.compatibility.python != deck.compatibility.python
-        || codec.compatibility.torch_exact_build != deck.compatibility.torch_exact_build
-    {
-        return Err(DeckSelectionV2Error::UnsupportedTensorAbi);
-    }
-    if !deck.signal.geometry_allowlist.iter().any(|geometry| {
-        matches!(
-            (geometry.device, selection.device),
-            (TensorDevice::Cpu, DeviceKind::Cpu) | (TensorDevice::Cuda, DeviceKind::Cuda)
-        )
-    }) {
-        return Err(DeckSelectionV2Error::UnsupportedTensorAbi);
-    }
-    let provided: HashSet<_> = codec.capabilities.iter().copied().collect();
-    if deck
-        .signal
-        .required_capabilities
-        .iter()
-        .any(|required| !provided.contains(required))
-    {
-        return Err(DeckSelectionV2Error::UnsupportedCapability);
-    }
-    Ok(())
+    compatibility_result(resolve_package_compatibility(deck, codec, app_version).reason)
 }
 
-fn validate_profile(
+#[allow(clippy::too_many_arguments)]
+fn validate_selected_compatibility(
     codec: &CodecPackManifest,
     deck: &DeckPackManifest,
-    source: &DeckSourceFactsV2,
+    sources: &[DeckSourceFactsV2],
+    selected_profile: Option<&ProfileKey>,
     device: DeviceKind,
+    assets_present: bool,
+    app_version: &str,
+    source_scope: SelectedSourceScope,
 ) -> Result<(), DeckSelectionV2Error> {
-    let profile_matches = |profile: &latentdeck_extension_manager::ProfileKey| {
-        profile.codec_family == source.profile_key.codec_family
-            && profile.profile == source.profile_key.profile
-            && profile.profile_version == source.profile_key.profile_version
+    let selected_profile =
+        selected_profile.map(|profile| latentdeck_extension_manager::ProfileKey {
+            codec_family: profile.codec_family.clone(),
+            profile: profile.profile.clone(),
+            profile_version: profile.profile_version.clone(),
+        });
+    let device = match device {
+        DeviceKind::Cpu => TensorDevice::Cpu,
+        DeviceKind::Cuda => TensorDevice::Cuda,
     };
-    if !codec.compatibility.profiles.iter().any(profile_matches)
-        || deck
-            .signal
-            .profile_allowlist
-            .as_ref()
-            .is_some_and(|profiles| !profiles.iter().any(profile_matches))
-    {
-        return Err(DeckSelectionV2Error::UnsupportedProfile);
-    }
-    select_exact_geometry(deck, source, device)?;
-    let timing = &deck.signal.timing;
-    if timing.frames_per_second_numerator != source.signal_geometry.frame_rate_numerator
-        || timing.frames_per_second_denominator != source.signal_geometry.frame_rate_denominator
-    {
-        return Err(DeckSelectionV2Error::UnsupportedTiming);
-    }
-    Ok(())
+    let sources = sources
+        .iter()
+        .map(|source| {
+            Ok(SelectedSourceCompatibility {
+                lc_spec_version: source.lc_spec_version.clone(),
+                profile: latentdeck_extension_manager::ProfileKey {
+                    codec_family: source.profile_key.codec_family.clone(),
+                    profile: source.profile_key.profile.clone(),
+                    profile_version: source.profile_key.profile_version.clone(),
+                },
+                geometry: ManifestSignalGeometry {
+                    dtype: match source.tensor_dtype {
+                        TensorDtype::Float16 => ManifestTensorDtype::Fp16,
+                        TensorDtype::Float32 => ManifestTensorDtype::Fp32,
+                        TensorDtype::Bfloat16 => {
+                            return Err(DeckSelectionV2Error::UnsupportedTensorAbi);
+                        }
+                    },
+                    device,
+                    batch: 1,
+                    channels: u16::try_from(source.signal_geometry.channels)
+                        .map_err(|_| DeckSelectionV2Error::PackageInvalid)?,
+                    temporal: 1,
+                    height: source.signal_geometry.latent_height,
+                    width: source.signal_geometry.latent_width,
+                },
+                decoded_height: source.signal_geometry.decoded_height,
+                decoded_width: source.signal_geometry.decoded_width,
+                frame_rate_numerator: source.signal_geometry.frame_rate_numerator,
+                frame_rate_denominator: source.signal_geometry.frame_rate_denominator,
+                timing_contract: source.signal_geometry.timing_contract.clone(),
+                timing_contract_version: source.signal_geometry.timing_contract_version.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, DeckSelectionV2Error>>()?;
+    compatibility_result(
+        resolve_selected_compatibility(
+            deck,
+            codec,
+            app_version,
+            assets_present,
+            selected_profile.as_ref(),
+            device,
+            &sources,
+            source_scope,
+        )
+        .reason,
+    )
 }
 
-fn select_exact_geometry<'a>(
-    deck: &'a DeckPackManifest,
-    source: &DeckSourceFactsV2,
-    device: DeviceKind,
-) -> Result<&'a latentdeck_extension_manager::SignalGeometry, DeckSelectionV2Error> {
-    let tensor_abi_matches = |geometry: &latentdeck_extension_manager::SignalGeometry| {
-        matches!(
-            (geometry.dtype, source.tensor_dtype),
-            (ManifestTensorDtype::Fp16, TensorDtype::Float16)
-                | (ManifestTensorDtype::Fp32, TensorDtype::Float32)
-        ) && matches!(
-            (geometry.device, device),
-            (TensorDevice::Cpu, DeviceKind::Cpu) | (TensorDevice::Cuda, DeviceKind::Cuda)
-        )
-    };
-    if !deck
-        .signal
-        .geometry_allowlist
-        .iter()
-        .any(tensor_abi_matches)
-    {
-        return Err(DeckSelectionV2Error::UnsupportedTensorAbi);
+const fn compatibility_result(reason: CompatibilityReason) -> Result<(), DeckSelectionV2Error> {
+    match reason {
+        CompatibilityReason::Compatible => Ok(()),
+        CompatibilityReason::Untrusted => Err(DeckSelectionV2Error::Untrusted),
+        CompatibilityReason::MissingAsset => Err(DeckSelectionV2Error::MissingAsset),
+        CompatibilityReason::PackageInvalid => Err(DeckSelectionV2Error::PackageInvalid),
+        CompatibilityReason::UnsupportedProtocol => Err(DeckSelectionV2Error::UnsupportedProtocol),
+        CompatibilityReason::UnsupportedHostApi => Err(DeckSelectionV2Error::UnsupportedHostApi),
+        CompatibilityReason::UnsupportedTensorAbi => {
+            Err(DeckSelectionV2Error::UnsupportedTensorAbi)
+        }
+        CompatibilityReason::UnsupportedProfile => Err(DeckSelectionV2Error::UnsupportedProfile),
+        CompatibilityReason::UnsupportedSignal => Err(DeckSelectionV2Error::UnsupportedSignal),
+        CompatibilityReason::UnsupportedTiming => Err(DeckSelectionV2Error::UnsupportedTiming),
+        CompatibilityReason::UnsupportedCapability => {
+            Err(DeckSelectionV2Error::UnsupportedCapability)
+        }
     }
-    deck.signal
-        .geometry_allowlist
-        .iter()
-        .find(|geometry| {
-            tensor_abi_matches(geometry)
-                && geometry.batch == 1
-                && geometry.temporal == 1
-                && u32::from(geometry.channels) == source.signal_geometry.channels
-                && geometry.height == source.signal_geometry.latent_height
-                && geometry.width == source.signal_geometry.latent_width
-        })
-        .ok_or(DeckSelectionV2Error::UnsupportedSignal)
+}
+
+fn required_assets_are_bound(
+    manifest: &CodecPackManifest,
+    selection: &DeckPackageSelectionV2,
+) -> bool {
+    manifest.external_assets.iter().all(|asset| {
+        !asset.required
+            || selection.external_assets.contains_key(&asset.asset_id)
+            || selection
+                .retained_external_assets
+                .get(&asset.asset_id)
+                .is_some_and(|retained| {
+                    retained.binding().sha256 == asset.sha256
+                        && retained.binding().byte_length == asset.byte_length
+                })
+    })
 }
 
 fn external_asset_bindings(
@@ -762,6 +815,7 @@ fn source_facts_from_manifest(
     Ok(DeckSourceFactsV2 {
         cartridge_id: manifest.cartridge_id.0.clone(),
         archive_sha256: archive_sha256.to_owned(),
+        lc_spec_version: manifest.spec_version.0.clone(),
         profile_key: ProfileKey {
             codec_family: manifest.codec.family.0.clone(),
             profile: manifest.codec.profile.0.clone(),
@@ -789,13 +843,6 @@ fn source_facts_from_manifest(
     })
 }
 
-fn version_in_range(version: &semver::Version, minimum: &str, maximum: &str) -> bool {
-    semver::Version::parse(minimum)
-        .ok()
-        .zip(semver::Version::parse(maximum).ok())
-        .is_some_and(|(minimum, maximum)| version >= &minimum && version < &maximum)
-}
-
 #[cfg(test)]
 mod tests {
     #[cfg(windows)]
@@ -804,32 +851,6 @@ mod tests {
     use sha2::{Digest as _, Sha256};
 
     use super::*;
-
-    fn source() -> DeckSourceFactsV2 {
-        DeckSourceFactsV2 {
-            cartridge_id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
-            archive_sha256: "aa".repeat(32),
-            profile_key: ProfileKey {
-                codec_family: "synthetic".to_owned(),
-                profile: "latent".to_owned(),
-                profile_version: "1.0.0".to_owned(),
-            },
-            signal_geometry: SignalGeometry {
-                channels: 4,
-                latent_height: 8,
-                latent_width: 12,
-                decoded_height: 64,
-                decoded_width: 96,
-                frame_rate_numerator: 24,
-                frame_rate_denominator: 1,
-                timing_contract: "synthetic_ticks".to_owned(),
-                timing_contract_version: "1.0.0".to_owned(),
-            },
-            tensor_dtype: TensorDtype::Float32,
-            latent_slot_count: 8,
-            tensor_storage_bytes: 12_288,
-        }
-    }
 
     fn bundled_deck(source_name: &str) -> DeckPackManifest {
         let source = match source_name {
@@ -855,6 +876,7 @@ mod tests {
         DeckSourceFactsV2 {
             cartridge_id: "550e8400-e29b-41d4-a716-446655440001".to_owned(),
             archive_sha256: "bb".repeat(32),
+            lc_spec_version: "0.1.0".to_owned(),
             profile_key: ProfileKey {
                 codec_family: "minimax_h3".to_owned(),
                 profile: "h3_av_latent".to_owned(),
@@ -1124,26 +1146,55 @@ mod tests {
 
     #[test]
     fn source_set_reports_profile_signal_and_timing_without_adaptation() {
-        let first = source();
+        let codec = h3_codec();
+        let deck = bundled_deck("d2");
+        let first = h3_source(50, 28, 800, 448);
 
-        let mut profile = source();
+        let mut profile = first.clone();
         profile.profile_key.profile = "other".to_owned();
         assert_eq!(
-            validate_source_set(&first, &[profile]),
+            validate_selected_compatibility(
+                &codec,
+                &deck,
+                &[first.clone(), profile],
+                Some(&first.profile_key),
+                DeviceKind::Cuda,
+                true,
+                crate::product_version(),
+                SelectedSourceScope::CompleteSet,
+            ),
             Err(DeckSelectionV2Error::UnsupportedProfile)
         );
 
-        let mut signal = source();
+        let mut signal = first.clone();
         signal.signal_geometry.latent_width = 13;
         assert_eq!(
-            validate_source_set(&first, &[signal]),
+            validate_selected_compatibility(
+                &codec,
+                &deck,
+                &[first.clone(), signal],
+                Some(&first.profile_key),
+                DeviceKind::Cuda,
+                true,
+                crate::product_version(),
+                SelectedSourceScope::CompleteSet,
+            ),
             Err(DeckSelectionV2Error::UnsupportedSignal)
         );
 
-        let mut timing = source();
+        let mut timing = first.clone();
         timing.signal_geometry.timing_contract_version = "2.0.0".to_owned();
         assert_eq!(
-            validate_source_set(&first, &[timing]),
+            validate_selected_compatibility(
+                &codec,
+                &deck,
+                &[first.clone(), timing],
+                Some(&first.profile_key),
+                DeviceKind::Cuda,
+                true,
+                crate::product_version(),
+                SelectedSourceScope::CompleteSet,
+            ),
             Err(DeckSelectionV2Error::UnsupportedTiming)
         );
     }
@@ -1160,42 +1211,80 @@ mod tests {
             let deck = bundled_deck(deck_name);
             assert_eq!(deck.signal.geometry_allowlist.len(), 4);
             for source in &accepted {
-                let selected = select_exact_geometry(&deck, source, DeviceKind::Cuda)
-                    .expect("accepted H3 geometry has one exact allowlist entry");
-                assert_eq!(
-                    u32::from(selected.channels),
-                    source.signal_geometry.channels
-                );
-                assert_eq!(selected.height, source.signal_geometry.latent_height);
-                assert_eq!(selected.width, source.signal_geometry.latent_width);
-                validate_profile(&codec, &deck, source, DeviceKind::Cuda)
-                    .expect("accepted H3 tensor geometry must match exactly at preflight");
+                validate_selected_compatibility(
+                    &codec,
+                    &deck,
+                    std::slice::from_ref(source),
+                    Some(&source.profile_key),
+                    DeviceKind::Cuda,
+                    true,
+                    crate::product_version(),
+                    SelectedSourceScope::Candidate,
+                )
+                .expect("accepted H3 tensor geometry must match exactly at preflight");
             }
 
             let mut unsupported_signal = h3_source(49, 28, 784, 448);
             assert_eq!(
-                validate_profile(&codec, &deck, &unsupported_signal, DeviceKind::Cuda),
+                validate_selected_compatibility(
+                    &codec,
+                    &deck,
+                    std::slice::from_ref(&unsupported_signal),
+                    Some(&unsupported_signal.profile_key),
+                    DeviceKind::Cuda,
+                    true,
+                    crate::product_version(),
+                    SelectedSourceScope::Candidate,
+                ),
                 Err(DeckSelectionV2Error::UnsupportedSignal)
             );
             unsupported_signal.tensor_dtype = TensorDtype::Float32;
             assert_eq!(
-                validate_profile(&codec, &deck, &unsupported_signal, DeviceKind::Cuda),
+                validate_selected_compatibility(
+                    &codec,
+                    &deck,
+                    std::slice::from_ref(&unsupported_signal),
+                    Some(&unsupported_signal.profile_key),
+                    DeviceKind::Cuda,
+                    true,
+                    crate::product_version(),
+                    SelectedSourceScope::Candidate,
+                ),
                 Err(DeckSelectionV2Error::UnsupportedTensorAbi)
             );
             assert_eq!(
-                validate_profile(&codec, &deck, &accepted[0], DeviceKind::Cpu),
+                validate_selected_compatibility(
+                    &codec,
+                    &deck,
+                    std::slice::from_ref(&accepted[0]),
+                    Some(&accepted[0].profile_key),
+                    DeviceKind::Cpu,
+                    true,
+                    crate::product_version(),
+                    SelectedSourceScope::Candidate,
+                ),
                 Err(DeckSelectionV2Error::UnsupportedTensorAbi)
             );
             let mut unsupported_profile = accepted[0].clone();
             unsupported_profile.profile_key.profile = "other".to_owned();
             assert_eq!(
-                validate_profile(&codec, &deck, &unsupported_profile, DeviceKind::Cuda),
+                validate_selected_compatibility(
+                    &codec,
+                    &deck,
+                    std::slice::from_ref(&unsupported_profile),
+                    Some(&unsupported_profile.profile_key),
+                    DeviceKind::Cuda,
+                    true,
+                    crate::product_version(),
+                    SelectedSourceScope::Candidate,
+                ),
                 Err(DeckSelectionV2Error::UnsupportedProfile)
             );
         }
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn indexed_eligibility_uses_exact_launch_profile_signal_and_timing_reasons() {
         let codec = h3_codec();
         let deck = bundled_deck("q4");
@@ -1219,6 +1308,44 @@ mod tests {
                 DeviceKind::Cuda,
             ),
             Ok(())
+        );
+        let selected = IndexedDeckSourceSelection {
+            manifest: &manifest,
+            expected_cartridge_id: expected_id,
+            archive_sha256,
+        };
+        assert_eq!(
+            check_indexed_deck_source_set_compatibility(
+                &codec,
+                &deck,
+                &[selected; 4],
+                &profile,
+                DeviceKind::Cuda,
+            ),
+            Ok(())
+        );
+
+        let mut mixed_manifest = manifest.clone();
+        mixed_manifest.timing.decoded_video.width = 512;
+        let mixed = [
+            selected,
+            IndexedDeckSourceSelection {
+                manifest: &mixed_manifest,
+                expected_cartridge_id: expected_id,
+                archive_sha256,
+            },
+            selected,
+            selected,
+        ];
+        assert_eq!(
+            check_indexed_deck_source_set_compatibility(
+                &codec,
+                &deck,
+                &mixed,
+                &profile,
+                DeviceKind::Cuda,
+            ),
+            Err(DeckSelectionV2Error::UnsupportedSignal)
         );
 
         let mut wrong_profile = profile.clone();

@@ -9,9 +9,13 @@ pub use broker::{
     SessionId, SessionSnapshot, WarmSession, WorkerId,
 };
 pub use compatibility::{
-    AssetState, COMPATIBILITY_REASON_PRECEDENCE, CodecContract, CodecVersion,
-    CompatibilityDecision, CompatibilityReason, CompatibilityResolver, ContractId,
-    ContractValidationError, DeckRequirements, DeckVersion, HostApiRequirement, HostRuntime,
-    MatrixError, PackageIdentity, PackageReadiness, PackageState, ProfileContract, SignalContract,
-    TensorAbiContract, TimingContract, TrustState,
+    AssetState, COMPATIBILITY_REASON_PRECEDENCE, CodecContract, CodecPackageProvides,
+    CodecPackageVersion, CodecVersion, CompatibilityDecision, CompatibilityReason,
+    CompatibilityResolver, ContractId, ContractValidationError, DeckPackageRequirements,
+    DeckPackageVersion, DeckRequirements, DeckTimingContract, DeckVersion, FrameTimingContract,
+    HostApiRequirement, HostRuntime, MatrixError, PACKAGE_COMPATIBILITY_REASON_PRECEDENCE,
+    PackageCompatibilityDecision, PackageHostRuntime, PackageIdentity, PackageReadiness,
+    PackageRuntimeContract, PackageState, ProfileContract,
+    SELECTED_COMPATIBILITY_REASON_PRECEDENCE, SelectedSourceContract, SignalContract,
+    SourceSelectionScope, TensorAbiContract, TensorGeometryContract, TimingContract, TrustState,
 };

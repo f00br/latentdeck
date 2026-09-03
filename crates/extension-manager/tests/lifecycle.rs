@@ -1547,10 +1547,7 @@ fn runtime_inventory_isolates_a_disabled_candidate_summary_failure() {
         .expect("failed Codec is isolated as an exact summary");
     assert_eq!(codec_summary.health, PackageHealth::Corrupt);
     assert_eq!(inventory.matrix.len(), 1);
-    assert_eq!(
-        inventory.matrix[0].reason,
-        CompatibilityReason::PackageInvalid
-    );
+    assert_eq!(inventory.matrix[0].reason, CompatibilityReason::Untrusted);
 }
 
 #[test]
@@ -2872,6 +2869,23 @@ fn compatibility_matrix_resolves_profile_identity_without_assuming_one_fixed_ext
     fs::create_dir(&incompatible_codec_source).unwrap();
     write_deck_source(&deck_source, "0.2.0", 45);
     write_codec_source(&codec_source, "0.2.0", profile());
+    let alternate_profile = ProfileKey {
+        codec_family: "synthetic".to_owned(),
+        profile: "alternate_latent".to_owned(),
+        profile_version: "0.1.0".to_owned(),
+    };
+    let deck_manifest_path = deck_source.join("deck-pack.json");
+    let mut deck_manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&deck_manifest_path).unwrap()).unwrap();
+    deck_manifest["signal"]["profile_allowlist"] =
+        serde_json::to_value([profile(), alternate_profile.clone()]).unwrap();
+    fs::write(&deck_manifest_path, canonical(&deck_manifest)).unwrap();
+    let codec_manifest_path = codec_source.join("codec-pack.json");
+    let mut codec_manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&codec_manifest_path).unwrap()).unwrap();
+    codec_manifest["compatibility"]["profiles"] =
+        serde_json::to_value([profile(), alternate_profile.clone()]).unwrap();
+    fs::write(&codec_manifest_path, canonical(&codec_manifest)).unwrap();
     write_codec_source(
         &incompatible_codec_source,
         "0.2.1",
@@ -2931,12 +2945,184 @@ fn compatibility_matrix_resolves_profile_identity_without_assuming_one_fixed_ext
         matrix[0].reason,
         latentdeck_extension_manager::CompatibilityReason::Compatible
     );
-    assert_eq!(matrix[0].compatible_profile, Some(profile()));
+    assert_eq!(
+        matrix[0].compatible_profiles,
+        vec![alternate_profile.clone(), profile()]
+    );
+    assert_eq!(
+        matrix[0].compatible_profile,
+        Some(alternate_profile),
+        "legacy witness remains the first deterministic profile"
+    );
     assert_eq!(
         matrix[1].reason,
         latentdeck_extension_manager::CompatibilityReason::UnsupportedProfile
     );
     assert_eq!(matrix[1].compatible_profile, None);
+    assert!(matrix[1].compatible_profiles.is_empty());
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn future_contract_declarations_install_but_matrix_refuses_without_executing_worker() {
+    let cases = [
+        (
+            "protocol",
+            "deck_worker_protocol",
+            CompatibilityReason::UnsupportedProtocol,
+        ),
+        (
+            "host-api",
+            "deck_host_api",
+            CompatibilityReason::UnsupportedHostApi,
+        ),
+        (
+            "tensor-abi",
+            "deck_tensor_abi",
+            CompatibilityReason::UnsupportedTensorAbi,
+        ),
+        (
+            "python-version",
+            "deck_python_version",
+            CompatibilityReason::UnsupportedTensorAbi,
+        ),
+        (
+            "torch-build",
+            "deck_torch_build",
+            CompatibilityReason::UnsupportedTensorAbi,
+        ),
+        (
+            "lc-spec",
+            "codec_lc_spec",
+            CompatibilityReason::UnsupportedProfile,
+        ),
+        (
+            "capability",
+            "deck_capability",
+            CompatibilityReason::UnsupportedCapability,
+        ),
+    ];
+
+    for (case_name, mutation, expected) in cases {
+        let temp = TempDir::new().expect("temp");
+        let deck_source = temp.path().join("deck");
+        let codec_source = temp.path().join("codec");
+        fs::create_dir(&deck_source).unwrap();
+        fs::create_dir(&codec_source).unwrap();
+        write_deck_source(&deck_source, "0.2.0", 45);
+        write_codec_source_with_worker(
+            &codec_source,
+            "0.2.0",
+            profile(),
+            b"test worker bytes that must never execute",
+        );
+
+        let deck_manifest_path = deck_source.join("deck-pack.json");
+        let codec_manifest_path = codec_source.join("codec-pack.json");
+        let mut deck_manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&deck_manifest_path).unwrap()).unwrap();
+        let mut codec_manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&codec_manifest_path).unwrap()).unwrap();
+        match mutation {
+            "deck_worker_protocol" => {
+                deck_manifest["compatibility"]["worker_protocol"] = serde_json::json!(3);
+            }
+            "deck_host_api" => {
+                deck_manifest["compatibility"]["deck_host_api"] = serde_json::json!(9);
+            }
+            "deck_torch_build" => {
+                deck_manifest["compatibility"]["torch_exact_build"] =
+                    serde_json::json!("2.13.0+cpu");
+            }
+            "deck_tensor_abi" => {
+                deck_manifest["compatibility"]["tensor_abi"] =
+                    serde_json::json!("latentdeck.tensor.v9");
+            }
+            "deck_python_version" => {
+                deck_manifest["compatibility"]["python"]["version"] = serde_json::json!("3.14");
+            }
+            "codec_lc_spec" => {
+                codec_manifest["compatibility"]["lc_spec_versions"] = serde_json::json!(["9.0.0"]);
+            }
+            "deck_capability" => {
+                deck_manifest["signal"]["required_capabilities"] =
+                    serde_json::json!(["raw_import"]);
+            }
+            _ => unreachable!(),
+        }
+        fs::write(&deck_manifest_path, canonical(&deck_manifest)).unwrap();
+        fs::write(&codec_manifest_path, canonical(&codec_manifest)).unwrap();
+
+        let deck_archive = temp.path().join("deck.ld");
+        let codec_archive = temp.path().join("codec.ldcodec");
+        let (deck_hash, _) = pack_source(&deck_source, &deck_archive);
+        let (codec_hash, _) = pack_source(&codec_source, &codec_archive);
+        let roots = ExtensionRoots::for_base_root(temp.path().join("Local/LatentDeck"));
+        let deck = install(
+            &roots,
+            &InstallRequest {
+                archive_path: deck_archive,
+                expected_sha256: deck_hash,
+            },
+        )
+        .unwrap();
+        let codec = install(
+            &roots,
+            &InstallRequest {
+                archive_path: codec_archive,
+                expected_sha256: codec_hash,
+            },
+        )
+        .unwrap();
+        enable(&roots, &deck.inspection.package).unwrap();
+        enable(&roots, &codec.inspection.package).unwrap();
+
+        let snapshot = inventory(&roots).unwrap();
+        assert_eq!(snapshot.matrix.len(), 1, "{case_name}");
+        assert_eq!(snapshot.matrix[0].reason, expected, "{case_name}");
+        assert!(
+            snapshot.matrix[0].compatible_profiles.is_empty(),
+            "{case_name}"
+        );
+        assert!(
+            !temp.path().join("worker-started.marker").exists(),
+            "matrix evaluation must never start Codec Pack code: {case_name}"
+        );
+    }
+
+    for forbidden in ["any", "*"] {
+        let temp = TempDir::new().expect("temp");
+        let source = temp.path().join("deck");
+        fs::create_dir(&source).unwrap();
+        write_deck_source(&source, "0.2.0", 45);
+        let manifest_path = source.join("deck-pack.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["compatibility"]["tensor_abi"] = serde_json::json!(forbidden);
+        fs::write(&manifest_path, canonical(&manifest)).unwrap();
+        let error = pack(&PackRequest {
+            source_directory: source,
+            output_path: temp.path().join("forbidden.ld"),
+        })
+        .expect_err("open-ended tensor contracts remain forbidden");
+        assert_eq!(error.code(), ErrorCode::ManifestInvalid, "{forbidden}");
+    }
+
+    let temp = TempDir::new().expect("temp");
+    let source = temp.path().join("deck-platform-any");
+    fs::create_dir(&source).unwrap();
+    write_deck_source(&source, "0.2.0", 45);
+    let manifest_path = source.join("deck-pack.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["compatibility"]["python"]["platform_tag"] = serde_json::json!("any");
+    fs::write(&manifest_path, canonical(&manifest)).unwrap();
+    let error = pack(&PackRequest {
+        source_directory: source,
+        output_path: temp.path().join("platform-any.ld"),
+    })
+    .expect_err("open-ended Python platform remains forbidden");
+    assert_eq!(error.code(), ErrorCode::ManifestInvalid);
 }
 
 #[test]
@@ -3022,7 +3208,7 @@ fn inventory_preserves_untrusted_and_corrupt_matrix_precedence() {
     );
     assert_eq!(
         reason("0.2.1", "0.2.1"),
-        latentdeck_extension_manager::CompatibilityReason::PackageInvalid
+        latentdeck_extension_manager::CompatibilityReason::Untrusted
     );
 }
 
