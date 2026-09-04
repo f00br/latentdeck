@@ -51,6 +51,32 @@ try {
 
     Push-Location $repositoryRoot
     try {
+        $cargoMetadataJson = & cargo metadata --format-version 1 --no-deps --locked
+        if ($LASTEXITCODE -ne 0) {
+            throw "Cargo metadata failed with exit code $LASTEXITCODE."
+        }
+    }
+    finally {
+        Pop-Location
+    }
+    $cargoMetadata = $cargoMetadataJson | ConvertFrom-Json -Depth 100
+    $cdylibTargets = @(
+        $cargoMetadata.packages |
+            ForEach-Object { $_.targets } |
+            Where-Object { @($_.kind) -contains 'cdylib' }
+    )
+    $duplicateCdylibNames = @(
+        $cdylibTargets |
+            Group-Object -Property name |
+            Where-Object Count -gt 1
+    )
+    if ($duplicateCdylibNames.Count -gt 0) {
+        $duplicates = @($duplicateCdylibNames | ForEach-Object Name) -join ', '
+        throw "Cargo cdylib target names must be workspace-unique; duplicates: $duplicates"
+    }
+
+    Push-Location $repositoryRoot
+    try {
         & uv build --wheel sdk/python --out-dir $wheelRoot --no-create-gitignore `
             --build-constraints tools/packaging/windows-x64-build-constraints.txt `
             --require-hashes

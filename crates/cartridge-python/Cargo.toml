@@ -7,7 +7,9 @@ license.workspace = true
 description = "PyO3 binding for the LatentDeck Cartridge SDK"
 
 [lib]
-name = "_native"
+# Keep the Cargo artifact unique inside the shared workspace target directory.
+# Maturin installs it under the public `latentdeck_cartridge._native` name.
+name = "latentdeck_cartridge_native"
 crate-type = ["cdylib", "rlib"]
 
 [features]

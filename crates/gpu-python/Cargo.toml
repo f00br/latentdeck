@@ -7,7 +7,9 @@ license.workspace = true
 description = "PyO3 producer bridge for LatentDeck RGB Ring ABI 1"
 
 [lib]
-name = "_native"
+# Keep the Cargo artifact unique inside the shared workspace target directory.
+# Maturin installs it under the public `latentdeck_rgb_ring._native` name.
+name = "latentdeck_rgb_ring_native"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
