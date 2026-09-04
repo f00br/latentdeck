@@ -26,6 +26,41 @@ foreach ($match in $usesMatches) {
 if ($workflow -notmatch '(?m)^permissions:\s*\r?\n\s+contents:\s*read\s*$') {
     $failures.Add('CI does not declare repository contents read-only at workflow scope.')
 }
+$secretHistoryJob = [regex]::Match(
+    $workflow,
+    '(?ms)^  secret-history:[ \t]*\r?\n(?<body>.*?)(?=^  [A-Za-z0-9_-]+:[ \t]*\r?\n|\z)'
+)
+$secretHistoryPermissions = if ($secretHistoryJob.Success) {
+    [regex]::Match(
+        $secretHistoryJob.Groups['body'].Value,
+        '(?m)^    permissions:[ \t]*\r?\n(?<body>(?:^      [a-z-]+:[ \t]*(?:read|write|none)[ \t]*(?:\r?\n|$))+)'
+    )
+} else {
+    [System.Text.RegularExpressions.Match]::Empty
+}
+$secretHistoryPermissionLines = if ($secretHistoryPermissions.Success) {
+    @(
+        [regex]::Matches(
+            $secretHistoryPermissions.Groups['body'].Value,
+            '(?m)^      (?<scope>[a-z-]+):[ \t]*(?<access>read|write|none)[ \t]*$'
+        ) | ForEach-Object {
+            "$($_.Groups['scope'].Value): $($_.Groups['access'].Value)"
+        }
+    )
+} else {
+    @()
+}
+$expectedSecretHistoryPermissions = "contents: read`npull-requests: read"
+if (($secretHistoryPermissionLines -join "`n") -cne $expectedSecretHistoryPermissions) {
+    $failures.Add('Secret history must have only the contents: read and pull-requests: read scopes needed to inspect PR commits.')
+}
+$pullRequestReadCount = [regex]::Matches(
+    $workflow,
+    '(?m)^\s+pull-requests:\s*read\s*$'
+).Count
+if ($pullRequestReadCount -ne 1) {
+    $failures.Add('CI must grant pull-requests: read exactly once, only to the Secret history job.')
+}
 if ($workflow -match '(?im)^\s*[a-z-]+:\s*write\s*$') {
     $failures.Add('CI declares a write-capable token permission.')
 }

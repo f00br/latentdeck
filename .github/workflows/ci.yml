@@ -19,6 +19,9 @@ jobs:
     name: Secret history
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
 
     steps:
       - name: Check out complete candidate history
