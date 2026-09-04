@@ -128,7 +128,10 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw 'Extension authoring CLI journey failed.'
     }
-    & cargo test --quiet -p latentdeck-app `
+    # These parser-only tests do not need Tauri's production custom protocol.
+    # Disabling default features keeps this standalone gate independent from a
+    # pre-existing frontend dist directory in a clean source checkout.
+    & cargo test --quiet -p latentdeck-app --no-default-features `
         public_starter_deck_is_accepted_by_the_host_parsers
     if ($LASTEXITCODE -ne 0) {
         throw 'Starter Deck host-parser validation failed.'
@@ -168,7 +171,7 @@ try {
     $previousScaffoldPath = $env:LATENTDECK_SCAFFOLDED_DECK_PATH
     try {
         $env:LATENTDECK_SCAFFOLDED_DECK_PATH = $deckSource
-        & cargo test --quiet -p latentdeck-app `
+        & cargo test --quiet -p latentdeck-app --no-default-features `
             scaffolded_starter_deck_is_accepted_by_the_host_parsers
         if ($LASTEXITCODE -ne 0) {
             throw 'The exact lifecycle Deck scaffold failed the application host parser.'
