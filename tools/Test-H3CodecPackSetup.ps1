@@ -590,10 +590,13 @@ function New-SyntheticPackFixture {
             -Path (Join-Path $packageSource "latentdeck_codec_host/$hostModule") `
             -Content "# synthetic Protocol 2 setup fixture $Variant`n"
     }
-    foreach ($nativeModule in @('latentdeck_cartridge', 'latentdeck_rgb_ring')) {
+    foreach ($nativeBinding in @(
+        'latentdeck_cartridge/_native.pyd',
+        'latentdeck_rgb_ring/_native.cp313-win_amd64.pyd'
+    )) {
         [System.IO.File]::Copy(
             $Python313.Dll,
-            (Join-Path $packageSource "$nativeModule/_native.cp313-win_amd64.pyd"),
+            (Join-Path $packageSource $nativeBinding),
             $false
         )
     }

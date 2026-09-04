@@ -954,10 +954,13 @@ try {
     }
     [System.IO.File]::Copy($python313, (Join-Path $runtimeSource 'python.exe'), $false)
     [System.IO.File]::Copy($python313Dll, (Join-Path $runtimeSource 'python313.dll'), $false)
-    foreach ($nativeModule in @('latentdeck_cartridge', 'latentdeck_rgb_ring')) {
+    foreach ($nativeBinding in @(
+        'latentdeck_cartridge/_native.pyd',
+        'latentdeck_rgb_ring/_native.cp313-win_amd64.pyd'
+    )) {
         [System.IO.File]::Copy(
             $python313Dll,
-            (Join-Path $packageSource "$nativeModule/_native.cp313-win_amd64.pyd"),
+            (Join-Path $packageSource $nativeBinding),
             $false
         )
     }
@@ -1110,17 +1113,17 @@ try {
         -RelativePath 'runtime/Lib/site-packages/latentdeck_cartridge/_native.cp312-win_amd64.pyd' `
         -Bytes ([System.IO.File]::ReadAllBytes($python313Dll))
     Assert-Throws `
-        -Context 'a wrong-tag _native extension must not accompany the exact CPython 3.13 binding' `
+        -Context 'an ABI-tagged _native alias must not accompany the exact cartridge ABI3 binding' `
         -Action { Test-H3CodecPackDirectory -PackRoot $nativeWrongTagRoot | Out-Null }
 
     $nativeUntaggedRoot = Join-Path $testRoot 'native-untagged'
     Expand-SafeCodecPackArchive -ArchivePath $archive020 -DestinationPath $nativeUntaggedRoot
     Add-CataloguedFixtureFile `
         -PackRoot $nativeUntaggedRoot `
-        -RelativePath 'runtime/Lib/site-packages/latentdeck_cartridge/_native.pyd' `
+        -RelativePath 'runtime/Lib/site-packages/latentdeck_rgb_ring/_native.pyd' `
         -Bytes ([System.IO.File]::ReadAllBytes($python313Dll))
     Assert-Throws `
-        -Context 'an untagged _native extension must not accompany the exact CPython 3.13 binding' `
+        -Context 'an untagged _native extension must not accompany the exact RGB ring CPython 3.13 binding' `
         -Action { Test-H3CodecPackDirectory -PackRoot $nativeUntaggedRoot | Out-Null }
 
     $expectedWorkerArguments020 = @(

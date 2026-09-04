@@ -1370,6 +1370,14 @@ function Assert-Python313RuntimeLayout {
         [System.Collections.Generic.HashSet[string]]$CatalogPaths
     )
 
+    $expectedNativePaths = [ordered]@{
+        latentdeck_cartridge = (
+            'runtime/Lib/site-packages/latentdeck_cartridge/_native.pyd'
+        )
+        latentdeck_rgb_ring = (
+            'runtime/Lib/site-packages/latentdeck_rgb_ring/_native.cp313-win_amd64.pyd'
+        )
+    }
     $requiredPaths = @(
         'runtime/python.exe',
         'runtime/python313.dll',
@@ -1384,9 +1392,9 @@ function Assert-Python313RuntimeLayout {
         'runtime/Lib/site-packages/latentdeck_codec_sdk/__init__.py',
         'runtime/Lib/site-packages/latentdeck_deck_sdk/__init__.py',
         'runtime/Lib/site-packages/latentdeck_cartridge/__init__.py',
-        'runtime/Lib/site-packages/latentdeck_cartridge/_native.cp313-win_amd64.pyd',
+        $expectedNativePaths['latentdeck_cartridge'],
         'runtime/Lib/site-packages/latentdeck_rgb_ring/__init__.py',
-        'runtime/Lib/site-packages/latentdeck_rgb_ring/_native.cp313-win_amd64.pyd',
+        $expectedNativePaths['latentdeck_rgb_ring'],
         'THIRD_PARTY_NOTICES.md',
         'DEPENDENCY_INVENTORY.json',
         'NATIVE_RUST_LICENSES.json',
@@ -1399,11 +1407,9 @@ function Assert-Python313RuntimeLayout {
         }
     }
 
-    foreach ($nativeModule in @('latentdeck_cartridge', 'latentdeck_rgb_ring')) {
+    foreach ($nativeModule in $expectedNativePaths.Keys) {
         $nativeModuleRoot = "runtime/Lib/site-packages/$nativeModule"
-        $expectedNativePath = (
-            "$nativeModuleRoot/_native.cp313-win_amd64.pyd"
-        )
+        $expectedNativePath = [string]$expectedNativePaths[$nativeModule]
         $allowedTypingStubPath = "$nativeModuleRoot/_native.pyi"
         $nativeStemPath = "$nativeModuleRoot/_native"
         $nativeRelatedPaths = @($CatalogPaths | Where-Object {
@@ -1417,7 +1423,7 @@ function Assert-Python313RuntimeLayout {
         if (-not ($nativeRelatedPaths -ccontains $expectedNativePath) -or
             $ambiguousNativePaths.Count -gt 0) {
             throw (
-                "Codec Pack must contain exactly the CPython 3.13 Windows x64 native binding " +
+                "Codec Pack must contain exactly the expected Windows x64 native binding " +
                 "'$expectedNativePath', may contain only the non-executable typing stub " +
                 "'$allowedTypingStubPath', and must contain no importable _native aliases."
             )
