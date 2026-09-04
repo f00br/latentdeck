@@ -3,8 +3,11 @@
 
 mod activation;
 mod archive;
+mod authoring;
 mod compatibility;
+mod deck_ui_contract;
 mod error;
+mod json_schema_contract;
 mod lifecycle;
 mod model;
 mod runtime_seal;
@@ -12,6 +15,7 @@ mod schema;
 
 pub use activation::{ActivePackageCache, ActivePackageCacheStats};
 pub use archive::{PackRequest, inspect, pack};
+pub use authoring::{BuildRequest, ScaffoldReceipt, ScaffoldRequest, build, scaffold};
 pub use compatibility::{
     PackageCompatibility, SelectedSourceCompatibility, SelectedSourceScope,
     resolve_package_compatibility, resolve_selected_compatibility,

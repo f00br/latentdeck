@@ -30,6 +30,11 @@
       "path": "python/latentdeck_operator_d2/operator.py",
       "byte_length": 14502,
       "sha256": "40ae355e485ce61d5976c5c8be234e68c35b516fb396718caf0b028e0ccc2f38"
+    },
+    {
+      "path": "python/latentdeck_operator_d2/py.typed",
+      "byte_length": 46,
+      "sha256": "54bd265e37691e57e0bdcf6396287f554587fa2591545b322ae922bb07338377"
     }
   ]
 }

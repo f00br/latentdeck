@@ -27,8 +27,9 @@ build-backend = "uv_build"
 
 [tool.uv-build]
 package-data = [
-    "src/latentdeck_comfy_toolkit/operator-descriptor.schema.json",
-    "src/latentdeck_comfy_toolkit/web/*.js",
+  "src/latentdeck_comfy_toolkit/operator-descriptor.schema.json",
+  "src/latentdeck_comfy_toolkit/py.typed",
+  "src/latentdeck_comfy_toolkit/web/*.js",
 ]
 
 [tool.pytest.ini_options]

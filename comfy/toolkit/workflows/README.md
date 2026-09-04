@@ -1,9 +1,9 @@
 # LatentDeck Toolkit example workflows
 
-These eight graphs are public, data-free ComfyUI workflow examples. They contain
-no cartridge, latent payload, model weight, prompt, generated output, private
-path, or credential. Open a graph with ComfyUI's **Workflow → Open** command or
-drag its JSON file onto the canvas.
+This directory contains one node gallery and eight public, data-free ComfyUI
+workflow examples. They contain no cartridge, latent payload, model weight,
+prompt, generated output, private path, or credential. Open a graph with
+ComfyUI's **Workflow → Open** command or drag its JSON file onto the canvas.
 
 Before queueing a graph:
 
@@ -39,6 +39,10 @@ visible Explicit Pair Align/Crop node to make that full-clip choice explicit.
 
 ## Included graphs
 
+- [`00_ALL_NODES_GALLERY.json`](00_ALL_NODES_GALLERY.json) is the inventory
+  entry point. It lays out every public Toolkit node so a developer can inspect
+  names, inputs, outputs, defaults, and visible control boundaries before
+  opening a task-specific workflow.
 - [`01_LC_INSPECT.json`](01_LC_INSPECT.json) loads and validates one `.lc`,
   previews its manifest/compatibility receipt, and runs latent scopes for
   mean/std, extrema, finite checks, and channel/temporal energy.
@@ -134,64 +138,6 @@ The graph ledger is path-free and bounded. LC loaders add content identity,
 operators append their declared version/seed/controls, diagnostics append their
 measurements, and LC Save appends the new cartridge hash. Users do not retype
 parent or operation JSON in the supplied workflows.
-
-## Private master-test prefill
-
-The public JSON files intentionally contain no private cartridge, raw latent,
-or model path. For a local master-user session, generate queue-ready private
-copies of 01, 02, 03, 04, 05, 06, 07, and 99 from four exactly
-full-clip-compatible mixer roles, one raw H3 source, the native H3 VAE selected
-by the isolated profile, and an explicit-align pair that may intentionally have
-different `T` or geometry:
-
-```powershell
-pwsh -NoProfile -File tools/New-PrivateComfyMasterWorkflows.ps1 `
-  -SourceA <same-t-cartridge-b.lc> -SourceB <same-t-cartridge-c.lc> `
-  -SourceC <same-t-cartridge-b.lc> -SourceD <same-t-cartridge-c.lc> `
-  -RawSource <raw-h3-latent.safetensors> `
-  -HqVaePath <isolated-profile-native-h3-vae.safetensors> `
-  -HqVaeExpectedSha256 <fresh-lowercase-sha256> `
-  -HqVaeSource <https-source-url> `
-  -HqVaeLicense <exact-external-license-label> `
-  -AlignSourceA <portrait-cartridge.lc> `
-  -AlignSourceB <landscape-cartridge.lc>
-```
-
-`SourceA` through `SourceD` are the Toolkit mixer inputs. Because these graphs
-operate on full tensors, the generator requires one exact signature across all
-four: spec and codec/profile versions; every tensor's stream/name, declared
-layout, storage/runtime dtype and full shape; latent and decoded `T/H/W`;
-decoded frame count/duration; timing contract; and frame rate. A mismatch is
-reported before anything is materialized. Duplicates such as `B,C,B,C` are
-deliberately allowed for a functional master-test; they do not prove
-four-source visual diversity.
-
-`AlignSourceA` and `AlignSourceB` are validated and materialized separately but
-are not required to share that signature: workflow 07 exists to expose an
-intentional crop/alignment decision for mixed portrait/landscape or different
-valid `T`. They default to `SourceA` and `SourceD` when omitted.
-
-`RawSource` is inspected by the isolated native Cartridge SDK before it is
-materialized. `HqVaePath` must resolve to the exact native H3 VAE already
-recorded by that isolated profile, and `HqVaeExpectedSha256` must be a fresh
-lowercase SHA-256 calculated for that file. The generator checks its profile
-receipt size and then hashes the selected asset again; it does not trust a
-filename, an old note, or a copied checksum. Source and license values are
-explicit because the weight remains an external private asset with its own
-terms.
-
-After validation and inspection, the script materializes hardlinks (or a
-byte-copy fallback) beneath the isolated Comfy input area and writes ignored
-private workflow copies under `artifacts/`. Its private receipt has separate
-`mixer_sources`, `align_sources`, `raw_source`, `full_clip_signature`, and
-`external_assets` sections. It resolves and rehashes TAEH3 as well as the native
-H3 VAE, fills every applicable VAE loader and truthful declaration, preselects
-every LC/raw input, and preserves the explicit device routes in workflows 03,
-04, and 99. All eight private graphs are queue-ready and contain no unresolved
-placeholder. The script never edits the public templates and never puts an
-absolute private path into generated graphs or their receipt. Rebuild the
-isolated profile first if its `environment.json` refers to an older commit or
-external model selection.
 
 For a custom implementation, continue with the
 [operator developer template](../docs/OPERATOR_DEVELOPER_TEMPLATE.md).

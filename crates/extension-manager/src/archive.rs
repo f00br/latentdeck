@@ -184,7 +184,17 @@ pub fn pack(request: &PackRequest) -> Result<PackReceipt> {
             "post-pack inspection differs from the validated source tree",
         ));
     }
-    fs::hard_link(&partial, &request.output_path).map_err(|error| {
+    publish_partial(&partial, &request.output_path)?;
+    partial_guard.disarm();
+    Ok(PackReceipt {
+        output_path: request.output_path.clone(),
+        included_files: source.files.keys().cloned().collect(),
+        inspection,
+    })
+}
+
+fn publish_partial(partial: &Path, output: &Path) -> Result<()> {
+    fs::hard_link(partial, output).map_err(|error| {
         let code = if error.kind() == io::ErrorKind::AlreadyExists {
             ErrorCode::PackageExists
         } else {
@@ -192,13 +202,8 @@ pub fn pack(request: &PackRequest) -> Result<PackReceipt> {
         };
         ExtensionError::io(code, "atomically publish package", &error)
     })?;
-    fs::remove_file(&partial).map_err(|error| {
+    fs::remove_file(partial).map_err(|error| {
         ExtensionError::io(ErrorCode::Io, "remove package publication link", &error)
-    })?;
-    partial_guard.disarm();
-    Ok(PackReceipt {
-        output_path: request.output_path.clone(),
-        inspection,
     })
 }
 
@@ -1379,7 +1384,7 @@ fn validate_deck_contents(contents: &BTreeMap<String, Vec<u8>>) -> Result<()> {
             .to_ascii_lowercase();
         match extension.as_str() {
             "json" => validate_strict_json_value(bytes, path)?,
-            "py" | "txt" | "md" => {
+            "py" | "typed" | "txt" | "md" => {
                 std::str::from_utf8(bytes).map_err(|_| {
                     ExtensionError::new(
                         ErrorCode::ManifestInvalid,
@@ -1667,7 +1672,7 @@ fn hash_bytes(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-fn open_directory_pin(path: &Path, check_ancestors: bool) -> Result<File> {
+pub(crate) fn open_directory_pin(path: &Path, check_ancestors: bool) -> Result<File> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| ExtensionError::io(ErrorCode::Io, "inspect package directory", &error))?;
     if !metadata.is_dir() || is_reparse_or_symlink(&metadata) {
@@ -1741,7 +1746,7 @@ fn open_regular_under_pinned_tree(path: &Path) -> Result<File> {
     Ok(file)
 }
 
-fn open_regular_no_follow(path: &Path, exclusive: bool) -> Result<File> {
+pub(crate) fn open_regular_no_follow(path: &Path, exclusive: bool) -> Result<File> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| ExtensionError::io(ErrorCode::Io, "inspect package file", &error))?;
     if !metadata.is_file() || is_reparse_or_symlink(&metadata) {

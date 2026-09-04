@@ -51,6 +51,13 @@ binding. The Toolkit does not implement a second ZIP/Safetensors trust path.
 Audio payloads can be preserved as opaque cartridge data when the declared
 policy permits it, but Toolkit 0.1 does not play or synthesize audio.
 
+The Toolkit package root supports four workflow-level LC I/O functions for
+external research scripts: `load_lc`, `import_raw_h3`,
+`parent_cartridge_ref`, and `save_resampled_lc`. They retain the same strict
+validation, no-hidden-conversion, genealogy, audio-disposition, and
+no-clobber behavior as the Comfy nodes. See the executable
+[`A.lc -> B.lc` example](../../examples/cartridge-genealogy/README.md).
+
 ### Explicit CPU / CUDA staging
 
 - **Explicit Device Transfer — CPU / CUDA** is the only Toolkit node that

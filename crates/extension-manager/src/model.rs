@@ -454,6 +454,8 @@ pub struct InspectedPackage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PackReceipt {
     pub output_path: PathBuf,
+    /// Exact sorted archive paths included by the closed-tree packer.
+    pub included_files: Vec<String>,
     pub inspection: InspectedPackage,
 }
 

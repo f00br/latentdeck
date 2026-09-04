@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/f00br/latentdeck/main/spec/extension-package/integrity.schema.json",
+  "title": "LatentDeck Extension Integrity Catalog 1.0",
+  "description": "Common sorted closed-tree catalog used by .ld and .ldcodec packages. The package parser remains authoritative for portable-path and complete-tree checks.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["manifest_version", "files"],
+  "properties": {
+    "manifest_version": { "const": "1.0.0" },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32766,
+      "items": { "$ref": "#/$defs/file" }
+    }
+  },
+  "$defs": {
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "byte_length", "sha256"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240,
+          "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[ -~]+$"
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 68719476736
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

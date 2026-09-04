@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use latentdeck_extension_manager::{
-    ActivePackageCache, ErrorCode, ExtensionError, ExtensionRoots, InstallRequest, PackRequest,
-    PackageKind, PackageReference, RemoveOptions, disable, enable, inspect, install, pack, remove,
-    repair, verify,
+    ActivePackageCache, BuildRequest, ErrorCode, ExtensionError, ExtensionRoots, InstallRequest,
+    PackRequest, PackageKind, PackageReference, RemoveOptions, ScaffoldRequest, build, disable,
+    enable, inspect, install, pack, remove, repair, scaffold, verify,
 };
 use serde::Serialize;
 
@@ -21,6 +21,24 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Create a no-clobber source tree for a Deck or Codec package.
+    Scaffold {
+        #[arg(long)]
+        kind: KindArgument,
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        version: String,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Catalog, bind, validate, and deterministically pack a source tree.
+    Build {
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
     Inspect {
         #[arg(long)]
         archive: PathBuf,
@@ -120,6 +138,24 @@ fn main() {
 
 fn run(cli: Cli) -> Result<String, ExtensionError> {
     match cli.command {
+        Command::Scaffold {
+            kind,
+            id,
+            version,
+            output,
+        } => encode(&scaffold(&ScaffoldRequest {
+            kind: match kind {
+                KindArgument::Deck => PackageKind::DeckPack,
+                KindArgument::Codec => PackageKind::CodecPack,
+            },
+            package_id: id,
+            package_version: version,
+            output_directory: output,
+        })?),
+        Command::Build { source, output } => encode(&build(&BuildRequest {
+            source_directory: source,
+            output_path: output,
+        })?),
         Command::Inspect {
             archive,
             expected_sha256,
@@ -170,7 +206,10 @@ fn run(cli: Cli) -> Result<String, ExtensionError> {
                     let inventory = ActivePackageCache::new().runtime_inventory(&roots)?;
                     encode(&inventory.matrix)
                 }
-                Command::Inspect { .. } | Command::Pack { .. } => unreachable!(),
+                Command::Scaffold { .. }
+                | Command::Build { .. }
+                | Command::Inspect { .. }
+                | Command::Pack { .. } => unreachable!(),
             }
         }
     }

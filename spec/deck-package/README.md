@@ -19,6 +19,17 @@ The current contract uses `deck-pack.json` manifest version `1.0.0`,
 `operator.json` schema/API version `0.2.0`, faceplate schema version `2`, and
 Worker Protocol 2.
 
+Machine-readable shapes are published beside this specification:
+
+- [`deck-pack.schema.json`](deck-pack.schema.json);
+- [`operator.schema.json`](operator.schema.json);
+- [`faceplate.schema.json`](faceplate.schema.json);
+- the shared [`integrity.schema.json`](../extension-package/integrity.schema.json).
+
+The Rust package parser and host cross-file checks remain normative where JSON
+Schema cannot express ordering, exact tree closure, or agreement between the
+three descriptors.
+
 ## Package tree
 
 A Deck archive is a deterministic ZIP with the canonical lowercase `.ld`
@@ -360,3 +371,17 @@ Before distributing a Deck Package:
    fallback.
 8. Exercise realtime controls, roles, transport, deterministic replay,
    Snapshot, Live Capture, and output behavior declared by the faceplate.
+
+The extension manager provides an authoring path that keeps the source tree
+unchanged and refuses replacement:
+
+```powershell
+cargo run -p latentdeck-extension-manager -- scaffold --kind deck --id org.example.my-deck --version 0.1.0 --output my-deck
+cargo run -p latentdeck-extension-manager -- build --source my-deck --output my-deck.ld
+cargo run -p latentdeck-extension-manager -- inspect --archive my-deck.ld
+```
+
+`build` regenerates sorted `integrity.json`, binds its exact SHA-256 into a
+temporary manifest, delegates to the deterministic `pack` implementation, and
+reinspects the archive. The low-level `pack` command remains available only
+for an already catalogued source tree.

@@ -493,3 +493,48 @@ fn cli_executes_both_package_lifecycles_with_json_and_stable_exit_codes() {
             .is_empty()
     );
 }
+
+#[test]
+fn cli_scaffolds_and_builds_a_no_clobber_external_deck() {
+    let temp = TempDir::new().expect("temporary CLI authoring root");
+    let local_app_data = temp.path().join("LocalAppData");
+    let source = temp.path().join("starter-deck");
+    let archive = temp.path().join("starter-deck.ld");
+
+    let mut scaffold = command(&local_app_data, "scaffold");
+    scaffold
+        .args(["--kind", "deck", "--id", "com.example.starter"])
+        .arg("--version")
+        .arg("0.1.0")
+        .arg("--output")
+        .arg(&source);
+    let scaffolded = success_json(scaffold);
+    assert_eq!(scaffolded["package"]["package_id"], "com.example.starter");
+    assert_eq!(scaffolded["ready_to_build"], true);
+    assert!(!source.join("integrity.json").exists());
+
+    let mut build_command = command(&local_app_data, "build");
+    build_command
+        .arg("--source")
+        .arg(&source)
+        .arg("--output")
+        .arg(&archive);
+    let receipt = success_json(build_command);
+    assert_eq!(
+        receipt["inspection"]["package"]["package_id"],
+        "com.example.starter"
+    );
+    assert!(archive.is_file());
+    assert!(!source.join("integrity.json").exists());
+
+    let mut repeated = command(&local_app_data, "build");
+    repeated
+        .arg("--source")
+        .arg(&source)
+        .arg("--output")
+        .arg(&archive);
+    let output = repeated.output().expect("execute repeated build");
+    assert_eq!(output.status.code(), Some(30));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("extension.package_exists"));
+}

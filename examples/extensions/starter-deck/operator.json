@@ -1,0 +1,19 @@
+{
+  "schema_version": "0.2.0",
+  "deck_operator_api": "0.2.0",
+  "deck_id": "org.example.latentdeck.identity",
+  "deck_version": "0.1.0",
+  "operator_id": "org.example.latentdeck.identity",
+  "operator_version": "0.1.0",
+  "entrypoint": "latentdeck_example_identity_deck.operator:process_sources_host",
+  "source_count": 1,
+  "role_ids": ["source"],
+  "controls": [
+    {
+      "control_id": "mode",
+      "value_type": "enum",
+      "default": "identity",
+      "options": ["identity"]
+    }
+  ]
+}

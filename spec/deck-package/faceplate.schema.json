@@ -1,0 +1,260 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/f00br/latentdeck/main/spec/deck-package/faceplate.schema.json",
+  "title": "LatentDeck Declarative Deck Faceplate 2",
+  "description": "Closed, host-rendered faceplate shape. The host additionally enforces complete source, role, control, transport, capture, and region bindings against deck-pack.json and operator.json.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "title", "sections"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "title": { "$ref": "#/$defs/label" },
+    "sections": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": { "$ref": "#/$defs/section" }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^[a-z0-9_-]+$"
+    },
+    "label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "pattern": "^[^\\u0000\\r\\n]+$"
+    },
+    "visibilityValue": {
+      "oneOf": [
+        { "type": "boolean" },
+        { "$ref": "#/$defs/id" }
+      ]
+    },
+    "predicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["control_id", "one_of"],
+      "properties": {
+        "control_id": { "$ref": "#/$defs/id" },
+        "one_of": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/visibilityValue" }
+        }
+      }
+    },
+    "visibleWhen": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": { "$ref": "#/$defs/predicate" }
+    },
+    "baseWidget": {
+      "type": "object",
+      "required": ["id", "kind", "label"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "type": "string" },
+        "label": { "$ref": "#/$defs/label" },
+        "visible_when": { "$ref": "#/$defs/visibleWhen" }
+      }
+    },
+    "sourcePicker": {
+      "allOf": [
+        { "$ref": "#/$defs/baseWidget" },
+        {
+          "type": "object",
+          "required": ["slot_index"],
+          "properties": {
+            "kind": { "const": "source_picker" },
+            "slot_index": { "type": "integer", "minimum": 0, "maximum": 15 }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "slider": {
+      "allOf": [
+        { "$ref": "#/$defs/baseWidget" },
+        {
+          "type": "object",
+          "required": ["control_id", "minimum", "maximum", "step"],
+          "properties": {
+            "kind": { "const": "slider" },
+            "control_id": { "$ref": "#/$defs/id" },
+            "minimum": { "type": "number" },
+            "maximum": { "type": "number" },
+            "step": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "number": {
+      "allOf": [
+        { "$ref": "#/$defs/baseWidget" },
+        {
+          "type": "object",
+          "required": ["control_id", "minimum", "maximum", "step"],
+          "properties": {
+            "kind": { "const": "number" },
+            "control_id": { "$ref": "#/$defs/id" },
+            "minimum": { "type": "number" },
+            "maximum": { "type": "number" },
+            "step": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "toggle": {
+      "allOf": [
+        { "$ref": "#/$defs/baseWidget" },
+        {
+          "type": "object",
+          "required": ["control_id"],
+          "properties": {
+            "kind": { "const": "toggle" },
+            "control_id": { "$ref": "#/$defs/id" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "option": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "label"],
+      "properties": {
+        "value": { "$ref": "#/$defs/id" },
+        "label": { "$ref": "#/$defs/label" }
+      }
+    },
+    "select": {
+      "allOf": [
+        { "$ref": "#/$defs/baseWidget" },
+        {
+          "type": "object",
+          "required": ["control_id", "options"],
+          "properties": {
+            "kind": { "const": "select" },
+            "control_id": { "$ref": "#/$defs/id" },
+            "options": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 256,
+              "items": { "$ref": "#/$defs/option" }
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "roleEditor": {
+      "allOf": [
+        { "$ref": "#/$defs/baseWidget" },
+        {
+          "type": "object",
+          "required": ["role_ids"],
+          "properties": {
+            "kind": { "const": "role_editor" },
+            "role_ids": { "type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "barycentric3": {
+      "allOf": [
+        { "$ref": "#/$defs/baseWidget" },
+        {
+          "type": "object",
+          "required": ["x_control_id", "y_control_id", "vertex_role_ids"],
+          "properties": {
+            "kind": { "const": "barycentric3" },
+            "x_control_id": { "$ref": "#/$defs/id" },
+            "y_control_id": { "$ref": "#/$defs/id" },
+            "vertex_role_ids": { "type": "array", "minItems": 3, "maxItems": 3, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "transport": {
+      "allOf": [
+        { "$ref": "#/$defs/baseWidget" },
+        {
+          "type": "object",
+          "required": ["slot_indices"],
+          "properties": {
+            "kind": { "const": "transport" },
+            "slot_indices": { "type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true, "items": { "type": "integer", "minimum": 0, "maximum": 15 } }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "seed": {
+      "allOf": [
+        { "$ref": "#/$defs/baseWidget" },
+        { "type": "object", "properties": { "kind": { "const": "seed" } } }
+      ],
+      "unevaluatedProperties": false
+    },
+    "capture": {
+      "allOf": [
+        { "$ref": "#/$defs/baseWidget" },
+        {
+          "type": "object",
+          "required": ["modes"],
+          "properties": {
+            "kind": { "const": "capture" },
+            "modes": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["snapshot", "live_capture"] } }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "monitor": {
+      "allOf": [
+        { "$ref": "#/$defs/baseWidget" },
+        { "type": "object", "properties": { "kind": { "const": "monitor" } } }
+      ],
+      "unevaluatedProperties": false
+    },
+    "widget": {
+      "oneOf": [
+        { "$ref": "#/$defs/sourcePicker" },
+        { "$ref": "#/$defs/slider" },
+        { "$ref": "#/$defs/number" },
+        { "$ref": "#/$defs/toggle" },
+        { "$ref": "#/$defs/select" },
+        { "$ref": "#/$defs/roleEditor" },
+        { "$ref": "#/$defs/barycentric3" },
+        { "$ref": "#/$defs/transport" },
+        { "$ref": "#/$defs/seed" },
+        { "$ref": "#/$defs/capture" },
+        { "$ref": "#/$defs/monitor" }
+      ]
+    },
+    "section": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["section_id", "title", "region", "columns", "widgets"],
+      "properties": {
+        "section_id": { "$ref": "#/$defs/id" },
+        "title": { "$ref": "#/$defs/label" },
+        "region": { "enum": ["output", "actions", "controls"] },
+        "columns": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "widgets": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/widget" } }
+      }
+    }
+  }
+}

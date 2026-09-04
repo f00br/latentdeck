@@ -97,6 +97,6 @@
   "faceplate_path": "faceplate.json",
   "integrity": {
     "catalog_path": "integrity.json",
-    "catalog_sha256": "2b6666dd5452cc9ea185eaa90e2218baad9c5796e591a69bbf4bdf63fdc1b2e3"
+    "catalog_sha256": "2d007973b7c8d7a07ea4035acacfd7d449bf6d8e39d37562ee688ef1f03cb8a2"
   }
 }

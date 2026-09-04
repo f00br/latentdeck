@@ -14,6 +14,12 @@ The current contract uses:
 - Worker Protocol 2;
 - an explicit, hash-bound install and activation lifecycle.
 
+The machine-readable [`codec-pack.schema.json`](codec-pack.schema.json) and
+shared [`integrity.schema.json`](../extension-package/integrity.schema.json)
+describe the closed JSON shapes. The Rust parser and Codec Host remain
+normative for runtime importability, cross-file identity, complete-tree,
+compatibility, and Protocol 2 checks.
+
 A Codec Package is not an application installer, Deck, cartridge, model, or
 asset-selection record. A thin product-specific setup may install an adjacent
 `.ldcodec`, but it MUST use the same package validation and lifecycle.
@@ -257,7 +263,7 @@ different model, or hidden cast/resize/crop/re-encode behavior.
 
 ## H3 reference implementation
 
-The current H3 package uses pack and adapter version `0.2.0`, Protocol 2,
+The current H3 package uses pack version `0.2.1`, adapter version `0.2.0`, Protocol 2,
 CPython 3.13, an exact CUDA Torch build, the
 `minimax_h3 / h3_av_latent / 0.1.0` profile, all five mandatory capabilities,
 and optional `raw_import`. Its TAEH3 decoder is a required external asset and

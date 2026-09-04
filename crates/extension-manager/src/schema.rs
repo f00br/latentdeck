@@ -867,7 +867,17 @@ pub(crate) fn validate_deck_file_extension(path: &str) -> Result<()> {
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if !matches!(extension.as_str(), "py" | "json" | "txt" | "md" | "png") {
+    if extension == "typed"
+        && Path::new(path).file_name().and_then(|value| value.to_str()) != Some("py.typed")
+    {
+        return Err(invalid(format!(
+            ".ld contains forbidden file type at {path}"
+        )));
+    }
+    if !matches!(
+        extension.as_str(),
+        "py" | "typed" | "json" | "txt" | "md" | "png"
+    ) {
         return Err(invalid(format!(
             ".ld contains forbidden file type at {path}"
         )));

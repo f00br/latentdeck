@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/f00br/latentdeck/main/spec/deck-package/operator.schema.json",
+  "title": "LatentDeck Realtime Deck Operator Descriptor 0.2",
+  "description": "Machine-readable shape for a Deck package operator.json. The host additionally cross-checks identity, entrypoint, role order, source count, controls, and faceplate bindings.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "deck_operator_api",
+    "deck_id",
+    "deck_version",
+    "operator_id",
+    "operator_version",
+    "entrypoint",
+    "source_count",
+    "role_ids",
+    "controls"
+  ],
+  "properties": {
+    "schema_version": { "const": "0.2.0" },
+    "deck_operator_api": { "const": "0.2.0" },
+    "deck_id": { "$ref": "#/$defs/reverseDns" },
+    "deck_version": { "$ref": "#/$defs/packageVersion" },
+    "operator_id": { "$ref": "#/$defs/operatorId" },
+    "operator_version": { "$ref": "#/$defs/semver" },
+    "entrypoint": {
+      "type": "string",
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)*:[A-Za-z0-9_]+$"
+    },
+    "source_count": { "type": "integer", "minimum": 1, "maximum": 16 },
+    "role_ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/localId" }
+    },
+    "controls": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/control" }
+    }
+  },
+  "$defs": {
+    "semver": {
+      "type": "string",
+      "maxLength": 120,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-(?:(?:0|[1-9][0-9]*)|(?:[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))(?:\\.(?:(?:0|[1-9][0-9]*)|(?:[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "packageVersion": {
+      "type": "string",
+      "maxLength": 115,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-(?:(?:0|[1-9][0-9]*)|(?:[0-9a-z-]*[a-z-][0-9a-z-]*))(?:\\.(?:(?:0|[1-9][0-9]*)|(?:[0-9a-z-]*[a-z-][0-9a-z-]*)))*)?(?:\\+[0-9a-z-]+(?:\\.[0-9a-z-]+)*)?$"
+    },
+    "reverseDns": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 160,
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+    },
+    "localId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^[a-z0-9_-]+$"
+    },
+    "operatorId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "numberControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["control_id", "value_type", "default", "minimum", "maximum", "step"],
+      "properties": {
+        "control_id": { "$ref": "#/$defs/localId" },
+        "value_type": { "const": "number" },
+        "default": { "type": "number" },
+        "minimum": { "type": "number" },
+        "maximum": { "type": "number" },
+        "step": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "integerControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["control_id", "value_type", "default", "minimum", "maximum", "step"],
+      "properties": {
+        "control_id": { "$ref": "#/$defs/localId" },
+        "value_type": { "const": "integer" },
+        "default": { "type": "integer" },
+        "minimum": { "type": "integer" },
+        "maximum": { "type": "integer" },
+        "step": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "booleanControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["control_id", "value_type", "default"],
+      "properties": {
+        "control_id": { "$ref": "#/$defs/localId" },
+        "value_type": { "const": "boolean" },
+        "default": { "type": "boolean" }
+      }
+    },
+    "enumControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["control_id", "value_type", "default", "options"],
+      "properties": {
+        "control_id": { "$ref": "#/$defs/localId" },
+        "value_type": { "const": "enum" },
+        "default": { "$ref": "#/$defs/localId" },
+        "options": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/localId" }
+        }
+      }
+    },
+    "control": {
+      "oneOf": [
+        { "$ref": "#/$defs/numberControl" },
+        { "$ref": "#/$defs/integerControl" },
+        { "$ref": "#/$defs/booleanControl" },
+        { "$ref": "#/$defs/enumControl" }
+      ]
+    }
+  }
+}

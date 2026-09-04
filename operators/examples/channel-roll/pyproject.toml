@@ -23,7 +23,8 @@ build-backend = "uv_build"
 
 [tool.uv-build]
 package-data = [
-    "src/latentdeck_example_channel_roll/descriptor.json",
+  "src/latentdeck_example_channel_roll/descriptor.json",
+  "src/latentdeck_example_channel_roll/py.typed",
 ]
 
 [tool.pytest.ini_options]

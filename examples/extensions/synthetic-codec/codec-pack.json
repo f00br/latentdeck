@@ -1,0 +1,70 @@
+{
+  "manifest_version": "2.0.0",
+  "kind": "codec_pack",
+  "pack_id": "org.example.latentdeck.synthetic",
+  "pack_version": "0.1.0",
+  "display_name": "Synthetic CPU Codec",
+  "summary": "A data-free Protocol 2 teaching adapter for a small synthetic latent profile.",
+  "publisher": {
+    "name": "LatentDeck example",
+    "url": "https://github.com/f00br/latentdeck",
+    "identity_claim": "self_declared"
+  },
+  "license": {
+    "spdx_or_label": "Apache-2.0",
+    "notice_path": "NOTICE.txt"
+  },
+  "platform": {
+    "os": "windows",
+    "arch": "x86_64"
+  },
+  "compatibility": {
+    "app_min_inclusive": "0.1.0",
+    "app_max_exclusive": "1.0.0",
+    "worker_protocol": 2,
+    "codec_adapter_api": 1,
+    "tensor_abi": "latentdeck.tensor.v1",
+    "python": {
+      "implementation": "cpython",
+      "version": "3.13",
+      "platform_tag": "win_amd64"
+    },
+    "torch_exact_build": "2.13.0+cu130",
+    "lc_spec_versions": ["0.1.0"],
+    "profiles": [
+      {
+        "codec_family": "synthetic",
+        "profile": "example_latent",
+        "profile_version": "0.1.0"
+      }
+    ]
+  },
+  "adapter": {
+    "adapter_id": "org.example.latentdeck.synthetic",
+    "adapter_version": "0.1.0",
+    "entrypoint": "adapter:make_adapter"
+  },
+  "worker": {
+    "executable": "runtime/python.exe",
+    "arguments": ["-m", "latentdeck_codec_host"],
+    "working_directory": "runtime",
+    "start_timeout_ms": 30000,
+    "heartbeat_timeout_ms": 5000
+  },
+  "capabilities": [
+    "player",
+    "realtime",
+    "resample",
+    "snapshot_capture",
+    "live_capture"
+  ],
+  "external_assets": [],
+  "runtime_lock": {
+    "path": "runtime/runtime.lock",
+    "sha256": "942fc2b2594fa6014844937523044f41da6bd76a9d58559035857c103a4f7b3f"
+  },
+  "integrity": {
+    "catalog_path": "integrity.json",
+    "catalog_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

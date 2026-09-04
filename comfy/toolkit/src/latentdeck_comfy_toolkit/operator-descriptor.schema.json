@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://latentdeck.org/schema/operator-explicit-install/0.1.0",
+  "$id": "https://raw.githubusercontent.com/f00br/latentdeck/main/comfy/toolkit/src/latentdeck_comfy_toolkit/operator-descriptor.schema.json",
   "title": "LatentDeck Explicit-Install Operator Descriptor 0.1",
   "type": "object",
   "additionalProperties": false,

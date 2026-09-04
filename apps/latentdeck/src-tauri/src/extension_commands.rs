@@ -1456,7 +1456,11 @@ pub(crate) async fn extensions_remove(
 
 #[cfg(test)]
 mod tests {
-    use latentdeck_extension_manager::{DeckPackManifest, PackageHealth};
+    use std::fs;
+
+    use latentdeck_extension_manager::{
+        DeckPackManifest, PackageHealth, ScaffoldRequest, scaffold,
+    };
 
     use super::*;
 
@@ -1498,6 +1502,68 @@ mod tests {
             include_bytes!("../../../../operators/builtin/d2/package/operator.json"),
             &serde_json::to_vec(faceplate).expect("serialize faceplate"),
         )
+    }
+
+    #[test]
+    fn public_starter_deck_is_accepted_by_the_host_parsers() {
+        let manifest = serde_json::from_str::<DeckPackManifest>(include_str!(
+            "../../../../examples/extensions/starter-deck/deck-pack.json"
+        ))
+        .expect("public starter Deck manifest");
+        let package = PackageReference {
+            kind: PackageKind::DeckPack,
+            package_id: manifest.deck_id.clone(),
+            package_version: manifest.deck_version.clone(),
+        };
+        let view = deck_ui_view_from_parts(
+            &package,
+            &manifest,
+            include_bytes!("../../../../examples/extensions/starter-deck/operator.json"),
+            include_bytes!("../../../../examples/extensions/starter-deck/faceplate.json"),
+        )
+        .expect("public starter Deck host view");
+
+        assert_eq!(view.deck.slots, 1);
+        assert_eq!(view.operator.controls.len(), 1);
+        assert_eq!(view.faceplate.sections.len(), 6);
+    }
+
+    #[test]
+    fn scaffolded_starter_deck_is_accepted_by_the_host_parsers() {
+        let temporary = tempfile::tempdir().expect("temporary scaffold root");
+        let source = if let Some(path) = std::env::var_os("LATENTDECK_SCAFFOLDED_DECK_PATH") {
+            PathBuf::from(path)
+        } else {
+            let source = temporary.path().join("deck");
+            scaffold(&ScaffoldRequest {
+                kind: PackageKind::DeckPack,
+                package_id: "com.example.host-parser".to_owned(),
+                package_version: "0.1.0".to_owned(),
+                output_directory: source.clone(),
+            })
+            .expect("scaffold public Deck");
+            source
+        };
+        let manifest = serde_json::from_slice::<DeckPackManifest>(
+            &fs::read(source.join("deck-pack.json")).expect("read scaffold manifest"),
+        )
+        .expect("parse scaffold manifest");
+        let package = PackageReference {
+            kind: PackageKind::DeckPack,
+            package_id: manifest.deck_id.clone(),
+            package_version: manifest.deck_version.clone(),
+        };
+        let view = deck_ui_view_from_parts(
+            &package,
+            &manifest,
+            &fs::read(source.join("operator.json")).expect("read scaffold operator"),
+            &fs::read(source.join("faceplate.json")).expect("read scaffold faceplate"),
+        )
+        .expect("scaffolded starter Deck host view");
+
+        assert_eq!(view.deck.slots, 1);
+        assert_eq!(view.operator.controls.len(), 1);
+        assert_eq!(view.faceplate.sections.len(), 6);
     }
 
     fn legacy_d2_faceplate_json() -> serde_json::Value {

@@ -11,6 +11,7 @@ atomicwrites.workspace = true
 clap.workspace = true
 fs2.workspace = true
 hex.workspace = true
+jsonschema.workspace = true
 latentdeck-deck-runtime-contracts = { path = "../deck-runtime-contracts" }
 semver.workspace = true
 serde.workspace = true

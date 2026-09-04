@@ -1,0 +1,83 @@
+{
+  "manifest_version": "1.0.0",
+  "kind": "deck_pack",
+  "deck_id": "org.example.latentdeck.identity",
+  "deck_version": "0.1.0",
+  "display_name": "Identity Starter Deck",
+  "summary": "A one-source external Deck that returns the selected latent unchanged.",
+  "publisher": {
+    "name": "LatentDeck example",
+    "url": "https://github.com/f00br/latentdeck",
+    "identity_claim": "self_declared"
+  },
+  "license": {
+    "spdx_or_label": "Apache-2.0",
+    "notice_path": "NOTICE.txt"
+  },
+  "compatibility": {
+    "app_min_inclusive": "0.1.0",
+    "app_max_exclusive": "1.0.0",
+    "deck_host_api": 1,
+    "worker_protocol": 2,
+    "deck_operator_api": 1,
+    "tensor_abi": "latentdeck.tensor.v1",
+    "python": {
+      "implementation": "cpython",
+      "version": "3.13",
+      "platform_tag": "win_amd64"
+    },
+    "torch_exact_build": "2.13.0+cu130"
+  },
+  "runtime": {
+    "kind": "python_operator_stream_v1",
+    "operator_descriptor_path": "operator.json",
+    "python_root": "python",
+    "entrypoint": "latentdeck_example_identity_deck.operator:process_sources_host"
+  },
+  "signal": {
+    "slots": 1,
+    "roles": [
+      {
+        "role_id": "source",
+        "display_name": "Source"
+      }
+    ],
+    "default_permutation": ["source"],
+    "structural_carrier_role": "source",
+    "geometry_allowlist": [
+      {
+        "dtype": "fp32",
+        "device": "cpu",
+        "batch": 1,
+        "channels": 4,
+        "temporal": 1,
+        "height": 2,
+        "width": 3
+      }
+    ],
+    "timing": {
+      "frames_per_second_numerator": 24,
+      "frames_per_second_denominator": 1,
+      "samples_per_slot": 24
+    },
+    "required_capabilities": [
+      "player",
+      "realtime",
+      "resample",
+      "snapshot_capture",
+      "live_capture"
+    ],
+    "profile_allowlist": [
+      {
+        "codec_family": "synthetic",
+        "profile": "example_latent",
+        "profile_version": "0.1.0"
+      }
+    ]
+  },
+  "faceplate_path": "faceplate.json",
+  "integrity": {
+    "catalog_path": "integrity.json",
+    "catalog_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

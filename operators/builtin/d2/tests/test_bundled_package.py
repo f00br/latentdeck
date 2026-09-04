@@ -220,7 +220,7 @@ def test_d2_integrity_catalog_and_deterministic_ld_are_exact(tmp_path: Path) -> 
         "package_id": "org.latentdeck.deck.d2",
         "package_version": "0.2.1",
     }
-    assert inspected["file_count"] == 8
+    assert inspected["file_count"] == 9
 
     implementation_path = "python/latentdeck_operator_d2/operator.py"
     unpacked = tmp_path / "unpacked"

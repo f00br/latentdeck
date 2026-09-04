@@ -1,0 +1,4 @@
+python==3.13
+torch==2.13.0+cu130
+latentdeck-codec-host==0.1.0
+latentdeck-codec-sdk==0.2.0

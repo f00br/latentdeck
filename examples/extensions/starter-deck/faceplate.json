@@ -1,0 +1,95 @@
+{
+  "schema_version": 2,
+  "title": "Identity Starter Deck",
+  "sections": [
+    {
+      "section_id": "source",
+      "title": "Source",
+      "region": "controls",
+      "columns": 1,
+      "widgets": [
+        {
+          "id": "source",
+          "kind": "source_picker",
+          "label": "Source",
+          "slot_index": 0
+        }
+      ]
+    },
+    {
+      "section_id": "transport",
+      "title": "Transport",
+      "region": "controls",
+      "columns": 1,
+      "widgets": [
+        {
+          "id": "transport",
+          "kind": "transport",
+          "label": "Transport",
+          "slot_indices": [0]
+        },
+        {
+          "id": "seed",
+          "kind": "seed",
+          "label": "Seed"
+        }
+      ]
+    },
+    {
+      "section_id": "roles",
+      "title": "Roles",
+      "region": "controls",
+      "columns": 1,
+      "widgets": [
+        {
+          "id": "roles",
+          "kind": "role_editor",
+          "label": "Source role",
+          "role_ids": ["source"]
+        }
+      ]
+    },
+    {
+      "section_id": "capture",
+      "title": "Capture",
+      "region": "actions",
+      "columns": 1,
+      "widgets": [
+        {
+          "id": "capture",
+          "kind": "capture",
+          "label": "Latent capture",
+          "modes": ["snapshot", "live_capture"]
+        }
+      ]
+    },
+    {
+      "section_id": "operator",
+      "title": "Operator",
+      "region": "controls",
+      "columns": 1,
+      "widgets": [
+        {
+          "id": "mode",
+          "kind": "select",
+          "label": "Mode",
+          "control_id": "mode",
+          "options": [{ "value": "identity", "label": "Identity" }]
+        }
+      ]
+    },
+    {
+      "section_id": "output",
+      "title": "Output",
+      "region": "output",
+      "columns": 1,
+      "widgets": [
+        {
+          "id": "monitor",
+          "kind": "monitor",
+          "label": "Monitor"
+        }
+      ]
+    }
+  ]
+}

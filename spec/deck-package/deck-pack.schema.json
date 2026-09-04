@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/f00br/latentdeck/main/spec/deck-package/deck-pack.schema.json",
+  "title": "LatentDeck Deck Package Manifest 1.0",
+  "description": "Machine-readable shape for deck-pack.json. Cross-file, ordering, compatibility, path, and closed-tree checks are enforced by latentdeck-extension-manager.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version",
+    "kind",
+    "deck_id",
+    "deck_version",
+    "display_name",
+    "summary",
+    "publisher",
+    "license",
+    "compatibility",
+    "runtime",
+    "signal",
+    "faceplate_path",
+    "integrity"
+  ],
+  "properties": {
+    "manifest_version": { "const": "1.0.0" },
+    "kind": { "const": "deck_pack" },
+    "deck_id": { "$ref": "#/$defs/reverseDns" },
+    "deck_version": { "$ref": "#/$defs/packageVersion" },
+    "display_name": { "$ref": "#/$defs/displayText" },
+    "summary": { "$ref": "#/$defs/summaryText" },
+    "publisher": { "$ref": "#/$defs/publisher" },
+    "license": { "$ref": "#/$defs/license" },
+    "compatibility": { "$ref": "#/$defs/compatibility" },
+    "runtime": { "$ref": "#/$defs/runtime" },
+    "signal": { "$ref": "#/$defs/signal" },
+    "faceplate_path": { "const": "faceplate.json" },
+    "integrity": { "$ref": "#/$defs/integrity" }
+  },
+  "$defs": {
+    "semver": {
+      "type": "string",
+      "maxLength": 120,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-(?:(?:0|[1-9][0-9]*)|(?:[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))(?:\\.(?:(?:0|[1-9][0-9]*)|(?:[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "packageVersion": {
+      "type": "string",
+      "maxLength": 115,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-(?:(?:0|[1-9][0-9]*)|(?:[0-9a-z-]*[a-z-][0-9a-z-]*))(?:\\.(?:(?:0|[1-9][0-9]*)|(?:[0-9a-z-]*[a-z-][0-9a-z-]*)))*)?(?:\\+[0-9a-z-]+(?:\\.[0-9a-z-]+)*)?$"
+    },
+    "reverseDns": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 160,
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+    },
+    "localId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^[a-z0-9_-]+$"
+    },
+    "displayText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "pattern": "^[^\\u0000\\r\\n]+$"
+    },
+    "summaryText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500,
+      "pattern": "^[^\\u0000\\r\\n]+$"
+    },
+    "portablePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[ -~]+$"
+    },
+    "publisher": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "url", "identity_claim"],
+      "properties": {
+        "name": { "$ref": "#/$defs/displayText" },
+        "url": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "maxLength": 500, "pattern": "^https://" }
+          ]
+        },
+        "identity_claim": { "const": "self_declared" }
+      }
+    },
+    "license": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["spdx_or_label", "notice_path"],
+      "properties": {
+        "spdx_or_label": { "$ref": "#/$defs/displayText" },
+        "notice_path": { "$ref": "#/$defs/portablePath" }
+      }
+    },
+    "python": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["implementation", "version", "platform_tag"],
+      "properties": {
+        "implementation": { "const": "cpython" },
+        "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+(?:\\.[0-9]+)?$" },
+        "platform_tag": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "app_min_inclusive",
+        "app_max_exclusive",
+        "deck_host_api",
+        "worker_protocol",
+        "deck_operator_api",
+        "tensor_abi",
+        "python",
+        "torch_exact_build"
+      ],
+      "properties": {
+        "app_min_inclusive": { "$ref": "#/$defs/semver" },
+        "app_max_exclusive": { "$ref": "#/$defs/semver" },
+        "deck_host_api": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "worker_protocol": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "deck_operator_api": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "tensor_abi": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "python": { "$ref": "#/$defs/python" },
+        "torch_exact_build": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "operator_descriptor_path", "python_root", "entrypoint"],
+      "properties": {
+        "kind": { "const": "python_operator_stream_v1" },
+        "operator_descriptor_path": { "const": "operator.json" },
+        "python_root": { "$ref": "#/$defs/portablePath" },
+        "entrypoint": {
+          "type": "string",
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)*:[A-Za-z0-9_]+$"
+        }
+      }
+    },
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role_id", "display_name"],
+      "properties": {
+        "role_id": { "$ref": "#/$defs/localId" },
+        "display_name": { "type": "string", "minLength": 1, "maxLength": 80 }
+      }
+    },
+    "geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dtype", "device", "batch", "channels", "temporal", "height", "width"],
+      "properties": {
+        "dtype": { "enum": ["fp16", "fp32"] },
+        "device": { "enum": ["cpu", "cuda"] },
+        "batch": { "const": 1 },
+        "channels": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "temporal": { "const": 1 },
+        "height": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "width": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "timing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frames_per_second_numerator", "frames_per_second_denominator", "samples_per_slot"],
+      "properties": {
+        "frames_per_second_numerator": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "frames_per_second_denominator": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "samples_per_slot": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+      }
+    },
+    "capability": {
+      "enum": ["player", "realtime", "resample", "snapshot_capture", "live_capture", "raw_import"]
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["codec_family", "profile", "profile_version"],
+      "properties": {
+        "codec_family": { "$ref": "#/$defs/localId" },
+        "profile": { "$ref": "#/$defs/localId" },
+        "profile_version": { "$ref": "#/$defs/semver" }
+      }
+    },
+    "signal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "slots",
+        "roles",
+        "default_permutation",
+        "structural_carrier_role",
+        "geometry_allowlist",
+        "timing",
+        "required_capabilities",
+        "profile_allowlist"
+      ],
+      "properties": {
+        "slots": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "roles": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "$ref": "#/$defs/role" } },
+        "default_permutation": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "$ref": "#/$defs/localId" } },
+        "structural_carrier_role": { "$ref": "#/$defs/localId" },
+        "geometry_allowlist": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "$ref": "#/$defs/geometry" } },
+        "timing": { "$ref": "#/$defs/timing" },
+        "required_capabilities": { "type": "array", "minItems": 1, "maxItems": 6, "uniqueItems": true, "items": { "$ref": "#/$defs/capability" } },
+        "profile_allowlist": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/profile" } }
+          ]
+        }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["catalog_path", "catalog_sha256"],
+      "properties": {
+        "catalog_path": { "const": "integrity.json" },
+        "catalog_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    }
+  }
+}

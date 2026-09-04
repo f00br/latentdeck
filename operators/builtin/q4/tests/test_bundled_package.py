@@ -227,7 +227,7 @@ def test_q4_integrity_catalog_and_deterministic_ld_are_exact(tmp_path: Path) -> 
         "package_id": "org.latentdeck.deck.q4",
         "package_version": "0.2.1",
     }
-    assert inspected["file_count"] == 8
+    assert inspected["file_count"] == 9
 
     implementation_path = "python/latentdeck_operator_q4/operator.py"
     unpacked = tmp_path / "unpacked"

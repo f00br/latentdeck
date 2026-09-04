@@ -17,6 +17,12 @@ uv build --wheel sdk/python
 Install the wheel emitted under the ignored `dist/` directory with
 `uv pip install path/to/latentdeck_cartridge-0.1.0-*.whl`.
 
+The Windows wheel is built against PyO3's CPython 3.12 stable ABI and is tagged
+`cp312-abi3-win_amd64`, so the same prebuilt native wheel supports CPython 3.12
+and 3.13 x64. Other Python versions, architectures, and operating systems are
+outside this preview wheel contract. The public Comfy Recorder bundle carries
+this exact wheel and never falls back to a local Rust build.
+
 ## Python API
 
 ```python

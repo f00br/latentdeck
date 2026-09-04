@@ -5,6 +5,13 @@ bindings, LatentPlayer preparation workflow, and the latentdeck-cartridge
 command-line tool. Every surface delegates to this crate rather than
 maintaining a second parser or raw-H3 packer.
 
+New Rust integrations should begin with the deliberately small
+`latentdeck_cartridge::sdk` facade. It re-exports the supported manifest,
+inspection, validation, hashing, atomic authoring, and genealogy-aware
+resampling types without requiring callers to navigate internal module
+boundaries. Specialized low-level modules remain available, but are not the
+recommended discovery surface.
+
 Implemented boundaries:
 
 - deterministic, STORE-only canonical ZIP64 writing;
