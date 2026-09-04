@@ -84,7 +84,10 @@ Protocol 1, another installed pack, CPU, another asset, or hidden conversion.
 
 First run the synthetic adapter's CPU contract test. Assemble the declared
 isolated runtime only when package lifecycle testing is needed; keep generated
-runtime bytes untracked.
+runtime bytes untracked. On Windows, copying `python.exe` alone is not a valid
+portable CPython runtime: include its adjacent versioned runtime DLL
+(`python313.dll` for the supported CPython 3.13 runtime) and the standard
+library/runtime files declared by your lock.
 
 ```powershell
 uv run --no-sync pytest codec-host/python/tests/test_public_synthetic_codec.py

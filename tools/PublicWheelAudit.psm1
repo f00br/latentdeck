@@ -1,5 +1,7 @@
 Set-StrictMode -Version Latest
 
+Import-Module (Join-Path $PSScriptRoot 'PublicNativeBuild.psm1')
+
 function Assert-PublicProjectWheel {
     [CmdletBinding()]
     param(
@@ -26,14 +28,6 @@ function Assert-PublicProjectWheel {
         throw "$Context is not a bounded regular wheel: $Path"
     }
 
-    $forbiddenRoots = @(
-        foreach ($root in $ForbiddenPathRoot) {
-            if ([string]::IsNullOrWhiteSpace($root)) {
-                throw "$Context received an empty forbidden path root."
-            }
-            [System.IO.Path]::GetFullPath($root).Replace('\', '/').TrimEnd('/')
-        }
-    )
     $expectedTimestamp = [datetime]::new(1980, 1, 1, 0, 0, 0)
     $seen = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::Ordinal
@@ -43,6 +37,7 @@ function Assert-PublicProjectWheel {
         if ($archive.Entries.Count -eq 0 -or $archive.Entries.Count -gt 4096) {
             throw "$Context has an empty or unbounded ZIP entry set."
         }
+        [int64]$totalExpandedBytes = 0
         foreach ($entry in $archive.Entries) {
             $name = [string]$entry.FullName
             if ([string]::IsNullOrWhiteSpace($name) -or $name.Length -gt 4096 -or
@@ -58,22 +53,55 @@ function Assert-PublicProjectWheel {
                 throw "$Context contains an unexpected embedded build SBOM: $name"
             }
 
+            if ($entry.Length -lt 0 -or $entry.Length -gt 128MB) {
+                throw "$Context contains an oversized ZIP entry: $name"
+            }
+            $totalExpandedBytes += [int64]$entry.Length
+            if ($totalExpandedBytes -gt 512MB) {
+                throw "$Context has an unbounded expanded ZIP payload."
+            }
+            if ($name.EndsWith('/')) {
+                if ($entry.Length -ne 0) {
+                    throw "$Context contains a non-empty directory entry: $name"
+                }
+                continue
+            }
+
+            $entryStream = $entry.Open()
+            try {
+                $memory = [System.IO.MemoryStream]::new()
+                try {
+                    $entryStream.CopyTo($memory)
+                    $entryBytes = $memory.ToArray()
+                }
+                finally {
+                    $memory.Dispose()
+                }
+            }
+            finally {
+                $entryStream.Dispose()
+            }
+            Assert-PublicBytesPathHygiene `
+                -Bytes $entryBytes `
+                -ForbiddenPathRoot $ForbiddenPathRoot `
+                -Context "$Context entry $name"
+
             $baseName = [System.IO.Path]::GetFileName($name)
             $isTextMetadata = (
                 $name -match '(?i)\.(?:cfg|csv|ini|json|md|pth|py|toml|txt)$' -or
                 $baseName -cin @('METADATA', 'RECORD', 'WHEEL', 'entry_points.txt')
             )
-            if (-not $isTextMetadata -or $name.EndsWith('/')) {
+            if (-not $isTextMetadata) {
                 continue
             }
             if ($entry.Length -gt 16MB) {
                 throw "$Context contains oversized text metadata: $name"
             }
 
-            $entryStream = $entry.Open()
+            $textStream = [System.IO.MemoryStream]::new($entryBytes, $false)
             try {
                 $reader = [System.IO.StreamReader]::new(
-                    $entryStream,
+                    $textStream,
                     [System.Text.UTF8Encoding]::new($false, $true),
                     $true,
                     4096,
@@ -90,14 +118,9 @@ function Assert-PublicProjectWheel {
                 }
             }
             finally {
-                $entryStream.Dispose()
+                $textStream.Dispose()
             }
 
-            foreach ($root in $forbiddenRoots) {
-                if ($text.IndexOf($root, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                    throw "$Context contains a machine-local build path in ${name}: $root"
-                }
-            }
             if ($text -match '(?i)(?:path\+)?file:///(?:[a-z]:/|(?:home|users|tmp|private|workspace|workspaces)/)') {
                 throw "$Context contains a machine-local file URI in ${name}."
             }

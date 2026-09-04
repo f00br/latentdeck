@@ -35,6 +35,8 @@ if ($ReleaseChannel -cnotin @('unsigned_preview', 'stable')) {
 Import-Module (Join-Path $PSScriptRoot 'ReleaseLicenseBundle.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'SafetensorsNativeClosure.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'CodecPackPackaging.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'PublicNativeBuild.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'PublicWheelAudit.psm1') -Force
 
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $sourceBefore = Get-PackagingSourceState -RepositoryRoot $repoRoot
@@ -311,11 +313,14 @@ try {
 
     $savedRustFlags = $env:RUSTFLAGS
     $savedEncodedRustFlags = $env:CARGO_ENCODED_RUSTFLAGS
+    $savedSourceDateEpoch = $env:SOURCE_DATE_EPOCH
+    $nativeBuildPolicy = New-PublicRustBuildPolicy `
+        -RepositoryRoot $repoRoot `
+        -AdditionalForbiddenPathRoot @($workRoot) `
+        -AdditionalRemapPathRoot @($workRoot)
     try {
-        $env:RUSTFLAGS = '-C link-arg=/Brepro'
-        if (Test-Path -LiteralPath 'Env:CARGO_ENCODED_RUSTFLAGS') {
-            Remove-Item -LiteralPath 'Env:CARGO_ENCODED_RUSTFLAGS' -ErrorAction Stop
-        }
+        $env:SOURCE_DATE_EPOCH = '315532800'
+        Set-PublicRustBuildPolicy -Policy $nativeBuildPolicy
 
         foreach ($project in $localProjects) {
             $buildArguments = @(
@@ -331,12 +336,37 @@ try {
                 -Context "local wheel build for $project"
         }
     } finally {
-        $env:RUSTFLAGS = $savedRustFlags
-        $env:CARGO_ENCODED_RUSTFLAGS = $savedEncodedRustFlags
+        if ($null -eq $savedRustFlags) {
+            Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue
+        } else {
+            $env:RUSTFLAGS = $savedRustFlags
+        }
+        if ($null -eq $savedEncodedRustFlags) {
+            Remove-Item Env:CARGO_ENCODED_RUSTFLAGS -ErrorAction SilentlyContinue
+        } else {
+            $env:CARGO_ENCODED_RUSTFLAGS = $savedEncodedRustFlags
+        }
+        if ($null -eq $savedSourceDateEpoch) {
+            Remove-Item Env:SOURCE_DATE_EPOCH -ErrorAction SilentlyContinue
+        } else {
+            $env:SOURCE_DATE_EPOCH = $savedSourceDateEpoch
+        }
     }
     $wheelPaths = @(Get-ChildItem -LiteralPath $wheels -Filter '*.whl' -File | Sort-Object Name)
     if ($wheelPaths.Count -ne $localProjects.Count) {
         throw 'Local Codec Pack wheel build did not produce the exact expected wheel count.'
+    }
+    foreach ($wheel in $wheelPaths) {
+        $wheelAuditParameters = @{
+            Path = $wheel.FullName
+            ForbiddenPathRoot = $nativeBuildPolicy.ForbiddenPathRoots
+            Context = "H3 Codec Pack local wheel $($wheel.Name)"
+            RequireDeterministicTimestamps = $true
+        }
+        if ($wheel.Name -clike 'latentdeck_cartridge-*.whl') {
+            $wheelAuditParameters.ForbidEmbeddedSbom = $true
+        }
+        Assert-PublicProjectWheel @wheelAuditParameters | Out-Null
     }
     $localInstallArguments = @(
         'pip', 'install', '--target', $sitePackages, '--python-version', '3.13',

@@ -56,15 +56,28 @@ function New-TestWheel {
                     $Timestamp,
                     [TimeSpan]::Zero
                 )
-                $writer = [System.IO.StreamWriter]::new(
-                    $entry.Open(),
-                    [System.Text.UTF8Encoding]::new($false)
-                )
+                $entryStream = $entry.Open()
                 try {
-                    $writer.Write([string]$Entries[$name])
+                    $value = $Entries[$name]
+                    if ($value -is [byte[]]) {
+                        $entryStream.Write($value, 0, $value.Length)
+                    } else {
+                        $writer = [System.IO.StreamWriter]::new(
+                            $entryStream,
+                            [System.Text.UTF8Encoding]::new($false),
+                            4096,
+                            $true
+                        )
+                        try {
+                            $writer.Write([string]$value)
+                        }
+                        finally {
+                            $writer.Dispose()
+                        }
+                    }
                 }
                 finally {
-                    $writer.Dispose()
+                    $entryStream.Dispose()
                 }
             }
         }
@@ -100,6 +113,32 @@ try {
     Assert-Throws -ExpectedText 'machine-local build path' -Action {
         Assert-PublicProjectWheel `
             -Path $localPath `
+            -ForbiddenPathRoot @($repositoryRoot, $testRoot) `
+            -RequireDeterministicTimestamps | Out-Null
+    }
+
+    $binaryPath = Join-Path $testRoot 'binary-path-1.0.0-py3-none-any.whl'
+    New-TestWheel -Path $binaryPath -Entries @{
+        'binary_path/_native.pyd' = [System.Text.Encoding]::UTF8.GetBytes(
+            "binary-prefix $repositoryRoot\crates\cartridge binary-suffix"
+        )
+    }
+    Assert-Throws -ExpectedText 'machine-local build path' -Action {
+        Assert-PublicProjectWheel `
+            -Path $binaryPath `
+            -ForbiddenPathRoot @($repositoryRoot, $testRoot) `
+            -RequireDeterministicTimestamps | Out-Null
+    }
+
+    $binaryUtf16Path = Join-Path $testRoot 'binary-utf16-path-1.0.0-py3-none-any.whl'
+    New-TestWheel -Path $binaryUtf16Path -Entries @{
+        'binary_utf16_path/_native.pyd' = [System.Text.Encoding]::Unicode.GetBytes(
+            "binary-prefix $repositoryRoot\crates\cartridge binary-suffix"
+        )
+    }
+    Assert-Throws -ExpectedText 'machine-local build path' -Action {
+        Assert-PublicProjectWheel `
+            -Path $binaryUtf16Path `
             -ForbiddenPathRoot @($repositoryRoot, $testRoot) `
             -RequireDeterministicTimestamps | Out-Null
     }

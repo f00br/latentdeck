@@ -79,6 +79,26 @@ try {
     }
 
     Write-TestFile -Path (Join-Path $workerModule 'worker.py')
+    $missingDllRejected = $false
+    try {
+        & $builder `
+            -PythonRuntimeRoot $runtime `
+            -PythonSitePackages $pythonPackages `
+            -WorkerSitePackages $workerPackages `
+            -OutputRoot (Join-Path $testRoot 'missing-dll-output') `
+            -PackVersion '0.1.0' | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notmatch 'python313\.dll') {
+            throw
+        }
+        $missingDllRejected = $true
+    }
+    if (-not $missingDllRejected) {
+        throw 'Linked Codec Pack builder accepted an incomplete CPython runtime without python313.dll.'
+    }
+    Write-TestFile -Path (Join-Path $runtime 'python313.dll')
+
     $validOutput = Join-Path $testRoot 'valid-output'
     & $builder `
         -PythonRuntimeRoot $runtime `

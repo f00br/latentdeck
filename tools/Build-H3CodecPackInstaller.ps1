@@ -20,6 +20,7 @@ Set-StrictMode -Version Latest
 $ProgressPreference = 'SilentlyContinue'
 
 Import-Module (Join-Path $PSScriptRoot 'CodecPackPackaging.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'PublicNativeBuild.psm1') -Force
 
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $sourceBefore = Get-PackagingSourceState -RepositoryRoot $repoRoot
@@ -303,15 +304,19 @@ try {
     $helperTargetRoot = Join-Path $artifactsRoot 'codec-pack-installer-target'
     $savedTargetDirectory = $env:CARGO_TARGET_DIR
     $savedRustFlags = $env:RUSTFLAGS
+    $savedEncodedRustFlags = $env:CARGO_ENCODED_RUSTFLAGS
+    $savedCargoSourceDateEpoch = $env:SOURCE_DATE_EPOCH
     $savedAuthorizationFile = $env:LATENTDECK_H3_AUTHORIZATION_FILE
+    $nativeBuildPolicy = New-PublicRustBuildPolicy `
+        -RepositoryRoot $repoRoot `
+        -AdditionalForbiddenPathRoot @($workRoot, $helperTargetRoot) `
+        -AdditionalRemapPathRoot @($workRoot, $helperTargetRoot) `
+        -AdditionalRustArgument @('-C', 'target-feature=+crt-static')
     try {
         $env:CARGO_TARGET_DIR = $helperTargetRoot
         $env:LATENTDECK_H3_AUTHORIZATION_FILE = $helperAuthorizationPath
-        if ([string]::IsNullOrWhiteSpace($savedRustFlags)) {
-            $env:RUSTFLAGS = '-C target-feature=+crt-static'
-        } else {
-            $env:RUSTFLAGS = "$savedRustFlags -C target-feature=+crt-static"
-        }
+        $env:SOURCE_DATE_EPOCH = '315532800'
+        Set-PublicRustBuildPolicy -Policy $nativeBuildPolicy
         $cargoBuildArguments = @(
             'build', '--locked', '--release',
             '--target', 'x86_64-pc-windows-msvc',
@@ -326,7 +331,21 @@ try {
         }
     } finally {
         $env:CARGO_TARGET_DIR = $savedTargetDirectory
-        $env:RUSTFLAGS = $savedRustFlags
+        if ($null -eq $savedRustFlags) {
+            Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue
+        } else {
+            $env:RUSTFLAGS = $savedRustFlags
+        }
+        if ($null -eq $savedEncodedRustFlags) {
+            Remove-Item Env:CARGO_ENCODED_RUSTFLAGS -ErrorAction SilentlyContinue
+        } else {
+            $env:CARGO_ENCODED_RUSTFLAGS = $savedEncodedRustFlags
+        }
+        if ($null -eq $savedCargoSourceDateEpoch) {
+            Remove-Item Env:SOURCE_DATE_EPOCH -ErrorAction SilentlyContinue
+        } else {
+            $env:SOURCE_DATE_EPOCH = $savedCargoSourceDateEpoch
+        }
         $env:LATENTDECK_H3_AUTHORIZATION_FILE = $savedAuthorizationFile
     }
     $helperPath = Join-Path `
@@ -334,6 +353,10 @@ try {
         'x86_64-pc-windows-msvc/release/latentdeck-codec-pack-installer.exe'
     $helperPath = (Resolve-Path -LiteralPath $helperPath).Path
     Assert-WindowsPe -Path $helperPath -ExpectedMachine 0x8664 -Label 'Codec Pack lifecycle helper'
+    Assert-PublicNativeBinary `
+        -Path $helperPath `
+        -ForbiddenPathRoot $nativeBuildPolicy.ForbiddenPathRoots `
+        -Context 'Codec Pack lifecycle helper' | Out-Null
     $helperSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $helperPath).Hash.ToLowerInvariant()
 
     $nsisParameters = @{}
@@ -528,6 +551,10 @@ try {
     }
 
     Assert-WindowsPe -Path $setupStagePath -ExpectedMachine 0x014C -Label 'Codec Pack setup'
+    Assert-PublicNativeBinary `
+        -Path $setupStagePath `
+        -ForbiddenPathRoot $nativeBuildPolicy.ForbiddenPathRoots `
+        -Context 'Codec Pack NSIS setup' | Out-Null
     $setup = Get-Item -LiteralPath $setupStagePath
     if ($setup.Length -gt 64MB) {
         throw 'Codec Pack setup unexpectedly embedded the large payload or exceeded 64 MiB.'

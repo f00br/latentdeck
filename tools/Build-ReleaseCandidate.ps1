@@ -34,6 +34,7 @@ if ($PSBoundParameters.ContainsKey('SbomPath')) {
 Import-Module (Join-Path $PSScriptRoot 'ReleaseSpoutMetadata.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'TauriReleaseContract.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'ReleaseLicenseBundle.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'PublicNativeBuild.psm1') -Force
 
 $applicationApiVersion = '0.1.0'
 $windowsInstallerVersion = '0.1.0+1'
@@ -1084,9 +1085,19 @@ foreach ($temporary in @(
 $previousCargoTarget = $env:CARGO_TARGET_DIR
 $previousPath = $env:PATH
 $previousSpoutSourceRoot = $env:LATENTDECK_SPOUT2_SOURCE_ROOT
+$previousRustFlags = $env:RUSTFLAGS
+$previousEncodedRustFlags = $env:CARGO_ENCODED_RUSTFLAGS
+$previousSourceDateEpoch = $env:SOURCE_DATE_EPOCH
+$previousNsisSourceDateEpoch = $env:NSIS_SOURCE_DATE_EPOCH
+$nativeBuildPolicy = New-PublicRustBuildPolicy `
+    -RepositoryRoot $repoRoot `
+    -AdditionalForbiddenPathRoot @($buildRoot, $outputStage) `
+    -AdditionalRemapPathRoot @($buildRoot)
 try {
     [System.IO.Directory]::CreateDirectory($buildRoot) | Out-Null
     [System.IO.Directory]::CreateDirectory($outputStage) | Out-Null
+    $env:SOURCE_DATE_EPOCH = '315532800'
+    $env:NSIS_SOURCE_DATE_EPOCH = '1741475120'
 
     $nodeRoot = & (Join-Path $PSScriptRoot 'Get-PinnedNode.ps1')
     $env:PATH = "$nodeRoot;$previousPath"
@@ -1200,6 +1211,7 @@ try {
     $env:LATENTDECK_SPOUT2_SOURCE_ROOT = $privateSpoutRoot
 
     $env:CARGO_TARGET_DIR = Join-Path $buildRoot 't'
+    Set-PublicRustBuildPolicy -Policy $nativeBuildPolicy
     $tauriArguments = @(
         'exec', 'tauri', 'build',
         '--ci',
@@ -1237,6 +1249,14 @@ try {
     Assert-TauriEmbeddedFrontendBinary `
         -BinaryPath (Join-Path $releaseBinaryRoot 'latentplayer-app.exe') `
         -FrontendDistPath (Join-Path $playerRoot 'dist')
+    Assert-PublicNativeBinary `
+        -Path (Join-Path $releaseBinaryRoot 'latentdeck-app.exe') `
+        -ForbiddenPathRoot $nativeBuildPolicy.ForbiddenPathRoots `
+        -Context 'LatentDeck application binary' | Out-Null
+    Assert-PublicNativeBinary `
+        -Path (Join-Path $releaseBinaryRoot 'latentplayer-app.exe') `
+        -ForbiddenPathRoot $nativeBuildPolicy.ForbiddenPathRoots `
+        -Context 'LatentPlayer application binary' | Out-Null
 
     Assert-ReleaseLocksUnchanged `
         -CargoLockPath $cargoLockPath `
@@ -1302,6 +1322,10 @@ try {
             )
         }
         Assert-PlausibleInstaller -Path $source
+        Assert-PublicNativeBinary `
+            -Path $source `
+            -ForbiddenPathRoot $nativeBuildPolicy.ForbiddenPathRoots `
+            -Context "$($expected.product) NSIS setup" | Out-Null
         $authenticode = Get-AuthenticodeSignature -LiteralPath $source
         if ($ReleaseChannel -ceq 'unsigned_preview' -and
             $authenticode.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned) {
@@ -1572,6 +1596,26 @@ try {
     $env:CARGO_TARGET_DIR = $previousCargoTarget
     $env:PATH = $previousPath
     $env:LATENTDECK_SPOUT2_SOURCE_ROOT = $previousSpoutSourceRoot
+    if ($null -eq $previousRustFlags) {
+        Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue
+    } else {
+        $env:RUSTFLAGS = $previousRustFlags
+    }
+    if ($null -eq $previousEncodedRustFlags) {
+        Remove-Item Env:CARGO_ENCODED_RUSTFLAGS -ErrorAction SilentlyContinue
+    } else {
+        $env:CARGO_ENCODED_RUSTFLAGS = $previousEncodedRustFlags
+    }
+    if ($null -eq $previousSourceDateEpoch) {
+        Remove-Item Env:SOURCE_DATE_EPOCH -ErrorAction SilentlyContinue
+    } else {
+        $env:SOURCE_DATE_EPOCH = $previousSourceDateEpoch
+    }
+    if ($null -eq $previousNsisSourceDateEpoch) {
+        Remove-Item Env:NSIS_SOURCE_DATE_EPOCH -ErrorAction SilentlyContinue
+    } else {
+        $env:NSIS_SOURCE_DATE_EPOCH = $previousNsisSourceDateEpoch
+    }
     if (Test-Path -LiteralPath $buildRoot) {
         Assert-ChildPath -ParentPath $artifactsRoot -CandidatePath $buildRoot | Out-Null
         Assert-PathComponentsNotReparsePoints -Path $buildRoot

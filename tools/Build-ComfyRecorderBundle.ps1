@@ -14,6 +14,7 @@ Set-StrictMode -Version Latest
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 Import-Module (Join-Path $PSScriptRoot 'ReleaseLicenseBundle.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'SafetensorsNativeClosure.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'PublicNativeBuild.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'PublicWheelAudit.psm1') -Force
 if (-not [System.IO.Path]::IsPathRooted($OutputDirectory)) {
     $OutputDirectory = Join-Path $repositoryRoot $OutputDirectory
@@ -318,8 +319,15 @@ try {
     $bundleWheels = Join-Path $bundleRoot 'wheels'
     [System.IO.Directory]::CreateDirectory($bundleWheels) | Out-Null
 
+    $nativeBuildPolicy = New-PublicRustBuildPolicy `
+        -RepositoryRoot $repositoryRoot `
+        -AdditionalForbiddenPathRoot @($scratchRoot) `
+        -AdditionalRemapPathRoot @($scratchRoot)
     $priorSourceDateEpoch = $env:SOURCE_DATE_EPOCH
+    $priorRustFlags = $env:RUSTFLAGS
+    $priorEncodedRustFlags = $env:CARGO_ENCODED_RUSTFLAGS
     $env:SOURCE_DATE_EPOCH = '315532800'
+    Set-PublicRustBuildPolicy -Policy $nativeBuildPolicy
     Push-Location $repositoryRoot
     try {
         Invoke-Checked -Context 'Cartridge SDK wheel build' -Command {
@@ -340,6 +348,16 @@ try {
         } else {
             $env:SOURCE_DATE_EPOCH = $priorSourceDateEpoch
         }
+        if ($null -eq $priorRustFlags) {
+            Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue
+        } else {
+            $env:RUSTFLAGS = $priorRustFlags
+        }
+        if ($null -eq $priorEncodedRustFlags) {
+            Remove-Item Env:CARGO_ENCODED_RUSTFLAGS -ErrorAction SilentlyContinue
+        } else {
+            $env:CARGO_ENCODED_RUSTFLAGS = $priorEncodedRustFlags
+        }
     }
 
     $sdkWheel = @(
@@ -358,13 +376,13 @@ try {
     }
     Assert-PublicProjectWheel `
         -Path $sdkWheel[0].FullName `
-        -ForbiddenPathRoot @($repositoryRoot, $scratchRoot) `
+        -ForbiddenPathRoot $nativeBuildPolicy.ForbiddenPathRoots `
         -Context 'Cartridge SDK wheel' `
         -RequireDeterministicTimestamps `
         -ForbidEmbeddedSbom | Out-Null
     Assert-PublicProjectWheel `
         -Path $recorderWheel[0].FullName `
-        -ForbiddenPathRoot @($repositoryRoot, $scratchRoot) `
+        -ForbiddenPathRoot $nativeBuildPolicy.ForbiddenPathRoots `
         -Context 'Comfy Recorder wheel' `
         -RequireDeterministicTimestamps | Out-Null
 

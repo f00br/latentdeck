@@ -68,6 +68,14 @@ $pthFiles = @($runtimeFiles | Where-Object { $_.Name -match '^python\d+\._pth$' 
 if ($pthFiles.Count -ne 1) {
     throw 'PythonRuntimeRoot must contain exactly one pythonNNN._pth file.'
 }
+$pythonRuntimeStem = [regex]::Match(
+    $pthFiles[0].Name,
+    '^(python\d+)\._pth$'
+).Groups[1].Value
+$pythonRuntimeDll = "$pythonRuntimeStem.dll"
+if (-not ($runtimeFiles.Name -contains $pythonRuntimeDll)) {
+    throw "PythonRuntimeRoot does not contain matching $pythonRuntimeDll."
+}
 
 foreach ($file in $runtimeFiles) {
     if ($file.FullName -ne $pthFiles[0].FullName) {

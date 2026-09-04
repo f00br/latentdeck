@@ -149,7 +149,7 @@ pub fn scaffold(request: &ScaffoldRequest) -> Result<ScaffoldReceipt> {
             (
                 false,
                 Some(
-                    "Supply runtime/python.exe matching codec-pack.json and runtime/runtime.lock."
+                    "Supply runtime/python.exe and runtime/python313.dll matching codec-pack.json and runtime/runtime.lock."
                         .to_owned(),
                 ),
             )
@@ -1058,7 +1058,7 @@ fn write_codec_scaffold(root: &Path, package: &PackageReference) -> Result<()> {
     write_scaffold_file(
         root,
         "runtime/README.md",
-        b"# Isolated runtime\n\nSupply `python.exe`, the Codec Host, Codec SDK, adapter dependencies, and licenses that exactly match `runtime.lock`. The source repository must not vendor an unrelated local environment.\n",
+        b"# Isolated runtime\n\nSupply `python.exe`, its matching versioned runtime DLL (`python313.dll` for the declared CPython 3.13 runtime), the Codec Host, Codec SDK, adapter dependencies, and licenses that exactly match `runtime.lock`. The source repository must not vendor an unrelated local environment.\n",
     )?;
     write_scaffold_file(root, "NOTICE.txt", notice_placeholder().as_bytes())
 }

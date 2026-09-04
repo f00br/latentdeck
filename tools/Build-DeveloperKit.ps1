@@ -23,6 +23,7 @@ if ($ReleaseChannel -cnotin @('unsigned_preview', 'stable')) {
 
 Import-Module (Join-Path $PSScriptRoot 'ReleaseLicenseBundle.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'SafetensorsNativeClosure.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'PublicNativeBuild.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'PublicWheelAudit.psm1') -Force
 
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
@@ -918,6 +919,12 @@ $exampleSpecs = @(
 
 $savedCargoTarget = $env:CARGO_TARGET_DIR
 $savedSourceDateEpoch = $env:SOURCE_DATE_EPOCH
+$savedRustFlags = $env:RUSTFLAGS
+$savedEncodedRustFlags = $env:CARGO_ENCODED_RUSTFLAGS
+$nativeBuildPolicy = New-PublicRustBuildPolicy `
+    -RepositoryRoot $repositoryRoot `
+    -AdditionalForbiddenPathRoot @($buildRoot, $outputStage) `
+    -AdditionalRemapPathRoot @($buildRoot)
 try {
     [System.IO.Directory]::CreateDirectory($buildRoot) | Out-Null
     [System.IO.Directory]::CreateDirectory($outputStage) | Out-Null
@@ -948,6 +955,7 @@ try {
         throw "Developer Kit requires pinned uv 0.11.8; found '$uvVersion'."
     }
     $env:SOURCE_DATE_EPOCH = '315532800'
+    Set-PublicRustBuildPolicy -Policy $nativeBuildPolicy
     $projectInventory = [System.Collections.Generic.List[object]]::new()
     foreach ($spec in $projectSpecs) {
         $identity = Get-ProjectIdentity -ProjectPath $spec.Path
@@ -967,7 +975,7 @@ try {
         }
         $wheelAuditParameters = @{
             Path = $wheel.FullName
-            ForbiddenPathRoot = @($repositoryRoot, $buildRoot)
+            ForbiddenPathRoot = $nativeBuildPolicy.ForbiddenPathRoots
             Context = "Developer Kit wheel $($identity.Name)"
             RequireDeterministicTimestamps = $true
         }
@@ -1012,6 +1020,10 @@ try {
             $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
             throw "Developer Kit CLI is not a plausible bounded Windows PE: $name"
         }
+        Assert-PublicNativeBinary `
+            -Path $item.FullName `
+            -ForbiddenPathRoot $nativeBuildPolicy.ForbiddenPathRoots `
+            -Context "Developer Kit CLI $name" | Out-Null
         $destination = Join-Path $binaryRoot $name
         [System.IO.File]::Copy($item.FullName, $destination, $false)
         $cliInventory.Add([pscustomobject]@{
@@ -1623,6 +1635,16 @@ workflow from the repository's locked environment or documented runtime profile.
         Remove-Item Env:SOURCE_DATE_EPOCH -ErrorAction SilentlyContinue
     } else {
         $env:SOURCE_DATE_EPOCH = $savedSourceDateEpoch
+    }
+    if ($null -eq $savedRustFlags) {
+        Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue
+    } else {
+        $env:RUSTFLAGS = $savedRustFlags
+    }
+    if ($null -eq $savedEncodedRustFlags) {
+        Remove-Item Env:CARGO_ENCODED_RUSTFLAGS -ErrorAction SilentlyContinue
+    } else {
+        $env:CARGO_ENCODED_RUSTFLAGS = $savedEncodedRustFlags
     }
     foreach ($temporary in @(
         [pscustomobject]@{ Path = $buildRoot; Prefix = '.developer-kit-build-' },

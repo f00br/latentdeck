@@ -203,7 +203,12 @@ try {
     Assert-Condition -Condition (Test-Path -LiteralPath $pythonRuntime.path -PathType Leaf) `
         -Message 'The current base Python executable does not exist.'
     $packagedPython = Join-Path $codecSource 'runtime/python.exe'
+    $runtimeDllName = "python$([int]$pythonRuntime.version[0])$([int]$pythonRuntime.version[1]).dll"
+    $runtimeDll = Join-Path (Split-Path -Parent $pythonRuntime.path) $runtimeDllName
+    Assert-Condition -Condition (Test-Path -LiteralPath $runtimeDll -PathType Leaf) `
+        -Message "The current base Python runtime DLL does not exist: $runtimeDllName"
     Copy-Item -LiteralPath $pythonRuntime.path -Destination $packagedPython
+    Copy-Item -LiteralPath $runtimeDll -Destination (Join-Path $codecSource "runtime/$runtimeDllName")
     & $packagedPython -c `
         'import sys; assert sys.version_info[:2] == (3, 13); assert sys.maxsize > 2**32'
     if ($LASTEXITCODE -ne 0) {
@@ -226,7 +231,8 @@ try {
     Assert-Condition -Condition (
         @($deckBuild.included_files) -contains 'operator.json' -and
         @($deckBuild.included_files) -contains 'faceplate.json' -and
-        @($codecBuild.included_files) -contains 'runtime/python.exe'
+        @($codecBuild.included_files) -contains 'runtime/python.exe' -and
+        @($codecBuild.included_files) -contains "runtime/$runtimeDllName"
     ) -Message 'Build receipts do not expose the expected reviewable included-file catalogs.'
     $deckInspection = Invoke-CargoExtensionManager -Arguments @(
         'inspect', '--archive', $deckArchive, '--expected-sha256',

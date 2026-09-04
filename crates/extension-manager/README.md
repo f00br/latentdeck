@@ -16,8 +16,9 @@ cargo run -p latentdeck-extension-manager -- scaffold --kind codec --id org.exam
 
 A Deck scaffold is immediately buildable. A Codec scaffold deliberately does
 not copy or invent an isolated Python runtime: add the exact declared
-`runtime/python.exe`, Codec Host, SDK, adapter dependencies, licenses, and
-runtime lock before building.
+`runtime/python.exe`, its adjacent versioned runtime DLL (`python313.dll` for
+CPython 3.13), Codec Host, SDK, adapter dependencies, licenses, and runtime lock
+before building.
 
 Build from author-friendly source without editing it:
 

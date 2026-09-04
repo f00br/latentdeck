@@ -68,6 +68,7 @@ try {
         uv run --no-sync pytest -q tools/tests/test_codec_pack_curator.py
     } 'Codec Pack curator tests'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-DeveloperOnboarding.ps1 } 'Developer onboarding contract'
+    Invoke-Checked { pwsh -NoProfile -File tools/Test-PublicNativeBuild.ps1 } 'Public native build contract'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-PublicWheelAudit.ps1 } 'Public project-wheel audit contract'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-ComfyRecorderBundle.ps1 } 'Comfy Recorder bundle contract'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-LinkedDevCodecPack.ps1 } 'Linked development Codec Pack contract'

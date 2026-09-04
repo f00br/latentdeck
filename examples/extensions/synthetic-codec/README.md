@@ -24,9 +24,10 @@ is not overwritten.
 
 The repository deliberately does not contain an embedded Python runtime. To
 turn the source into `.ldcodec`, supply an isolated CPython 3.13 runtime at
-`runtime/python.exe`, install the Codec Host, Codec SDK, matching Torch build,
-and this `adapter.py` in that runtime, then replace `runtime/runtime.lock` with
-the exact lock and update its SHA-256 in `codec-pack.json`.
+`runtime/python.exe` together with its adjacent `runtime/python313.dll`, install
+the Codec Host, Codec SDK, matching Torch build, and this `adapter.py` in that
+runtime, then replace `runtime/runtime.lock` with the exact lock and update its
+SHA-256 in `codec-pack.json`.
 
 Run the CPU-only contract test without packaging a runtime:
 
