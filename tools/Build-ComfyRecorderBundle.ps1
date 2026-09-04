@@ -384,7 +384,8 @@ try {
         -Path $recorderWheel[0].FullName `
         -ForbiddenPathRoot $nativeBuildPolicy.ForbiddenPathRoots `
         -Context 'Comfy Recorder wheel' `
-        -RequireDeterministicTimestamps | Out-Null
+        -RequireDeterministicTimestamps `
+        -ForbidEmbeddedSbom | Out-Null
 
     $resolvedSafetensors = (Resolve-Path -LiteralPath $SafetensorsWheelPath).Path
     Assert-NoReparseAncestor -Path $resolvedSafetensors -Context 'Safetensors wheel input'

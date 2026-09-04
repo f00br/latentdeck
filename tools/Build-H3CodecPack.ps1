@@ -362,9 +362,7 @@ try {
             ForbiddenPathRoot = $nativeBuildPolicy.ForbiddenPathRoots
             Context = "H3 Codec Pack local wheel $($wheel.Name)"
             RequireDeterministicTimestamps = $true
-        }
-        if ($wheel.Name -clike 'latentdeck_cartridge-*.whl') {
-            $wheelAuditParameters.ForbidEmbeddedSbom = $true
+            ForbidEmbeddedSbom = $true
         }
         Assert-PublicProjectWheel @wheelAuditParameters | Out-Null
     }

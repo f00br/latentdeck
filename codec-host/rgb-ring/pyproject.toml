@@ -20,3 +20,9 @@ exclude = [
     "src/latentdeck_rgb_ring/*.pdb",
     "latentdeck_rgb_ring/*.pdb",
 ]
+
+# Release bundles already carry an artifact-scoped, lock-generated SBOM for
+# the complete Python and Rust closure. Maturin's build-local Rust SBOM is
+# disabled here because its path identities are not portable between builders.
+[tool.maturin.sbom]
+rust = false

@@ -1205,6 +1205,7 @@ try {
         '`$savedEncodedRustFlags = `$env:CARGO_ENCODED_RUSTFLAGS',
         'New-PublicRustBuildPolicy',
         'Set-PublicRustBuildPolicy -Policy `$nativeBuildPolicy',
+        'ForbidEmbeddedSbom = `$true',
         'Assert-PublicProjectWheel @wheelAuditParameters',
         'Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue',
         'Remove-Item Env:CARGO_ENCODED_RUSTFLAGS -ErrorAction SilentlyContinue'
@@ -1217,6 +1218,18 @@ try {
                 'Build-H3CodecPack.ps1 lost its reproducible, path-hygienic native wheel ' +
                 "contract fragment: $requiredNativeBuildFragment"
             )
+        }
+    }
+    foreach ($nativeWheelProject in @(
+        'sdk/python/pyproject.toml',
+        'codec-host/rgb-ring/pyproject.toml'
+    )) {
+        $nativeWheelConfiguration = Get-Content -Raw -LiteralPath (
+            Join-Path (Split-Path -Parent $PSScriptRoot) $nativeWheelProject
+        )
+        if ($nativeWheelConfiguration -cnotmatch
+            '(?ms)^\[tool\.maturin\.sbom\]\s*^rust\s*=\s*false\s*$') {
+            throw "$nativeWheelProject must disable Maturin's non-portable embedded Rust SBOM."
         }
     }
     foreach ($requiredSupplyChainFragment in @(

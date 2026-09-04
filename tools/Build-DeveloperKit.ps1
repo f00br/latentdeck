@@ -978,9 +978,7 @@ try {
             ForbiddenPathRoot = $nativeBuildPolicy.ForbiddenPathRoots
             Context = "Developer Kit wheel $($identity.Name)"
             RequireDeterministicTimestamps = $true
-        }
-        if ($identity.Name -ceq 'latentdeck-cartridge') {
-            $wheelAuditParameters.ForbidEmbeddedSbom = $true
+            ForbidEmbeddedSbom = $true
         }
         Assert-PublicProjectWheel @wheelAuditParameters | Out-Null
         $projectInventory.Add([pscustomobject]@{
