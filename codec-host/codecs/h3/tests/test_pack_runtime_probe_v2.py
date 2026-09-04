@@ -17,7 +17,7 @@ def _manifest() -> dict[str, object]:
         "manifest_version": "2.0.0",
         "kind": "codec_pack",
         "pack_id": "org.latentdeck.h3",
-        "pack_version": "0.2.0",
+        "pack_version": "0.2.1",
         "compatibility": {
             "worker_protocol": 2,
             "codec_adapter_api": 1,
@@ -88,7 +88,7 @@ def test_probe_exercises_exact_h3_protocol2_preload_boundary() -> None:
         "selected_version": 2,
         "worker_protocol": 2,
     }
-    assert runtime["adapter"]["pack_version"] == "0.2.0"
+    assert runtime["adapter"]["pack_version"] == "0.2.1"
     assert runtime["adapter"]["adapter_version"] == "0.2.0"
     assert runtime["adapter"]["capabilities"] == _manifest()["capabilities"]
     assert runtime["preload_guards"] == {

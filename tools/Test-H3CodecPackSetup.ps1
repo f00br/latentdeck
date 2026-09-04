@@ -294,6 +294,100 @@ function Write-SyntheticDependencyMetadata {
         [string]$PackVersion
     )
 
+    $sourceCommit = 'c' * 40
+    $metadataRoot = Split-Path -Parent $InventoryPath
+    $nativeSbomPath = Join-Path $metadataRoot 'NATIVE_RUST_SBOM.cdx.json'
+    $nativeLicensesPath = Join-Path $metadataRoot 'NATIVE_RUST_LICENSES.json'
+    $nativeArtifactName = 'LatentDeck H3 Native Extensions'
+    $nativeArtifactReference = "pkg:generic/LatentDeck%20H3%20Native%20Extensions@$PackVersion"
+    $nativeComponents = @(
+        foreach ($nativeName in @('latentdeck-cartridge-python', 'latentdeck-gpu-python')) {
+            [ordered]@{
+                'bom-ref' = "rust:$nativeName@0.1.0"
+                type = 'library'
+                name = $nativeName
+                version = '0.1.0'
+                licenses = @([ordered]@{ license = [ordered]@{ name = 'Apache-2.0' } })
+                properties = @(
+                    [ordered]@{ name = 'latentdeck:ecosystem'; value = 'rust' }
+                    [ordered]@{ name = 'latentdeck:dependency-scope'; value = 'artifact' }
+                    [ordered]@{ name = 'latentdeck:selection-root'; value = 'true' }
+                )
+            }
+        }
+    )
+    $nativeRoot = [ordered]@{
+        'bom-ref' = $nativeArtifactReference
+        type = 'application'
+        name = $nativeArtifactName
+        version = $PackVersion
+        licenses = @([ordered]@{ license = [ordered]@{ name = 'Apache-2.0' } })
+        properties = @(
+            [ordered]@{ name = 'latentdeck:artifact-scope'; value = 'h3-native' }
+            [ordered]@{ name = 'latentdeck:dependency-scope'; value = 'artifact' }
+            [ordered]@{ name = 'latentdeck:target-platform'; value = 'x86_64-pc-windows-msvc' }
+        )
+    }
+    Write-Utf8Text -Path $nativeSbomPath -Content (([ordered]@{
+        bomFormat = 'CycloneDX'
+        specVersion = '1.5'
+        serialNumber = 'urn:uuid:00000000-0000-0000-0000-000000000001'
+        version = 1
+        metadata = [ordered]@{ component = $nativeRoot }
+        components = $nativeComponents
+    } | ConvertTo-Json -Depth 32) + "`n")
+    $nativeLicenseText = "Synthetic Apache-2.0 fixture text.`n"
+    $nativeLicenseBytes = [System.Text.UTF8Encoding]::new($false).GetBytes($nativeLicenseText)
+    $nativeLicenseHash = [System.Convert]::ToHexString(
+        [System.Security.Cryptography.SHA256]::HashData($nativeLicenseBytes)
+    ).ToLowerInvariant()
+    $nativeMappings = @(
+        foreach ($mappingEntry in @(
+            [pscustomobject]@{ Component = $nativeRoot; Ecosystem = 'artifact' }
+            @($nativeComponents | ForEach-Object {
+                [pscustomobject]@{ Component = $_; Ecosystem = 'rust' }
+            })
+        )) {
+            [ordered]@{
+                'bom-ref' = [string]$mappingEntry.Component.'bom-ref'
+                name = [string]$mappingEntry.Component.name
+                version = [string]$mappingEntry.Component.version
+                ecosystem = [string]$mappingEntry.Ecosystem
+                dependency_scope = 'artifact'
+                license_expression = 'Apache-2.0'
+                artifacts = @($nativeArtifactName)
+                disposition = 'license_text_in_bundle'
+                rationale = ''
+                text_sha256s = @($nativeLicenseHash)
+            }
+        }
+    )
+    $nativeSbomItem = Get-Item -LiteralPath $nativeSbomPath
+    Write-Utf8Text -Path $nativeLicensesPath -Content (([ordered]@{
+        schema_version = 1
+        artifact = [ordered]@{ name = $nativeArtifactName; version = $PackVersion }
+        policy = [ordered]@{
+            component_coverage = 'exact-sbom-closure'
+            redistributed_components_require_text = $true
+            build_only_disposition = 'not_redistributed_no_text_required'
+            text_canonicalization = 'strict-utf8-lf-final-newline'
+        }
+        sboms = @([ordered]@{
+            name = 'NATIVE_RUST_SBOM.cdx.json'
+            artifact = $nativeArtifactName
+            byte_length = [int64]$nativeSbomItem.Length
+            sha256 = (Get-FileHash -LiteralPath $nativeSbomPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        })
+        component_count = $nativeMappings.Count
+        text_count = 1
+        components = $nativeMappings
+        texts = @([ordered]@{
+            sha256 = $nativeLicenseHash
+            byte_length = [int64]$nativeLicenseBytes.Length
+            sources = @([ordered]@{ source_kind = 'synthetic-test' })
+            text = $nativeLicenseText
+        })
+    } | ConvertTo-Json -Depth 32) + "`n")
     $components = @(
         [ordered]@{
             name = 'CPython'
@@ -308,7 +402,7 @@ function Write-SyntheticDependencyMetadata {
             name = 'latentdeck-codec-h3'
             version = '0.2.0'
             kind = 'repository'
-            source_url = 'https://latentdeck.org/'
+            source_url = 'https://github.com/f00br/latentdeck'
             license_expression = 'Apache-2.0'
             license_files = @()
             content_sha256 = ('b' * 64)
@@ -318,12 +412,21 @@ function Write-SyntheticDependencyMetadata {
         schema_version = 1
         pack_id = 'org.latentdeck.h3'
         pack_version = $PackVersion
+        source_commit = $sourceCommit
         platform = 'windows-x86_64'
         curator = [ordered]@{
             name = 'latentdeck-codec-pack-curator'
             schema_version = 1
         }
         components = $components
+        native_rust = [ordered]@{
+            sbom_path = 'NATIVE_RUST_SBOM.cdx.json'
+            sbom_sha256 = (Get-FileHash -LiteralPath $nativeSbomPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            license_bundle_path = 'NATIVE_RUST_LICENSES.json'
+            license_bundle_sha256 = (Get-FileHash -LiteralPath $nativeLicensesPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            component_count = $nativeComponents.Count
+            selection_roots = @('latentdeck-cartridge-python', 'latentdeck-gpu-python')
+        }
     } | ConvertTo-Json -Depth 16) + "`n")
 
     $sbomComponents = @(
@@ -338,6 +441,10 @@ function Write-SyntheticDependencyMetadata {
                 externalReferences = @(
                     [ordered]@{ type = 'distribution'; url = $component.source_url }
                 )
+                properties = @(
+                    [ordered]@{ name = 'latentdeck:ecosystem'; value = 'python' }
+                    [ordered]@{ name = 'latentdeck:dependency-scope'; value = 'runtime' }
+                )
             }
         }
     )
@@ -351,9 +458,24 @@ function Write-SyntheticDependencyMetadata {
                 type = 'application'
                 name = 'LatentDeck H3 Codec Pack'
                 version = $PackVersion
+                licenses = @([ordered]@{ expression = 'Apache-2.0' })
+                properties = @(
+                    [ordered]@{ name = 'latentdeck:source-commit'; value = $sourceCommit }
+                    [ordered]@{ name = 'latentdeck:artifact-scope'; value = 'h3-codec-pack' }
+                    [ordered]@{ name = 'latentdeck:dependency-scope'; value = 'artifact' }
+                    [ordered]@{
+                        name = 'latentdeck:included-dependency-scopes'
+                        value = 'artifact,runtime,build,runtime+build'
+                    }
+                    [ordered]@{
+                        name = 'latentdeck:excluded-dependency-scopes'
+                        value = 'development'
+                    }
+                    [ordered]@{ name = 'latentdeck:target-platform'; value = 'windows-x86_64' }
+                )
             }
         }
-        components = $sbomComponents
+        components = @($sbomComponents) + @($nativeComponents)
     } | ConvertTo-Json -Depth 16) + "`n")
 }
 
@@ -491,12 +613,12 @@ function New-SyntheticPackFixture {
         format = 'safetensors'
         accepted_variants = @(
             [ordered]@{
-                variant_id = 'madebyollin-taeh3-e743234f'
+                variant_id = 'madebyollin-taeh3-62f7591f'
                 sha256 = '4fd022bfcab08772fe0536b17ea1a3bbb5625be11e397868d1c5d891863d4c13'
                 byte_length = 22709752
-                source_url = 'https://huggingface.co/madebyollin/taehv/resolve/main/taeh3.safetensors'
+                source_url = 'https://raw.githubusercontent.com/madebyollin/taehv/62f7591f59dfbb4c3c02b7a621d180a9eeaba26c/safetensors/taeh3.safetensors'
                 license_label = 'MIT'
-                license_url = 'https://github.com/madebyollin/taehv/blob/e743234f/LICENSE'
+                license_url = 'https://github.com/madebyollin/taehv/blob/62f7591f59dfbb4c3c02b7a621d180a9eeaba26c/LICENSE'
             }
         )
     } | ConvertTo-Json -Depth 16) + "`n")
@@ -515,6 +637,15 @@ function New-SyntheticPackFixture {
         throw 'Synthetic Codec Pack builder did not return exactly one archive.'
     }
     $archivePath = (Resolve-Path -LiteralPath ([string]$archiveOutput[0])).Path
+    $packageReceipt = Get-Content -Raw -LiteralPath (
+        Join-Path (Split-Path -Parent $archivePath) 'package-receipt.json'
+    ) | ConvertFrom-Json -Depth 32
+    if ([int]$packageReceipt.schema_version -ne 1 -or
+        [string]$packageReceipt.pack_id -cne 'org.latentdeck.h3' -or
+        [string]$packageReceipt.pack_version -cne $PackVersion -or
+        [string]$packageReceipt.adapter_version -cne '0.2.0') {
+        throw 'Synthetic H3 package receipt does not bind its exact adapter identity.'
+    }
     $expandedRoot = Join-Path $fixtureRoot 'expanded'
     Expand-SafeCodecPackArchive -ArchivePath $archivePath -DestinationPath $expandedRoot
     Test-H3CodecPackDirectory `
@@ -705,6 +836,41 @@ function New-UninstallArguments {
 
 try {
     [System.IO.Directory]::CreateDirectory($testRoot) | Out-Null
+
+    $mutationRepository = Join-Path $testRoot 'source-mutation-repository'
+    [System.IO.Directory]::CreateDirectory($mutationRepository) | Out-Null
+    & git -C $mutationRepository init --initial-branch=main | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Could not initialize the packaging source-mutation fixture.'
+    }
+    & git -C $mutationRepository config user.name 'LatentDeck contract test'
+    & git -C $mutationRepository config user.email 'contract-test@invalid.example'
+    Write-Utf8Text -Path (Join-Path $mutationRepository 'source.txt') -Content "before`n"
+    & git -C $mutationRepository add -- source.txt
+    & git -C $mutationRepository commit -m 'source fixture' | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Could not commit the packaging source-mutation fixture.'
+    }
+    $sourceBeforeMutation = Get-PackagingSourceState -RepositoryRoot $mutationRepository
+    Write-Utf8Text -Path (Join-Path $mutationRepository 'source.txt') -Content "after`n"
+    $sourceAfterMutation = Get-PackagingSourceState -RepositoryRoot $mutationRepository
+    $mutationRejected = $false
+    try {
+        Assert-PackagingSourceStateUnchanged `
+            -Before $sourceBeforeMutation `
+            -After $sourceAfterMutation `
+            -Context 'Synthetic source'
+    } catch {
+        if ($_.Exception.Message -like '*changed while the artifact was being built*') {
+            $mutationRejected = $true
+        } else {
+            throw
+        }
+    }
+    Assert-Condition `
+        -Condition $mutationRejected `
+        -Message 'Packaging source mutation was not rejected by the shared H3 source-state gate.'
+
     $fullPackBuilderCommand = Get-Command (
         Join-Path $PSScriptRoot 'Build-H3CodecPack.ps1'
     )
@@ -735,6 +901,46 @@ try {
             'H3 builders do not preserve the installer network/signing boundaries ' +
             'or expose an untrusted prebuilt-helper bypass.'
         )
+
+    $fullPackBuilderSource = Get-Content -LiteralPath $fullPackBuilderCommand.Source -Raw
+    $setupBuilderSource = Get-Content -LiteralPath $setupBuilderCommand.Source -Raw
+    $sourceCaptureIndex = $fullPackBuilderSource.IndexOf(
+        '$sourceBefore = Get-PackagingSourceState',
+        [System.StringComparison]::Ordinal
+    )
+    $artifactCreationIndex = $fullPackBuilderSource.IndexOf(
+        '[System.IO.Directory]::CreateDirectory($artifactsRoot)',
+        [System.StringComparison]::Ordinal
+    )
+    Assert-Condition `
+        -Condition (
+            $sourceCaptureIndex -ge 0 -and
+            $artifactCreationIndex -gt $sourceCaptureIndex -and
+            $fullPackBuilderSource -cmatch 'Assert-PackagingSourceStateUnchanged' -and
+            $fullPackBuilderSource -cmatch 'public_snapshot_sha256' -and
+            $fullPackBuilderSource -cmatch 'sidecars = \$sidecars'
+        ) `
+        -Message 'Full H3 build no longer captures, rechecks, and receipt-binds its public source snapshot.'
+    Assert-Condition `
+        -Condition (
+            $setupBuilderSource.IndexOf(
+                '$sourceBefore = Get-PackagingSourceState',
+                [System.StringComparison]::Ordinal
+            ) -ge 0 -and
+            $setupBuilderSource.IndexOf(
+                '[System.IO.Directory]::CreateDirectory($artifactsRoot)',
+                [System.StringComparison]::Ordinal
+            ) -gt $setupBuilderSource.IndexOf(
+                '$sourceBefore = Get-PackagingSourceState',
+                [System.StringComparison]::Ordinal
+            ) -and
+            $setupBuilderSource -cmatch 'Assert-PackagingSourceStateUnchanged' -and
+            $setupBuilderSource -cmatch '\$publicationRoot\s*=\s*Join-Path \$workRoot' -and
+            $setupBuilderSource -cmatch '"/DOUTPUT_PATH=\$setupStagePath"' -and
+            $setupBuilderSource -cmatch '\[System\.IO\.File\]::Move\(\$publication\.Source, \$publication\.Destination, \$false\)' -and
+            $setupBuilderSource -cmatch 'Length -gt 1MB'
+        ) `
+        -Message 'H3 setup builder no longer uses bounded private staging and no-overwrite publication.'
 
     $offlineProbeRoot = Join-Path $testRoot 'offline-nsis-probe'
     $offlineProbeTools = Join-Path $offlineProbeRoot 'tools'
@@ -1001,6 +1207,38 @@ try {
     ).GetString($rustLicensesOneBytes)
     $reproInstallerSbom = Get-Content -LiteralPath $reproSbomOne -Raw |
         ConvertFrom-Json -Depth 100
+    $installerSbomComponentsWithoutLicense = @(
+        $reproInstallerSbom.components |
+            Where-Object {
+                $null -eq $_.PSObject.Properties['licenses'] -or @($_.licenses).Count -eq 0
+            }
+    )
+    $installerRootScopeProperties = @($reproInstallerSbom.metadata.component.properties)
+    $installerInvalidComponentScopes = @($reproInstallerSbom.components | Where-Object {
+        @($_.properties | Where-Object {
+            [string]$_.name -ceq 'latentdeck:dependency-scope' -and
+            [string]$_.value -cin @('artifact', 'runtime', 'build', 'runtime+build')
+        }).Count -ne 1
+    })
+    Assert-Condition `
+        -Condition (
+            @($reproInstallerSbom.metadata.component.licenses).Count -eq 1 -and
+            $installerSbomComponentsWithoutLicense.Count -eq 0 -and
+            @($installerRootScopeProperties | Where-Object {
+                [string]$_.name -ceq 'latentdeck:dependency-scope' -and
+                [string]$_.value -ceq 'artifact'
+            }).Count -eq 1 -and
+            @($installerRootScopeProperties | Where-Object {
+                [string]$_.name -ceq 'latentdeck:included-dependency-scopes' -and
+                [string]$_.value -ceq 'artifact,runtime,build,runtime+build'
+            }).Count -eq 1 -and
+            @($installerRootScopeProperties | Where-Object {
+                [string]$_.name -ceq 'latentdeck:excluded-dependency-scopes' -and
+                [string]$_.value -ceq 'development'
+            }).Count -eq 1 -and
+            $installerInvalidComponentScopes.Count -eq 0
+        ) `
+        -Message 'Installer SBOM license review is incomplete.'
     $rustSbomComponents = @(
         $reproInstallerSbom.components |
             Where-Object {
@@ -1027,6 +1265,14 @@ try {
                 [System.Convert]::ToBase64String($rustLicensesTwoBytes) -and
             $rustSbomComponents.Count -gt 0 -and
             $missingRustLicenseSections.Count -eq 0 -and
+            $rustLicensesText.Contains(
+                'Reviewed upstream source commit: 6af37d89619fdcb06d8ab82d02dbe6b3d1a4d1a7',
+                [System.StringComparison]::Ordinal
+            ) -and
+            $rustLicensesText.Contains(
+                'Reviewed upstream source commit: d74c030d9dc4f3cae02146d1f497ff62726ef09a',
+                [System.StringComparison]::Ordinal
+            ) -and
             $rustLicensesText.IndexOf($repoRoot, [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
             $rustLicensesText.IndexOf($env:USERPROFILE, [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
             $rustLicensesText -cnotmatch '(?m)(?<![A-Za-z])[A-Z]:[\\/]'
@@ -1091,6 +1337,28 @@ try {
     Assert-Condition `
         -Condition ($fixture011.ArchiveSha256 -cne $fixture011Equivalent.ArchiveSha256) `
         -Message 'Equivalent-tree repack unexpectedly retained the original archive hash.'
+
+    $fixtureSbomPath = Join-Path $fixture011.ExpandedRoot 'SBOM.cdx.json'
+    $fixtureSbomOriginal = [System.IO.File]::ReadAllText($fixtureSbomPath)
+    $fixtureSbom = $fixtureSbomOriginal | ConvertFrom-Json -Depth 32
+    $fixtureSbom.components[0].hashes[0].content = ('f' * 64)
+    Write-Utf8Text `
+        -Path $fixtureSbomPath `
+        -Content (($fixtureSbom | ConvertTo-Json -Depth 32) + "`n")
+    $packagingModule = Get-Module -Name CodecPackPackaging | Select-Object -First 1
+    $provenanceFailure = & $packagingModule {
+        param($PackRoot, $PackVersion)
+        try {
+            Assert-CodecPackDependencyMetadata -PackRoot $PackRoot -PackVersion $PackVersion
+            return $null
+        } catch {
+            return $_.Exception.Message
+        }
+    } $fixture011.ExpandedRoot $fixture011.Version
+    Assert-Condition `
+        -Condition ([string]$provenanceFailure -match '(?i)incomplete provenance') `
+        -Message 'Codec Pack dependency validation accepted a false SBOM content digest.'
+    Write-Utf8Text -Path $fixtureSbomPath -Content $fixtureSbomOriginal
 
     $duplicateSumsRoot = Join-Path $testRoot 'duplicate-sums-artifacts'
     [System.IO.Directory]::CreateDirectory($duplicateSumsRoot) | Out-Null
@@ -1172,6 +1440,7 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($NsisRoot)) {
         $buildParameters.NsisRoot = $NsisRoot
     }
+    $expectedSetupSource = Get-PackagingSourceState -RepositoryRoot $repoRoot
     $setupOutput = @(& (Join-Path $PSScriptRoot 'Build-H3CodecPackInstaller.ps1') @buildParameters)
     if ($setupOutput.Count -eq 0) {
         throw 'Codec Pack setup builder did not return its setup executable path.'
@@ -1305,7 +1574,7 @@ try {
             $receipt.setup.sha256 -ceq $setupSha256 -and
             $receipt.setup.format -ceq 'nsis' -and
             $receipt.setup.scope -ceq 'current_user' -and
-            $receipt.setup.payload_delivery -ceq 'adjacent_hash_bound_zip' -and
+            $receipt.setup.payload_delivery -ceq 'adjacent_hash_bound_ldcodec' -and
             $receipt.payload.name -ceq $fixture011.ArchiveName -and
             [int64]$receipt.payload.byte_length -eq $fixture011.ArchiveLength -and
             $receipt.payload.sha256 -ceq $fixture011.ArchiveSha256 -and
@@ -1320,6 +1589,9 @@ try {
             $receipt.sbom.name -ceq 'installer-SBOM.cdx.json' -and
             [int64]$receipt.sbom.byte_length -eq [int64]$installerSbomItem.Length -and
             $receipt.sbom.sha256 -ceq $installerSbomSha256 -and
+            [int]$receipt.sbom.component_count -gt 1 -and
+            $receipt.sbom.license_review -ceq 'complete' -and
+            [int]$receipt.sbom.missing_license_component_count -eq 0 -and
             $receipt.notices.name -ceq 'INSTALLER_THIRD_PARTY_NOTICES.md' -and
             [int64]$receipt.notices.byte_length -eq [int64]$installerNoticesItem.Length -and
             $receipt.notices.sha256 -ceq $installerNoticesSha256 -and
@@ -1349,24 +1621,27 @@ try {
         ) `
         -Message 'Codec Pack setup receipt does not bind the exact setup, helper, and adjacent payload.'
 
-    $expectedCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
-    $expectedBranch = (& git -C $repoRoot branch --show-current).Trim()
-    $expectedGitTree = (& git -C $repoRoot rev-parse 'HEAD^{tree}').Trim()
-    $expectedDirty = @(
-        & git -C $repoRoot status --porcelain=v1 --untracked-files=all
-    ).Count -gt 0
-    $expectedPublicSnapshot = Get-PublicSourceSnapshot -RepositoryRoot $repoRoot
     Assert-Condition `
         -Condition (
-            $receipt.source.commit -ceq $expectedCommit -and
-            $receipt.source.branch -ceq $expectedBranch -and
-            [bool]$receipt.source.git_dirty -eq $expectedDirty -and
-            $receipt.source.git_tree -ceq $expectedGitTree -and
+            $receipt.source.commit -ceq [string]$expectedSetupSource.Commit -and
+            $receipt.source.branch -ceq [string]$expectedSetupSource.Branch -and
+            [bool]$receipt.source.git_dirty -eq [bool]$expectedSetupSource.Dirty -and
+            $receipt.source.git_tree -ceq [string]$expectedSetupSource.Tree -and
             $receipt.source.git_tree -cmatch '^[0-9a-f]{40}$' -and
-            $receipt.source.public_snapshot_sha256 -ceq $expectedPublicSnapshot.Sha256 -and
-            [int64]$receipt.source.public_snapshot_file_count -eq $expectedPublicSnapshot.FileCount
+            $receipt.source.public_snapshot_sha256 -ceq
+                [string]$expectedSetupSource.PublicSnapshotSha256 -and
+            [int64]$receipt.source.public_snapshot_file_count -eq
+                [int64]$expectedSetupSource.PublicSnapshotFileCount
         ) `
-        -Message 'Codec Pack setup receipt source identity is stale.'
+        -Message (
+            'Codec Pack setup receipt source identity is stale. ' +
+            "receipt(commit=$($receipt.source.commit), branch=$($receipt.source.branch), " +
+            "dirty=$($receipt.source.git_dirty), tree=$($receipt.source.git_tree), " +
+            "snapshot=$($receipt.source.public_snapshot_sha256)/$($receipt.source.public_snapshot_file_count)); " +
+            "expected(commit=$($expectedSetupSource.Commit), branch=$($expectedSetupSource.Branch), " +
+            "dirty=$($expectedSetupSource.Dirty), tree=$($expectedSetupSource.Tree), " +
+            "snapshot=$($expectedSetupSource.PublicSnapshotSha256)/$($expectedSetupSource.PublicSnapshotFileCount))."
+        )
 
     $installerSbom = Get-Content -LiteralPath $installerSbomPath -Raw |
         ConvertFrom-Json -Depth 100
@@ -1374,6 +1649,11 @@ try {
         -Condition (
             $installerSbom.bomFormat -ceq 'CycloneDX' -and
             $installerSbom.specVersion -ceq '1.5' -and
+            @($installerSbom.metadata.component.licenses).Count -eq 1 -and
+            @($installerSbom.components | Where-Object {
+                $null -eq $_.PSObject.Properties['licenses'] -or @($_.licenses).Count -eq 0
+            }).Count -eq 0 -and
+            [int]$receipt.sbom.component_count -eq @($installerSbom.components).Count -and
             @($installerSbom.components | Where-Object {
                 $_.name -ceq 'latentdeck-codec-pack-installer'
             }).Count -eq 1 -and
@@ -1388,7 +1668,17 @@ try {
             }).Count -eq 1 -and
             @($installerSbom.components | Where-Object {
                 $_.name -ceq 'winapi'
-            }).Count -eq 1
+            }).Count -eq 1 -and
+            @($installerSbom.metadata.component.properties | Where-Object {
+                [string]$_.name -ceq 'latentdeck:target-platform' -and
+                [string]$_.value -ceq 'x86_64-pc-windows-msvc'
+            }).Count -eq 1 -and
+            @($installerSbom.components | Where-Object {
+                @($_.properties | Where-Object {
+                    [string]$_.name -ceq 'latentdeck:dependency-scope' -and
+                    [string]$_.value -cin @('artifact', 'runtime', 'build', 'runtime+build')
+                }).Count -ne 1
+            }).Count -eq 0
         ) `
         -Message (
             'Installer SBOM does not match the Windows normal/build dependency closure ' +

@@ -275,7 +275,7 @@ fn production_private_gate_surface_is_generic_protocol2_only() {
         include_str!("../../../../codec-host/codecs/h3/src/latentdeck_codec_h3/adapter.py");
     for required in [
         "PACK_ID = \"org.latentdeck.h3\"",
-        "PACK_VERSION = \"0.2.0\"",
+        "PACK_VERSION = \"0.2.1\"",
         "ADAPTER_ID = \"org.latentdeck.h3\"",
         "ADAPTER_VERSION = \"0.2.0\"",
         "Capability.PLAYER",

@@ -22,6 +22,7 @@ $ProgressPreference = 'SilentlyContinue'
 Import-Module (Join-Path $PSScriptRoot 'CodecPackPackaging.psm1') -Force
 
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+$sourceBefore = Get-PackagingSourceState -RepositoryRoot $repoRoot
 $artifactsRoot = Join-Path $repoRoot 'artifacts'
 [System.IO.Directory]::CreateDirectory($artifactsRoot) | Out-Null
 Assert-SemVer -Value $PackVersion -Name 'PackVersion'
@@ -34,6 +35,7 @@ if (-not [string]::IsNullOrWhiteSpace($SigningCommand) -and
 }
 
 $resolvedArchive = (Resolve-Path -LiteralPath $ArchivePath).Path
+Assert-PathComponentsNotReparsePoints -Path $resolvedArchive
 $archive = Get-Item -LiteralPath $resolvedArchive -Force
 if ($archive.PSIsContainer -or
     ($archive.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
@@ -52,6 +54,7 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 }
 $outputRoot = [System.IO.Path]::GetFullPath($OutputDirectory)
 Assert-ChildPath -ParentPath $artifactsRoot -CandidatePath $outputRoot -AllowParent | Out-Null
+Assert-PathComponentsNotReparsePoints -Path $outputRoot
 [string]$archiveDirectory = [System.IO.Path]::GetFullPath($archive.DirectoryName).TrimEnd('\')
 if (-not [string]::Equals(
     $outputRoot.TrimEnd('\'),
@@ -70,12 +73,18 @@ $installerNsisCopyingPath = Join-Path $outputRoot 'INSTALLER_NSIS_COPYING.txt'
 $installerRustLicensesPath = Join-Path $outputRoot 'INSTALLER_RUST_LICENSES.txt'
 $sumsPath = Join-Path $outputRoot 'SHA256SUMS.txt'
 $sumLines = @()
+$initialSumsExists = Test-Path -LiteralPath $sumsPath
+$initialSumsSha256 = $null
 if (Test-Path -LiteralPath $sumsPath) {
     $sumsItem = Get-Item -LiteralPath $sumsPath -Force
     if ($sumsItem.PSIsContainer -or
-        ($sumsItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw 'Existing SHA256SUMS.txt must be a regular non-reparse file.'
+        ($sumsItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $sumsItem.Length -eq 0 -or $sumsItem.Length -gt 1MB) {
+        throw 'Existing SHA256SUMS.txt must be a bounded regular non-reparse file.'
     }
+    $initialSumsSha256 = (
+        Get-FileHash -LiteralPath $sumsPath -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
     $sumLines = @(
         Get-Content -LiteralPath $sumsPath |
             Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
@@ -106,6 +115,14 @@ Assert-SafeTemporaryDirectory `
     -ParentPath $artifactsRoot `
     -CandidatePath $workRoot `
     -RequiredLeafPrefix '.h3-codec-pack-installer-' | Out-Null
+$publicationRoot = Join-Path $workRoot 'publication'
+$setupStagePath = Join-Path $publicationRoot $setupName
+$setupReceiptStagePath = Join-Path $publicationRoot 'setup-receipt.json'
+$installerSbomStagePath = Join-Path $publicationRoot 'installer-SBOM.cdx.json'
+$installerNoticesStagePath = Join-Path $publicationRoot 'INSTALLER_THIRD_PARTY_NOTICES.md'
+$installerNsisCopyingStagePath = Join-Path $publicationRoot 'INSTALLER_NSIS_COPYING.txt'
+$installerRustLicensesStagePath = Join-Path $publicationRoot 'INSTALLER_RUST_LICENSES.txt'
+$sumsStagePath = Join-Path $publicationRoot 'SHA256SUMS.txt'
 
 function Assert-NsisDefineValue {
     param(
@@ -235,6 +252,7 @@ function Get-PublicSourceSnapshot {
 
 try {
     [System.IO.Directory]::CreateDirectory($workRoot) | Out-Null
+    [System.IO.Directory]::CreateDirectory($publicationRoot) | Out-Null
 
     $packRoot = Join-Path $workRoot 'expanded-pack'
     Expand-SafeCodecPackArchive -ArchivePath $resolvedArchive -DestinationPath $packRoot
@@ -351,7 +369,10 @@ try {
         -NsisRoot $resolvedNsisRoot `
         -AllowNetwork:$AllowNetwork
     if ($null -eq $installerSbom -or
-        -not (Test-Path -LiteralPath $installerSbomWorkPath -PathType Leaf)) {
+        -not (Test-Path -LiteralPath $installerSbomWorkPath -PathType Leaf) -or
+        [string]$installerSbom.LicenseReview -cne 'complete' -or
+        @($installerSbom.MissingLicenseComponents).Count -ne 0 -or
+        [int]$installerSbom.Components -le 0) {
         throw 'Codec Pack setup SBOM generation did not produce its expected file.'
     }
     $installerSbomSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $installerSbomWorkPath).Hash.ToLowerInvariant()
@@ -371,15 +392,9 @@ try {
         Get-FileHash -Algorithm SHA256 -LiteralPath $installerRustLicensesWorkPath
     ).Hash.ToLowerInvariant()
 
-    $sourceCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
-    $sourceBranch = (& git -C $repoRoot branch --show-current).Trim()
-    if ($LASTEXITCODE -ne 0 -or $sourceCommit -cnotmatch '^[0-9a-f]{40}$') {
-        throw 'Codec Pack setup could not resolve its source commit.'
-    }
-    $gitStatus = @(& git -C $repoRoot status --porcelain=v1 --untracked-files=all)
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Codec Pack setup could not inspect source status.'
-    }
+    $sourceCommit = [string]$sourceBefore.Commit
+    $sourceBranch = [string]$sourceBefore.Branch
+    $gitStatus = @($sourceBefore.Status)
     if (-not [string]::IsNullOrWhiteSpace($SigningCommand)) {
         if ($sourceBranch -cne 'main' -or $gitStatus.Count -ne 0) {
             throw 'A signed Codec Pack setup requires a clean main checkout.'
@@ -394,11 +409,11 @@ try {
             )
         }
     }
-    $sourceTree = (& git -C $repoRoot rev-parse ("{0}^{{tree}}" -f $sourceCommit)).Trim()
-    if ($LASTEXITCODE -ne 0 -or $sourceTree -cnotmatch '^[0-9a-f]{40}$') {
-        throw 'Codec Pack setup could not resolve its source tree.'
+    $sourceTree = [string]$sourceBefore.Tree
+    $sourceSnapshot = [pscustomobject]@{
+        Sha256 = [string]$sourceBefore.PublicSnapshotSha256
+        FileCount = [int64]$sourceBefore.PublicSnapshotFileCount
     }
-    $sourceSnapshot = Get-PublicSourceSnapshot -RepositoryRoot $repoRoot
 
     $metadataPath = Join-Path $workRoot 'install-metadata.json'
     Write-Utf8Json -Value ([ordered]@{
@@ -415,7 +430,7 @@ try {
             public_snapshot_file_count = $sourceSnapshot.FileCount
         }
         payload = [ordered]@{
-            delivery = 'adjacent_hash_bound_zip'
+            delivery = 'adjacent_hash_bound_ldcodec'
             name = $archive.Name
             byte_length = [int64]$archive.Length
             sha256 = $archiveSha256
@@ -457,7 +472,7 @@ try {
     $noticesSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $noticesPath).Hash.ToLowerInvariant()
     $iconPath = Join-Path $repoRoot 'apps/latentdeck/src-tauri/icons/icon.ico'
     foreach ($define in @(
-        $setupPath, $PackVersion, $archive.Name, $archiveSha256,
+        $setupStagePath, $PackVersion, $archive.Name, $archiveSha256,
         [string]$archive.Length, [string]$estimatedSizeKiB, $helperPath,
         $metadataPath, $licensePath, $noticesPath, $nsisCopyingSource,
         $installerSbomWorkPath, $installerRustLicensesWorkPath, $iconPath
@@ -472,7 +487,7 @@ try {
 
     $arguments = @(
         '/NOCONFIG', '/WX', '/V4', '/INPUTCHARSET', 'UTF8',
-        "/DOUTPUT_PATH=$setupPath",
+        "/DOUTPUT_PATH=$setupStagePath",
         "/DPACK_VERSION=$PackVersion",
         "/DPRODUCT_VERSION4=$productVersion4",
         "/DARCHIVE_NAME=$($archive.Name)",
@@ -512,12 +527,12 @@ try {
         $env:NSIS_SOURCE_DATE_EPOCH = $savedSourceDateEpoch
     }
 
-    Assert-WindowsPe -Path $setupPath -ExpectedMachine 0x014C -Label 'Codec Pack setup'
-    $setup = Get-Item -LiteralPath $setupPath
+    Assert-WindowsPe -Path $setupStagePath -ExpectedMachine 0x014C -Label 'Codec Pack setup'
+    $setup = Get-Item -LiteralPath $setupStagePath
     if ($setup.Length -gt 64MB) {
         throw 'Codec Pack setup unexpectedly embedded the large payload or exceeded 64 MiB.'
     }
-    $authenticode = Get-AuthenticodeSignature -LiteralPath $setupPath
+    $authenticode = Get-AuthenticodeSignature -LiteralPath $setupStagePath
     if ([string]::IsNullOrWhiteSpace($SigningCommand)) {
         if ($authenticode.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned) {
             throw 'Unsigned local Codec Pack setup unexpectedly crossed the signing boundary.'
@@ -549,52 +564,28 @@ try {
         installed_uninstaller_authenticode = 'not_run_clean_machine_gate'
     }
 
-    $finalSourceCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
-    if ($LASTEXITCODE -ne 0 -or $finalSourceCommit -cnotmatch '^[0-9a-f]{40}$') {
-        throw 'Codec Pack setup could not recheck its source commit.'
-    }
-    $finalSourceBranch = (& git -C $repoRoot branch --show-current).Trim()
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Codec Pack setup could not recheck its source branch.'
-    }
-    $finalGitStatus = @(
-        & git -C $repoRoot status --porcelain=v1 --untracked-files=all
-    )
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Codec Pack setup could not recheck source status.'
-    }
-    $finalSourceTree = (
-        & git -C $repoRoot rev-parse ("{0}^{{tree}}" -f $finalSourceCommit)
-    ).Trim()
-    if ($LASTEXITCODE -ne 0 -or $finalSourceTree -cnotmatch '^[0-9a-f]{40}$') {
-        throw 'Codec Pack setup could not recheck its source tree.'
-    }
-    $finalSourceSnapshot = Get-PublicSourceSnapshot -RepositoryRoot $repoRoot
-    if ($finalSourceCommit -cne $sourceCommit -or
-        $finalSourceBranch -cne $sourceBranch -or
-        $finalSourceTree -cne $sourceTree -or
-        ($finalGitStatus -join "`n") -cne ($gitStatus -join "`n") -or
-        $finalSourceSnapshot.Sha256 -cne $sourceSnapshot.Sha256 -or
-        $finalSourceSnapshot.FileCount -ne $sourceSnapshot.FileCount) {
-        throw 'Codec Pack setup source changed while the artifact was being built.'
-    }
+    $sourceAfter = Get-PackagingSourceState -RepositoryRoot $repoRoot
+    Assert-PackagingSourceStateUnchanged `
+        -Before $sourceBefore `
+        -After $sourceAfter `
+        -Context 'Codec Pack setup source'
 
-    $setupSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $setupPath).Hash.ToLowerInvariant()
+    $setupSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $setupStagePath).Hash.ToLowerInvariant()
 
-    [System.IO.File]::Copy($installerSbomWorkPath, $installerSbomPath, $false)
-    [System.IO.File]::Copy($noticesPath, $installerNoticesPath, $false)
-    [System.IO.File]::Copy($nsisCopyingSource, $installerNsisCopyingPath, $false)
+    [System.IO.File]::Copy($installerSbomWorkPath, $installerSbomStagePath, $false)
+    [System.IO.File]::Copy($noticesPath, $installerNoticesStagePath, $false)
+    [System.IO.File]::Copy($nsisCopyingSource, $installerNsisCopyingStagePath, $false)
     [System.IO.File]::Copy(
         $installerRustLicensesWorkPath,
-        $installerRustLicensesPath,
+        $installerRustLicensesStagePath,
         $false
     )
-    $installerNoticesLength = [int64](Get-Item -LiteralPath $installerNoticesPath).Length
-    $installerNsisCopyingLength = [int64](Get-Item -LiteralPath $installerNsisCopyingPath).Length
+    $installerNoticesLength = [int64](Get-Item -LiteralPath $installerNoticesStagePath).Length
+    $installerNsisCopyingLength = [int64](Get-Item -LiteralPath $installerNsisCopyingStagePath).Length
     $installerRustLicensesLength = [int64](
-        Get-Item -LiteralPath $installerRustLicensesPath
+        Get-Item -LiteralPath $installerRustLicensesStagePath
     ).Length
-    $installerSbomLength = [int64](Get-Item -LiteralPath $installerSbomPath).Length
+    $installerSbomLength = [int64](Get-Item -LiteralPath $installerSbomStagePath).Length
     Write-Utf8Json -Value ([ordered]@{
         schema_version = 1
         pack_id = 'org.latentdeck.h3'
@@ -606,7 +597,7 @@ try {
             sha256 = $setupSha256
             format = 'nsis'
             scope = 'current_user'
-            payload_delivery = 'adjacent_hash_bound_zip'
+            payload_delivery = 'adjacent_hash_bound_ldcodec'
         }
         payload = [ordered]@{
             name = $archive.Name
@@ -631,6 +622,9 @@ try {
             byte_length = $installerSbomLength
             sha256 = $installerSbomSha256
             format = 'CycloneDX-1.5'
+            component_count = [int]$installerSbom.Components
+            license_review = 'complete'
+            missing_license_component_count = 0
         }
         notices = [ordered]@{
             name = 'INSTALLER_THIRD_PARTY_NOTICES.md'
@@ -672,7 +666,7 @@ try {
         windows_setup_lifecycle = 'not_run_clean_machine_gate'
         signing = $signingEvidence
         publisher_signature = $publisherSignature
-    }) -Path $setupReceiptPath
+    }) -Path $setupReceiptStagePath
 
     $sidecarHashes = [ordered]@{}
     $sidecarHashes[[string]$setup.Name] = $setupSha256
@@ -681,7 +675,7 @@ try {
     $sidecarHashes['INSTALLER_NSIS_COPYING.txt'] = $nsisCopyingSha256
     $sidecarHashes['INSTALLER_RUST_LICENSES.txt'] = $installerRustLicensesSha256
     $sidecarHashes['setup-receipt.json'] = (
-        Get-FileHash -Algorithm SHA256 -LiteralPath $setupReceiptPath
+        Get-FileHash -Algorithm SHA256 -LiteralPath $setupReceiptStagePath
     ).Hash.ToLowerInvariant()
     foreach ($name in $sidecarHashes.Keys) {
         if (@($sumLines | Where-Object { $_ -match ('  ' + [regex]::Escape($name) + '$') }).Count -gt 0) {
@@ -689,13 +683,45 @@ try {
         }
         $sumLines += "$($sidecarHashes[$name])  $name"
     }
-    $sumsPartial = "$sumsPath.partial-$([guid]::NewGuid().ToString('N'))"
     [System.IO.File]::WriteAllText(
-        $sumsPartial,
+        $sumsStagePath,
         ($sumLines -join "`n") + "`n",
         [System.Text.UTF8Encoding]::new($false)
     )
-    [System.IO.File]::Move($sumsPartial, $sumsPath, $true)
+
+    Assert-PathComponentsNotReparsePoints -Path $outputRoot
+    foreach ($reservedOutput in @(
+        $setupPath,
+        $setupReceiptPath,
+        $installerSbomPath,
+        $installerNoticesPath,
+        $installerNsisCopyingPath,
+        $installerRustLicensesPath
+    )) {
+        if (Test-Path -LiteralPath $reservedOutput) {
+            throw "Codec Pack setup artifact destination appeared during build: $reservedOutput"
+        }
+    }
+    if ($initialSumsExists) {
+        if (-not (Test-Path -LiteralPath $sumsPath -PathType Leaf) -or
+            (Get-FileHash -LiteralPath $sumsPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+                $initialSumsSha256) {
+            throw 'Adjacent Codec Pack SHA256SUMS.txt changed during setup build.'
+        }
+    } elseif (Test-Path -LiteralPath $sumsPath) {
+        throw 'Adjacent Codec Pack SHA256SUMS.txt appeared during setup build.'
+    }
+    foreach ($publication in @(
+        [pscustomobject]@{ Source = $installerSbomStagePath; Destination = $installerSbomPath },
+        [pscustomobject]@{ Source = $installerNoticesStagePath; Destination = $installerNoticesPath },
+        [pscustomobject]@{ Source = $installerNsisCopyingStagePath; Destination = $installerNsisCopyingPath },
+        [pscustomobject]@{ Source = $installerRustLicensesStagePath; Destination = $installerRustLicensesPath },
+        [pscustomobject]@{ Source = $setupReceiptStagePath; Destination = $setupReceiptPath },
+        [pscustomobject]@{ Source = $setupStagePath; Destination = $setupPath }
+    )) {
+        [System.IO.File]::Move($publication.Source, $publication.Destination, $false)
+    }
+    [System.IO.File]::Move($sumsStagePath, $sumsPath, $initialSumsExists)
 
     Write-Output $setupPath
 } finally {

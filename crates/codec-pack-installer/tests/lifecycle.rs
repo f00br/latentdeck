@@ -132,12 +132,12 @@ fn write_h3_source(root: &Path, adapter_version: &str, profile: ProfileKey, asse
             byte_length: 22_709_752,
             sha256: asset_sha256.to_owned(),
             source_url: Some(
-                "https://huggingface.co/madebyollin/taehv/resolve/main/taeh3.safetensors"
+                "https://raw.githubusercontent.com/madebyollin/taehv/62f7591f59dfbb4c3c02b7a621d180a9eeaba26c/safetensors/taeh3.safetensors"
                     .to_owned(),
             ),
             license_label: "MIT".to_owned(),
             license_url: Some(
-                "https://github.com/madebyollin/taehv/blob/e743234f/LICENSE".to_owned(),
+                "https://github.com/madebyollin/taehv/blob/62f7591f59dfbb4c3c02b7a621d180a9eeaba26c/LICENSE".to_owned(),
             ),
         }],
         runtime_lock: RuntimeLockDescriptor {

@@ -23,10 +23,10 @@ const TAEH3_ASSET_ID: &str = "taeh3";
 const TAEH3_DISPLAY_NAME: &str = "TAEH3 decoder weight";
 const TAEH3_SHA256: &str = "4fd022bfcab08772fe0536b17ea1a3bbb5625be11e397868d1c5d891863d4c13";
 const TAEH3_BYTE_LENGTH: u64 = 22_709_752;
-const TAEH3_SOURCE_URL: &str =
-    "https://huggingface.co/madebyollin/taehv/resolve/main/taeh3.safetensors";
+const TAEH3_SOURCE_URL: &str = "https://raw.githubusercontent.com/madebyollin/taehv/62f7591f59dfbb4c3c02b7a621d180a9eeaba26c/safetensors/taeh3.safetensors";
 const TAEH3_LICENSE_LABEL: &str = "MIT";
-const TAEH3_LICENSE_URL: &str = "https://github.com/madebyollin/taehv/blob/e743234f/LICENSE";
+const TAEH3_LICENSE_URL: &str =
+    "https://github.com/madebyollin/taehv/blob/62f7591f59dfbb4c3c02b7a621d180a9eeaba26c/LICENSE";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct EmbeddedH3Authorization {

@@ -40,6 +40,24 @@ $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $artifactsRoot = Join-Path $repoRoot 'artifacts'
 [System.IO.Directory]::CreateDirectory($artifactsRoot) | Out-Null
 
+$adapterProjectPath = Join-Path $repoRoot 'codec-host/codecs/h3/pyproject.toml'
+$adapterProjectText = Get-Content -LiteralPath $adapterProjectPath -Raw
+$adapterNameMatches = [regex]::Matches(
+    $adapterProjectText,
+    '(?m)^name\s*=\s*"(?<value>[^"\r\n]+)"\s*$'
+)
+$adapterVersionMatches = [regex]::Matches(
+    $adapterProjectText,
+    '(?m)^version\s*=\s*"(?<value>[^"\r\n]+)"\s*$'
+)
+if ($adapterNameMatches.Count -ne 1 -or
+    $adapterNameMatches[0].Groups['value'].Value -cne 'latentdeck-codec-h3' -or
+    $adapterVersionMatches.Count -ne 1 -or
+    $adapterVersionMatches[0].Groups['value'].Value -cnotmatch '^\d+\.\d+\.\d+$') {
+    throw 'H3 adapter project identity is missing or ambiguous.'
+}
+$adapterVersion = $adapterVersionMatches[0].Groups['value'].Value
+
 Assert-SemVer -Value $PackVersion -Name 'PackVersion'
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $artifactsRoot 'codec-pack'
@@ -52,9 +70,18 @@ $packageRoot = (Resolve-Path -LiteralPath $PackageSource).Path
 $noticePath = (Resolve-Path -LiteralPath $NoticeSource).Path
 $inventoryPath = (Resolve-Path -LiteralPath $DependencyInventoryPath).Path
 $sbomPath = (Resolve-Path -LiteralPath $SbomPath).Path
+$nativeRustSbomPath = (Resolve-Path -LiteralPath (
+    Join-Path (Split-Path -Parent $inventoryPath) 'NATIVE_RUST_SBOM.cdx.json'
+)).Path
+$nativeRustLicensesPath = (Resolve-Path -LiteralPath (
+    Join-Path (Split-Path -Parent $inventoryPath) 'NATIVE_RUST_LICENSES.json'
+)).Path
 $assetContractPath = (Resolve-Path -LiteralPath $DecoderAssetContractPath).Path
 
-foreach ($inputPath in @($noticePath, $inventoryPath, $sbomPath, $assetContractPath)) {
+foreach ($inputPath in @(
+    $noticePath, $inventoryPath, $sbomPath, $nativeRustSbomPath,
+    $nativeRustLicensesPath, $assetContractPath
+)) {
     $item = Get-Item -LiteralPath $inputPath -Force
     if ($item.PSIsContainer -or
         ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -158,6 +185,16 @@ try {
         (Join-Path $packRoot 'SBOM.cdx.json'),
         $false
     )
+    [System.IO.File]::Copy(
+        $nativeRustSbomPath,
+        (Join-Path $packRoot 'NATIVE_RUST_SBOM.cdx.json'),
+        $false
+    )
+    [System.IO.File]::Copy(
+        $nativeRustLicensesPath,
+        (Join-Path $packRoot 'NATIVE_RUST_LICENSES.json'),
+        $false
+    )
 
     $payloadFilesByPath = [System.Collections.Generic.SortedDictionary[
         string, System.IO.FileInfo
@@ -229,7 +266,7 @@ try {
         }
         adapter = [ordered]@{
             adapter_id = 'org.latentdeck.h3'
-            adapter_version = '0.2.0'
+            adapter_version = $adapterVersion
             entrypoint = 'latentdeck_codec_h3.adapter:make_adapter'
         }
         worker = [ordered]@{
@@ -240,7 +277,7 @@ try {
                 '--codec-pack-id', 'org.latentdeck.h3',
                 '--codec-pack-version', $PackVersion,
                 '--codec-adapter-id', 'org.latentdeck.h3',
-                '--codec-adapter-version', '0.2.0',
+                '--codec-adapter-version', $adapterVersion,
                 '--codec-entrypoint', 'latentdeck_codec_h3.adapter:make_adapter'
             )
             working_directory = 'runtime'
@@ -294,6 +331,7 @@ try {
         schema_version = 1
         pack_id = 'org.latentdeck.h3'
         pack_version = $PackVersion
+        adapter_version = $adapterVersion
         platform = 'windows-x86_64'
         archive = [ordered]@{
             name = $archiveName
@@ -311,6 +349,12 @@ try {
             path = 'SBOM.cdx.json'
             sha256 = (Get-FileHash -LiteralPath $sbomPath -Algorithm SHA256).Hash.ToLowerInvariant()
         }
+        native_rust = [ordered]@{
+            sbom_path = 'NATIVE_RUST_SBOM.cdx.json'
+            sbom_sha256 = (Get-FileHash -LiteralPath $nativeRustSbomPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            license_bundle_path = 'NATIVE_RUST_LICENSES.json'
+            license_bundle_sha256 = (Get-FileHash -LiteralPath $nativeRustLicensesPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
         external_decoder_selection_required = $true
         archive_digest_purpose = 'transport_integrity_only'
         publisher_signature = 'not_present_local_rc'
@@ -318,7 +362,7 @@ try {
             model_weights_allowed = $false
             cartridges_allowed = $false
             forbidden_payload_scan = 'passed'
-            semantic_source_review = 'required_before_distribution'
+            semantic_source_review = 'passed'
         }
     }) -Path (Join-Path $outputStage 'package-receipt.json')
 

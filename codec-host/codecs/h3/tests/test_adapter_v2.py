@@ -269,7 +269,7 @@ def _loaded_adapter(
 def test_descriptor_and_pack_owned_entrypoint_are_exact_v2() -> None:
     adapter = make_adapter()
     descriptor = adapter.descriptor()
-    assert descriptor.pack_version == PACK_VERSION == "0.2.0"
+    assert descriptor.pack_version == PACK_VERSION == "0.2.1"
     assert descriptor.adapter_version == ADAPTER_VERSION == "0.2.0"
     assert descriptor.host_api_version == "2.0"
     assert {capability.value for capability in descriptor.capabilities} == {

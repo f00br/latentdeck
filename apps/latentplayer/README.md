@@ -9,11 +9,12 @@ LatentPlayer 0.1 has three local, single-window workspaces:
 - **Extensions** manages the shared exact-hash `.ld`/`.ldcodec` lifecycle and
   selects one enabled codec version for Player.
 
-For the current H3 path, install H3 `0.2.0`, refresh Extensions, enable that
-exact version, choose **Use in Player**, select CUDA, and bind the accepted
-external TAEH3 decoder. Playback then uses the generic Protocol 2 worker. A
-Protocol 2 failure never falls back to another codec, version, device, profile,
-or Protocol 1; the legacy Player bridge remains an explicit separate choice.
+For the current H3 path, install H3 Codec Pack `0.2.1`, refresh Extensions,
+enable that exact version, choose **Use in Player**, select CUDA, and bind the
+accepted external TAEH3 decoder. Playback then uses the generic Protocol 2
+worker. A Protocol 2 failure never falls back to another codec, version,
+device, profile, or Protocol 1; the legacy Player bridge remains an explicit
+separate choice.
 
 ## PREPARE workflow
 

@@ -140,6 +140,95 @@ function Assert-PathComponentsNotReparsePoints {
     }
 }
 
+function Get-PackagingSourceState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$RepositoryRoot
+    )
+
+    $root = (Resolve-Path -LiteralPath $RepositoryRoot).Path
+    Assert-PathComponentsNotReparsePoints -Path $root
+    $commit = (& git -C $root rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or $commit -cnotmatch '^[0-9a-f]{40}$') {
+        throw 'Could not resolve the packaging source commit.'
+    }
+    $branch = (& git -C $root branch --show-current).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Could not resolve the packaging source branch.'
+    }
+    $tree = (& git -C $root rev-parse ("{0}^{{tree}}" -f $commit)).Trim()
+    if ($LASTEXITCODE -ne 0 -or $tree -cnotmatch '^[0-9a-f]{40}$') {
+        throw 'Could not resolve the packaging source tree.'
+    }
+    $status = @(& git -C $root -c core.quotepath=false status --porcelain=v1 --untracked-files=all)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Could not inspect packaging source status.'
+    }
+    $relativePaths = @(
+        & git -C $root -c core.quotepath=false ls-files --cached --others --exclude-standard
+    )
+    if ($LASTEXITCODE -ne 0 -or $relativePaths.Count -eq 0) {
+        throw 'Could not enumerate the packaging public source snapshot.'
+    }
+    $records = [System.Collections.Generic.List[string]]::new()
+    foreach ($relativePath in @($relativePaths | Sort-Object -CaseSensitive)) {
+        if ([string]::IsNullOrWhiteSpace($relativePath)) {
+            continue
+        }
+        $fullPath = [System.IO.Path]::GetFullPath((Join-Path $root $relativePath))
+        Assert-ChildPath -ParentPath $root -CandidatePath $fullPath | Out-Null
+        Assert-PathComponentsNotReparsePoints -Path $fullPath
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+            $records.Add("missing`0$relativePath")
+            continue
+        }
+        $item = Get-Item -LiteralPath $fullPath -Force
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Packaging source snapshot contains a reparse-point file: $relativePath"
+        }
+        $hash = (Get-FileHash -LiteralPath $fullPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $portablePath = $relativePath.Replace('\', '/')
+        $records.Add("file`0$portablePath`0$($item.Length)`0$hash")
+    }
+    $payload = [System.Text.UTF8Encoding]::new($false).GetBytes(($records -join "`n"))
+    $snapshotHash = [System.Convert]::ToHexString(
+        [System.Security.Cryptography.SHA256]::HashData($payload)
+    ).ToLowerInvariant()
+    return [pscustomobject]@{
+        Commit = $commit
+        Branch = $branch
+        Tree = $tree
+        Status = @($status)
+        Dirty = ($status.Count -gt 0)
+        DirtyEntryCount = $status.Count
+        PublicSnapshotSha256 = $snapshotHash
+        PublicSnapshotFileCount = $records.Count
+    }
+}
+
+function Assert-PackagingSourceStateUnchanged {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Before,
+
+        [Parameter(Mandatory)]
+        [object]$After,
+
+        [string]$Context = 'Packaging source'
+    )
+
+    if ([string]$After.Commit -cne [string]$Before.Commit -or
+        [string]$After.Branch -cne [string]$Before.Branch -or
+        [string]$After.Tree -cne [string]$Before.Tree -or
+        (@($After.Status) -join "`n") -cne (@($Before.Status) -join "`n") -or
+        [string]$After.PublicSnapshotSha256 -cne [string]$Before.PublicSnapshotSha256 -or
+        [int64]$After.PublicSnapshotFileCount -ne [int64]$Before.PublicSnapshotFileCount) {
+        throw "$Context changed while the artifact was being built."
+    }
+}
+
 function Get-CodecPackInstallRoot {
     [CmdletBinding()]
     param(
@@ -1300,6 +1389,8 @@ function Assert-Python313RuntimeLayout {
         'runtime/Lib/site-packages/latentdeck_rgb_ring/_native.cp313-win_amd64.pyd',
         'THIRD_PARTY_NOTICES.md',
         'DEPENDENCY_INVENTORY.json',
+        'NATIVE_RUST_LICENSES.json',
+        'NATIVE_RUST_SBOM.cdx.json',
         'SBOM.cdx.json'
     )
     foreach ($requiredPath in $requiredPaths) {
@@ -1388,7 +1479,8 @@ function Assert-CodecPackDependencyMetadata {
 
     $inventory = Read-StrictJsonFile -Path (Join-Path $PackRoot 'DEPENDENCY_INVENTORY.json')
     Assert-ExactProperties -Object $inventory -Required @(
-        'schema_version', 'pack_id', 'pack_version', 'platform', 'curator', 'components'
+        'schema_version', 'pack_id', 'pack_version', 'source_commit', 'platform',
+        'curator', 'components', 'native_rust'
     ) -Context 'DEPENDENCY_INVENTORY.json'
     Assert-ExactProperties -Object $inventory.curator -Required @(
         'name', 'schema_version'
@@ -1396,6 +1488,7 @@ function Assert-CodecPackDependencyMetadata {
     if ([int64]$inventory.schema_version -ne 1 -or
         $inventory.pack_id -cne 'org.latentdeck.h3' -or
         $inventory.pack_version -cne $PackVersion -or
+        ([string]$inventory.source_commit) -cnotmatch '^[0-9a-f]{40}$' -or
         $inventory.platform -cne 'windows-x86_64' -or
         $inventory.curator.name -cne 'latentdeck-codec-pack-curator' -or
         [int64]$inventory.curator.schema_version -ne 1) {
@@ -1409,6 +1502,9 @@ function Assert-CodecPackDependencyMetadata {
     $inventoryIds = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::OrdinalIgnoreCase
     )
+    $inventoryById = [System.Collections.Generic.Dictionary[string, object]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
     foreach ($component in $inventoryComponents) {
         Assert-ExactProperties -Object $component -Required @(
             'name', 'version', 'kind', 'source_url', 'license_expression',
@@ -1420,6 +1516,7 @@ function Assert-CodecPackDependencyMetadata {
             -not $inventoryIds.Add($identity)) {
             throw 'Codec Pack dependency inventory contains an invalid or duplicate identity.'
         }
+        $inventoryById.Add($identity, $component)
         if (@('runtime', 'dependency', 'repository') -cnotcontains [string]$component.kind -or
             ([string]$component.source_url) -cnotmatch '^https://' -or
             [string]::IsNullOrWhiteSpace([string]$component.license_expression)) {
@@ -1437,13 +1534,230 @@ function Assert-CodecPackDependencyMetadata {
         }
     }
 
+    Assert-ExactProperties -Object $inventory.native_rust -Required @(
+        'sbom_path', 'sbom_sha256', 'license_bundle_path', 'license_bundle_sha256',
+        'component_count', 'selection_roots'
+    ) -Context 'DEPENDENCY_INVENTORY.json.native_rust'
+    if ([string]$inventory.native_rust.sbom_path -cne 'NATIVE_RUST_SBOM.cdx.json' -or
+        [string]$inventory.native_rust.license_bundle_path -cne 'NATIVE_RUST_LICENSES.json' -or
+        [int64]$inventory.native_rust.component_count -lt 2 -or
+        [int64]$inventory.native_rust.component_count -gt 256 -or
+        (@($inventory.native_rust.selection_roots | Sort-Object) -join "`0") -cne
+            ((@('latentdeck-cartridge-python', 'latentdeck-gpu-python') | Sort-Object) -join "`0")) {
+        throw 'Codec Pack native Rust inventory identity is invalid.'
+    }
+    Assert-Sha256 -Value ([string]$inventory.native_rust.sbom_sha256) -Name 'native Rust SBOM SHA-256'
+    Assert-Sha256 -Value ([string]$inventory.native_rust.license_bundle_sha256) -Name 'native Rust license bundle SHA-256'
+    $nativeRustSbomPath = Join-Path $PackRoot 'NATIVE_RUST_SBOM.cdx.json'
+    $nativeRustLicensesPath = Join-Path $PackRoot 'NATIVE_RUST_LICENSES.json'
+    if ((Get-FileHash -LiteralPath $nativeRustSbomPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+            [string]$inventory.native_rust.sbom_sha256 -or
+        (Get-FileHash -LiteralPath $nativeRustLicensesPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+            [string]$inventory.native_rust.license_bundle_sha256) {
+        throw 'Codec Pack native Rust metadata differs from its dependency inventory binding.'
+    }
+    $nativeRustSbom = Read-StrictJsonFile -Path $nativeRustSbomPath
+    Assert-ExactProperties -Object $nativeRustSbom -Required @(
+        'bomFormat', 'specVersion', 'serialNumber', 'version', 'metadata', 'components'
+    ) -Context 'NATIVE_RUST_SBOM.cdx.json'
+    if ([string]$nativeRustSbom.bomFormat -cne 'CycloneDX' -or
+        [string]$nativeRustSbom.specVersion -cne '1.5' -or
+        [int64]$nativeRustSbom.version -ne 1 -or
+        [string]$nativeRustSbom.metadata.component.'bom-ref' -cne
+            "pkg:generic/LatentDeck%20H3%20Native%20Extensions@$PackVersion" -or
+        [string]$nativeRustSbom.metadata.component.name -cne 'LatentDeck H3 Native Extensions' -or
+        [string]$nativeRustSbom.metadata.component.version -cne $PackVersion) {
+        throw 'Codec Pack native Rust SBOM artifact identity is invalid.'
+    }
+    $nativeRootScope = @($nativeRustSbom.metadata.component.properties | Where-Object {
+        [string]$_.name -ceq 'latentdeck:dependency-scope' -and
+        [string]$_.value -ceq 'artifact'
+    })
+    $nativeArtifactScope = @($nativeRustSbom.metadata.component.properties | Where-Object {
+        [string]$_.name -ceq 'latentdeck:artifact-scope' -and
+        [string]$_.value -ceq 'h3-native'
+    })
+    $nativeTargetPlatform = @($nativeRustSbom.metadata.component.properties | Where-Object {
+        [string]$_.name -ceq 'latentdeck:target-platform' -and
+        [string]$_.value -ceq 'x86_64-pc-windows-msvc'
+    })
+    if ($nativeRootScope.Count -ne 1 -or $nativeArtifactScope.Count -ne 1 -or
+        $nativeTargetPlatform.Count -ne 1) {
+        throw 'Codec Pack native Rust SBOM scope is invalid.'
+    }
+    $nativeRustComponents = @($nativeRustSbom.components)
+    if ($nativeRustComponents.Count -ne [int64]$inventory.native_rust.component_count) {
+        throw 'Codec Pack native Rust SBOM component count differs from its inventory.'
+    }
+    $nativeRustByRef = @{}
+    $nativeRootNames = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($component in $nativeRustComponents) {
+        $reference = [string]$component.'bom-ref'
+        $ecosystem = @($component.properties | Where-Object {
+            [string]$_.name -ceq 'latentdeck:ecosystem' -and [string]$_.value -ceq 'rust'
+        })
+        $scope = @($component.properties | Where-Object {
+            [string]$_.name -ceq 'latentdeck:dependency-scope' -and
+            [string]$_.value -cin @('artifact', 'runtime', 'build', 'runtime+build')
+        })
+        $selectionRoot = @($component.properties | Where-Object {
+            [string]$_.name -ceq 'latentdeck:selection-root' -and [string]$_.value -ceq 'true'
+        })
+        if ($reference -cnotmatch '^rust:.+@[^@]+$' -or
+            $nativeRustByRef.ContainsKey($reference) -or
+            $ecosystem.Count -ne 1 -or $scope.Count -ne 1 -or
+            @($component.licenses).Count -eq 0) {
+            throw "Codec Pack native Rust SBOM component is incomplete: $reference"
+        }
+        if ($selectionRoot.Count -eq 1) {
+            [void]$nativeRootNames.Add([string]$component.name)
+        } elseif ($selectionRoot.Count -gt 1) {
+            throw "Codec Pack native Rust SBOM selection root is duplicated: $reference"
+        }
+        $nativeRustByRef[$reference] = $component
+    }
+    if ((@($nativeRootNames | Sort-Object) -join "`0") -cne
+        ((@('latentdeck-cartridge-python', 'latentdeck-gpu-python') | Sort-Object) -join "`0")) {
+        throw 'Codec Pack native Rust SBOM selection-root set is not exact.'
+    }
+
+    $nativeLicenseBundleItem = Get-Item -LiteralPath $nativeRustLicensesPath -Force
+    if ($nativeLicenseBundleItem.PSIsContainer -or
+        ($nativeLicenseBundleItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $nativeLicenseBundleItem.Length -eq 0 -or $nativeLicenseBundleItem.Length -gt 32MB) {
+        throw 'Codec Pack native Rust license bundle is not a bounded regular file.'
+    }
+    $nativeLicenseBundle = Read-StrictJsonFile -Path $nativeRustLicensesPath
+    Assert-ExactProperties -Object $nativeLicenseBundle -Required @(
+        'schema_version', 'artifact', 'policy', 'sboms', 'component_count',
+        'text_count', 'components', 'texts'
+    ) -Context 'NATIVE_RUST_LICENSES.json'
+    $nativeRootReference = [string]$nativeRustSbom.metadata.component.'bom-ref'
+    $expectedNativeLicenseReferences = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    [void]$expectedNativeLicenseReferences.Add($nativeRootReference)
+    foreach ($reference in $nativeRustByRef.Keys) {
+        [void]$expectedNativeLicenseReferences.Add([string]$reference)
+    }
+    $nativeTextsByHash = @{}
+    foreach ($textRecord in @($nativeLicenseBundle.texts)) {
+        $textBytes = [System.Text.UTF8Encoding]::new($false).GetBytes([string]$textRecord.text)
+        $textHash = [System.Convert]::ToHexString(
+            [System.Security.Cryptography.SHA256]::HashData($textBytes)
+        ).ToLowerInvariant()
+        if ($textHash -cne [string]$textRecord.sha256 -or
+            [int64]$textBytes.Length -ne [int64]$textRecord.byte_length -or
+            $nativeTextsByHash.ContainsKey($textHash)) {
+            throw 'Codec Pack native Rust license bundle contains invalid or duplicate text.'
+        }
+        $nativeTextsByHash[$textHash] = $true
+    }
+    $nativeMappings = @($nativeLicenseBundle.components)
+    $actualNativeLicenseReferences = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    $usedNativeTexts = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    $getNativeLicenseExpression = {
+        param([Parameter(Mandatory)][object]$Component)
+
+        $labels = @(@(
+            foreach ($entry in @($Component.licenses)) {
+                if ($null -ne $entry.PSObject.Properties['expression'] -and
+                    -not [string]::IsNullOrWhiteSpace([string]$entry.expression)) {
+                    [string]$entry.expression
+                } elseif ($null -ne $entry.PSObject.Properties['license']) {
+                    if ($null -ne $entry.license.PSObject.Properties['id'] -and
+                        -not [string]::IsNullOrWhiteSpace([string]$entry.license.id)) {
+                        [string]$entry.license.id
+                    } elseif ($null -ne $entry.license.PSObject.Properties['name'] -and
+                        -not [string]::IsNullOrWhiteSpace([string]$entry.license.name)) {
+                        [string]$entry.license.name
+                    }
+                }
+            }
+        ) | Sort-Object -CaseSensitive -Unique)
+        if ($labels.Count -eq 0) {
+            throw "Codec Pack native Rust component has no license expression: $($Component.'bom-ref')"
+        }
+        return $labels -join ' OR '
+    }
+    foreach ($mapping in $nativeMappings) {
+        $reference = [string]$mapping.'bom-ref'
+        if (-not $actualNativeLicenseReferences.Add($reference) -or
+            -not $expectedNativeLicenseReferences.Contains($reference)) {
+            throw "Codec Pack native Rust license mapping is unexpected or duplicated: $reference"
+        }
+        $expectedComponent = if ($reference -ceq $nativeRootReference) {
+            $nativeRustSbom.metadata.component
+        } else {
+            $nativeRustByRef[$reference]
+        }
+        $expectedEcosystem = if ($reference -ceq $nativeRootReference) { 'artifact' } else { 'rust' }
+        $expectedScopeValues = @($expectedComponent.properties | Where-Object {
+            [string]$_.name -ceq 'latentdeck:dependency-scope'
+        })
+        $actualArtifacts = @($mapping.artifacts | Sort-Object -CaseSensitive -Unique)
+        if ($expectedScopeValues.Count -ne 1 -or
+            [string]$mapping.name -cne [string]$expectedComponent.name -or
+            [string]$mapping.version -cne [string]$expectedComponent.version -or
+            [string]$mapping.ecosystem -cne $expectedEcosystem -or
+            [string]$mapping.dependency_scope -cne [string]$expectedScopeValues[0].value -or
+            [string]$mapping.license_expression -cne
+                [string](& $getNativeLicenseExpression -Component $expectedComponent) -or
+            @($mapping.artifacts).Count -ne 1 -or $actualArtifacts.Count -ne 1 -or
+            [string]$actualArtifacts[0] -cne 'LatentDeck H3 Native Extensions') {
+            throw "Codec Pack native Rust license mapping drifted from its SBOM: $reference"
+        }
+        $hashes = @($mapping.text_sha256s)
+        if ([string]$mapping.disposition -ceq 'license_text_in_bundle') {
+            if ($hashes.Count -eq 0) {
+                throw "Codec Pack redistributed native Rust component lacks license text: $reference"
+            }
+            foreach ($hash in $hashes) {
+                if (-not $nativeTextsByHash.ContainsKey([string]$hash)) {
+                    throw "Codec Pack native Rust license mapping references unknown text: $reference"
+                }
+                [void]$usedNativeTexts.Add([string]$hash)
+            }
+        } elseif ([string]$mapping.disposition -ceq 'not_redistributed_no_text_required') {
+            if ([string]$mapping.dependency_scope -cne 'build' -or
+                $hashes.Count -ne 0 -or
+                [string]::IsNullOrWhiteSpace([string]$mapping.rationale)) {
+                throw "Codec Pack native Rust no-text disposition is invalid: $reference"
+            }
+        } else {
+            throw "Codec Pack native Rust license disposition is invalid: $reference"
+        }
+    }
+    $nativeSbomItem = Get-Item -LiteralPath $nativeRustSbomPath -Force
+    $nativeSbomBindings = @($nativeLicenseBundle.sboms | Where-Object {
+        [string]$_.name -ceq 'NATIVE_RUST_SBOM.cdx.json' -and
+        [int64]$_.byte_length -eq [int64]$nativeSbomItem.Length -and
+        [string]$_.sha256 -ceq [string]$inventory.native_rust.sbom_sha256
+    })
+    if ([int]$nativeLicenseBundle.schema_version -ne 1 -or
+        [string]$nativeLicenseBundle.artifact.name -cne 'LatentDeck H3 Native Extensions' -or
+        [string]$nativeLicenseBundle.artifact.version -cne $PackVersion -or
+        $nativeSbomBindings.Count -ne 1 -or @($nativeLicenseBundle.sboms).Count -ne 1 -or
+        $actualNativeLicenseReferences.Count -ne $expectedNativeLicenseReferences.Count -or
+        [int]$nativeLicenseBundle.component_count -ne $actualNativeLicenseReferences.Count -or
+        [int]$nativeLicenseBundle.text_count -ne $nativeTextsByHash.Count -or
+        $usedNativeTexts.Count -ne $nativeTextsByHash.Count) {
+        throw 'Codec Pack native Rust license bundle closure or SBOM binding is incomplete.'
+    }
+
     $sbom = Read-StrictJsonFile -Path (Join-Path $PackRoot 'SBOM.cdx.json')
     Assert-ExactProperties -Object $sbom -Required @(
         'bomFormat', 'specVersion', 'version', 'metadata', 'components'
     ) -Context 'SBOM.cdx.json'
     Assert-ExactProperties -Object $sbom.metadata -Required @('component') -Context 'SBOM metadata'
     Assert-ExactProperties -Object $sbom.metadata.component -Required @(
-        'bom-ref', 'type', 'name', 'version'
+        'bom-ref', 'type', 'name', 'version', 'licenses', 'properties'
     ) -Context 'SBOM metadata.component'
     if ($sbom.bomFormat -cne 'CycloneDX' -or
         $sbom.specVersion -cne '1.5' -or
@@ -1451,22 +1765,69 @@ function Assert-CodecPackDependencyMetadata {
         $sbom.metadata.component.'bom-ref' -cne "pkg:generic/latentdeck-h3-codec-pack@$PackVersion" -or
         $sbom.metadata.component.type -cne 'application' -or
         $sbom.metadata.component.name -cne 'LatentDeck H3 Codec Pack' -or
-        $sbom.metadata.component.version -cne $PackVersion) {
+        $sbom.metadata.component.version -cne $PackVersion -or
+        @($sbom.metadata.component.licenses).Count -ne 1 -or
+        [string]$sbom.metadata.component.licenses[0].expression -cne 'Apache-2.0' -or
+        @($sbom.metadata.component.properties).Count -ne 6) {
         throw 'Codec Pack CycloneDX SBOM identity is invalid.'
     }
+    $expectedRootProperties = [ordered]@{
+        'latentdeck:source-commit' = [string]$inventory.source_commit
+        'latentdeck:artifact-scope' = 'h3-codec-pack'
+        'latentdeck:dependency-scope' = 'artifact'
+        'latentdeck:included-dependency-scopes' = 'artifact,runtime,build,runtime+build'
+        'latentdeck:excluded-dependency-scopes' = 'development'
+        'latentdeck:target-platform' = 'windows-x86_64'
+    }
+    foreach ($expectedProperty in $expectedRootProperties.GetEnumerator()) {
+        $matches = @($sbom.metadata.component.properties | Where-Object {
+            [string]$_.name -ceq [string]$expectedProperty.Key -and
+            [string]$_.value -ceq [string]$expectedProperty.Value
+        })
+        if ($matches.Count -ne 1) {
+            throw "Codec Pack CycloneDX SBOM root property is invalid: $($expectedProperty.Key)"
+        }
+    }
     $sbomComponents = @($sbom.components)
-    if ($sbomComponents.Count -ne $inventoryComponents.Count) {
+    if ($sbomComponents.Count -ne ($inventoryComponents.Count + $nativeRustComponents.Count)) {
         throw 'Codec Pack SBOM and dependency inventory component counts differ.'
     }
-    $sbomIds = [System.Collections.Generic.HashSet[string]]::new(
-        [System.StringComparer]::OrdinalIgnoreCase
+    $sbomReferences = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
     )
     foreach ($component in $sbomComponents) {
+        $reference = [string]$component.'bom-ref'
+        if (-not $sbomReferences.Add($reference)) {
+            throw "Codec Pack SBOM contains a duplicate component reference '$reference'."
+        }
+        if ($nativeRustByRef.ContainsKey($reference)) {
+            $nativeComponent = $nativeRustByRef[$reference]
+            $nativeScope = @($nativeComponent.properties | Where-Object {
+                [string]$_.name -ceq 'latentdeck:dependency-scope'
+            })
+            $mergedScope = @($component.properties | Where-Object {
+                [string]$_.name -ceq 'latentdeck:dependency-scope'
+            })
+            $mergedEcosystem = @($component.properties | Where-Object {
+                [string]$_.name -ceq 'latentdeck:ecosystem' -and [string]$_.value -ceq 'rust'
+            })
+            if ([string]$component.name -cne [string]$nativeComponent.name -or
+                [string]$component.version -cne [string]$nativeComponent.version -or
+                (@($component.licenses | ConvertTo-Json -Compress) -join '') -cne
+                    (@($nativeComponent.licenses | ConvertTo-Json -Compress) -join '') -or
+                $nativeScope.Count -ne 1 -or $mergedScope.Count -ne 1 -or
+                [string]$nativeScope[0].value -cne [string]$mergedScope[0].value -or
+                $mergedEcosystem.Count -ne 1) {
+                throw "Codec Pack merged native Rust SBOM component drifted: $reference"
+            }
+            continue
+        }
         Assert-ExactProperties -Object $component -Required @(
-            'bom-ref', 'type', 'name', 'version', 'hashes', 'licenses', 'externalReferences'
+            'bom-ref', 'type', 'name', 'version', 'hashes', 'licenses',
+            'externalReferences', 'properties'
         ) -Optional @('purl') -Context 'SBOM component'
         $identity = "$($component.name)@$($component.version)"
-        if (-not $sbomIds.Add($identity) -or -not $inventoryIds.Contains($identity)) {
+        if (-not $inventoryIds.Contains($identity)) {
             throw "Codec Pack SBOM contains an unknown or duplicate component '$identity'."
         }
         $hashes = @($component.hashes)
@@ -1474,13 +1835,32 @@ function Assert-CodecPackDependencyMetadata {
             throw "Codec Pack SBOM component '$identity' has an invalid hash contract."
         }
         Assert-Sha256 -Value ([string]$hashes[0].content) -Name 'SBOM component hash'
+        $inventoryComponent = $inventoryById[$identity]
+        $scopeProperties = @($component.properties | Where-Object {
+            [string]$_.name -ceq 'latentdeck:dependency-scope' -and
+            [string]$_.value -ceq 'runtime'
+        })
+        $ecosystemProperties = @($component.properties | Where-Object {
+            [string]$_.name -ceq 'latentdeck:ecosystem' -and
+            [string]$_.value -ceq 'python'
+        })
         if (@($component.licenses).Count -ne 1 -or
             [string]::IsNullOrWhiteSpace([string]$component.licenses[0].expression) -or
             @($component.externalReferences).Count -ne 1 -or
             $component.externalReferences[0].type -cne 'distribution' -or
-            ([string]$component.externalReferences[0].url) -cnotmatch '^https://') {
+            ([string]$component.externalReferences[0].url) -cnotmatch '^https://' -or
+            [string]$hashes[0].content -cne [string]$inventoryComponent.content_sha256 -or
+            [string]$component.licenses[0].expression -cne
+                [string]$inventoryComponent.license_expression -or
+            [string]$component.externalReferences[0].url -cne
+                [string]$inventoryComponent.source_url -or
+            @($component.properties).Count -ne 2 -or
+            $scopeProperties.Count -ne 1 -or $ecosystemProperties.Count -ne 1) {
             throw "Codec Pack SBOM component '$identity' has incomplete provenance."
         }
+    }
+    if ($sbomReferences.Count -ne ($inventoryComponents.Count + $nativeRustComponents.Count)) {
+        throw 'Codec Pack merged SBOM reference closure is incomplete.'
     }
 }
 
@@ -1650,9 +2030,9 @@ function Test-H3CodecPackDirectory {
             $asset.required -ne $true -or
             [int64]$asset.byte_length -ne 22709752 -or
             $asset.sha256 -cne '4fd022bfcab08772fe0536b17ea1a3bbb5625be11e397868d1c5d891863d4c13' -or
-            $asset.source_url -cne 'https://huggingface.co/madebyollin/taehv/resolve/main/taeh3.safetensors' -or
+            $asset.source_url -cne 'https://raw.githubusercontent.com/madebyollin/taehv/62f7591f59dfbb4c3c02b7a621d180a9eeaba26c/safetensors/taeh3.safetensors' -or
             $asset.license_label -cne 'MIT' -or
-            $asset.license_url -cne 'https://github.com/madebyollin/taehv/blob/e743234f/LICENSE') {
+            $asset.license_url -cne 'https://github.com/madebyollin/taehv/blob/62f7591f59dfbb4c3c02b7a621d180a9eeaba26c/LICENSE') {
             throw 'H3 Codec Pack external TAEH3 asset identity is not exact.'
         }
     }
@@ -1969,6 +2349,7 @@ Export-ModuleMember -Function @(
     'Assert-ExactProperties',
     'Assert-PackagingSourceTree',
     'Assert-PathComponentsNotReparsePoints',
+    'Assert-PackagingSourceStateUnchanged',
     'Assert-PortableRelativePath',
     'Assert-SafeTemporaryDirectory',
     'Assert-SemVer',
@@ -1981,6 +2362,7 @@ Export-ModuleMember -Function @(
     'Get-CodecPackAuxiliaryRoot',
     'Get-CodecPackInstallRoot',
     'Get-IntegrityEntry',
+    'Get-PackagingSourceState',
     'New-DeterministicZip',
     'Read-StrictJsonFile',
     'Remove-SafeTemporaryDirectory',

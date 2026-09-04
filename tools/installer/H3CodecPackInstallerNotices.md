@@ -2,7 +2,7 @@
 
 These notices cover the native lifecycle helper and installer runtime shipped
 by `LatentDeck-H3-CodecPack-<version>-setup.exe`. The H3 runtime payload has its
-own dependency inventory, SBOM, and notices inside the adjacent Codec Pack ZIP.
+own dependency inventory, SBOM, and notices inside the adjacent `.ldcodec` package.
 
 ## Nullsoft Scriptable Install System (NSIS)
 

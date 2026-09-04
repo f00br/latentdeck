@@ -247,7 +247,7 @@ def _validate_manifest_contract(manifest: Mapping[str, object]) -> None:
         manifest.get("manifest_version") != "2.0.0"
         or manifest.get("kind") != "codec_pack"
         or manifest.get("pack_id") != "org.latentdeck.h3"
-        or manifest.get("pack_version") != "0.2.0"
+        or manifest.get("pack_version") != "0.2.1"
         or compatibility.get("worker_protocol") != 2
         or compatibility.get("codec_adapter_api") != 1
         or compatibility.get("tensor_abi") != "latentdeck.tensor.v1"

@@ -85,7 +85,8 @@ try {
         -PythonRuntimeRoot $runtimeSource `
         -PythonSitePackages $pythonPackages `
         -WorkerSitePackages $workerPackages `
-        -OutputRoot $codecRoot
+        -OutputRoot $codecRoot `
+        -PackVersion '0.1.0'
 
     $packRoot = Join-Path $codecRoot 'org.latentdeck.h3\0.1.0'
     $manifestPath = Join-Path $packRoot 'codec-pack.json'

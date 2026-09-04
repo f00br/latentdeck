@@ -31,9 +31,39 @@ metadata/payload only; LatentDeck 0.1 does not play or synthesize audio.
 
 ## Installation
 
-Place this directory in ComfyUI's `custom_nodes` directory. In the same Python
-environment, install the LatentDeck Cartridge SDK wheel and the pinned
-Safetensors dependency declared in `pyproject.toml`, then restart ComfyUI.
+For the Windows preview, download
+`LatentDeck-0.1.0-preview.1-comfy-recorder-windows-x64.zip` and its checksum
+from the same official GitHub release as the applications. Verify the archive,
+extract it, close ComfyUI, and run:
+
+```powershell
+$comfyRoot = (Resolve-Path -LiteralPath (Read-Host 'Path to your ComfyUI root')).Path
+powershell -ExecutionPolicy Bypass -File .\Install-ComfyRecorder.ps1 -ComfyUIRoot $comfyRoot
+```
+
+The self-contained bundle supports Windows x64 CPython 3.12 and 3.13. It
+installs the Recorder, `latentdeck-cartridge==0.1.0`, and
+`safetensors==0.8.0` from exact hash-bound wheels into the node's private
+`vendor` directory. It does not invoke pip, access the network, compile Rust,
+or modify the rest of ComfyUI's Python environment. An unsupported Python ABI
+fails before the node directory is written. For a nonstandard ComfyUI layout,
+pass both `-PythonPath` and `-CustomNodesPath` explicitly.
+
+An existing ComfyUI Safetensors installation remains the first choice and is
+not replaced. The bundled 0.8.0 copy is a fallback under the unique
+`latentdeck_recorder_vendor.safetensors` namespace, so adding the Recorder's
+private dependency directory cannot take over the global `safetensors` import.
+
+Comfy Registry/Manager installation is not enabled for this preview:
+`latentdeck-cartridge` is not yet published to PyPI, and the repository will
+not pretend that its declared dependency can resolve there. Use the release
+bundle. Registry installation remains a separate publication/configuration
+gate for a later release.
+
+For development from a source checkout, build the Recorder and Cartridge SDK
+wheels as described below and install their declared dependencies into a
+disposable environment. Dropping only this source directory into
+`custom_nodes` does not supply the native Cartridge SDK.
 
 The node appears under `LatentDeck / Cartridge` as
 `Save Latent Cartridge (.lc)`. Recordings go under the dedicated
@@ -60,7 +90,11 @@ From the repository root:
 ```text
 uv run pytest comfy/latent-cartridge/tests
 uv run ruff check comfy/latent-cartridge
+pwsh -NoProfile -File tools/Test-ComfyRecorderBundle.ps1
 ```
 
-The tests use small data-only stubs and do not import ComfyUI, Torch, model
-weights, real latents, or private workflows.
+The node tests use small data-only stubs and do not import ComfyUI, Torch,
+model weights, real latents, or private workflows. The bundle contract builds
+the real native ABI3 wheel and performs isolated imports with CPython 3.12 and
+3.13; it also proves that an unsupported interpreter and a tampered wheel are
+rejected before installation.

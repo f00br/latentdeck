@@ -1,6 +1,9 @@
 {
   "schema_version": 1,
+  "pack_version": "0.2.1",
   "platform": "windows-x86_64",
+  "worker_protocol": 2,
+  "codec_adapter_api": 1,
   "uv_version": "0.11.8",
   "python_runtime": {
     "version": "3.13.14",
@@ -19,6 +22,12 @@
       "version": "0.4.6",
       "source_url": "https://pypi.org/project/colorama/0.4.6/",
       "license_expression": "BSD-3-Clause",
+      "wheel": {
+        "file_name": "colorama-0.4.6-py2.py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl",
+        "byte_length": 25335,
+        "sha256": "4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"
+      },
       "content_sha256": "a08b1163a362d457167f8b79e0df101dce4e228c39bb11f3e42b024e6e7c433b"
     },
     {
@@ -26,6 +35,12 @@
       "version": "3.32.4",
       "source_url": "https://pypi.org/project/filelock/3.32.4/",
       "license_expression": "MIT",
+      "wheel": {
+        "file_name": "filelock-3.32.4-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/01/a4/9b63d595d748e3aff8812b65eacc1a2c4bd90b7c2012e08e72373b4835eb/filelock-3.32.4-py3-none-any.whl",
+        "byte_length": 99864,
+        "sha256": "22e58ca3b1ae3b98993b762d7338367ae64fe50252bf78d59da3bfebcdf1cedd"
+      },
       "content_sha256": "a8addbcb621be7cfe3ea3d6d975f4fd3604b1f4abec9878edf8abd96d7882b14"
     },
     {
@@ -33,6 +48,12 @@
       "version": "2026.7.0",
       "source_url": "https://pypi.org/project/fsspec/2026.7.0/",
       "license_expression": "BSD-3-Clause",
+      "wheel": {
+        "file_name": "fsspec-2026.7.0-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/fd/3c/6a2bf344106328fd04963664a60b9bb6496fc25df8e962fcdc1367285fb9/fsspec-2026.7.0-py3-none-any.whl",
+        "byte_length": 206583,
+        "sha256": "b57ddbafedfaef7018c1ecab32aa200a9d7ca26b77965f64e48b70061249d279"
+      },
       "content_sha256": "30cca594f5806e2c163123fb779be28fe262d0217c2695166d65e15716eef64d"
     },
     {
@@ -40,6 +61,12 @@
       "version": "3.1.6",
       "source_url": "https://pypi.org/project/Jinja2/3.1.6/",
       "license_expression": "BSD-3-Clause",
+      "wheel": {
+        "file_name": "jinja2-3.1.6-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl",
+        "byte_length": 134899,
+        "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67"
+      },
       "content_sha256": "c84018284228f1ab67447307418f3f39499b5643561c04c64e93071cd99e2cf5"
     },
     {
@@ -47,6 +74,12 @@
       "version": "3.0.3",
       "source_url": "https://pypi.org/project/MarkupSafe/3.0.3/",
       "license_expression": "BSD-3-Clause",
+      "wheel": {
+        "file_name": "markupsafe-3.0.3-cp313-cp313-win_amd64.whl",
+        "url": "https://files.pythonhosted.org/packages/05/73/c4abe620b841b6b791f2edc248f556900667a5a1cf023a6646967ae98335/markupsafe-3.0.3-cp313-cp313-win_amd64.whl",
+        "byte_length": 15113,
+        "sha256": "9a1abfdc021a164803f4d485104931fb8f8c1efd55bc6b748d2f5774e78b62c5"
+      },
       "content_sha256": "2364bbbf2e5b72f31329926d136e0d5ea37b8fa47ea2e0f4ef769d963cc1f8b5"
     },
     {
@@ -54,6 +87,12 @@
       "version": "1.3.0",
       "source_url": "https://pypi.org/project/mpmath/1.3.0/",
       "license_expression": "BSD-3-Clause",
+      "wheel": {
+        "file_name": "mpmath-1.3.0-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl",
+        "byte_length": 536198,
+        "sha256": "a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c"
+      },
       "content_sha256": "36fa921132b6ce1ed5432266ed553205091def5d65adeb492b8ce4ab05dbde70"
     },
     {
@@ -61,6 +100,12 @@
       "version": "1.2.2",
       "source_url": "https://pypi.org/project/msgpack/1.2.2/",
       "license_expression": "Apache-2.0",
+      "wheel": {
+        "file_name": "msgpack-1.2.2-cp313-cp313-win_amd64.whl",
+        "url": "https://files.pythonhosted.org/packages/3c/f8/593f5caf0dacab41cde1564c5f0419e61af55ec9628006205e8fd5eb5e03/msgpack-1.2.2-cp313-cp313-win_amd64.whl",
+        "byte_length": 72203,
+        "sha256": "b07c03f0da7e5279170df7745ddc732d526c8a198208936ec1a95c11ed2b2d5f"
+      },
       "content_sha256": "86ad3f4f0af3cc5c488d1a0111a3079c6752be334e42c434b20d0caa3bd8e8b9"
     },
     {
@@ -68,6 +113,12 @@
       "version": "3.6.1",
       "source_url": "https://pypi.org/project/networkx/3.6.1/",
       "license_expression": "BSD-3-Clause",
+      "wheel": {
+        "file_name": "networkx-3.6.1-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/9e/c9/b2622292ea83fbb4ec318f5b9ab867d0a28ab43c5717bb85b0a5f6b3b0a4/networkx-3.6.1-py3-none-any.whl",
+        "byte_length": 2068504,
+        "sha256": "d47fbf302e7d9cbbb9e2555a0d267983d2aa476bac30e90dfbe5669bd57f3762"
+      },
       "content_sha256": "a2199a7f50178ad93a4e44fc1f7427b56230d9fc576c3caf8d94594b93a0647d"
     },
     {
@@ -75,6 +126,12 @@
       "version": "2.5.2",
       "source_url": "https://pypi.org/project/numpy/2.5.2/",
       "license_expression": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
+      "wheel": {
+        "file_name": "numpy-2.5.2-cp313-cp313-win_amd64.whl",
+        "url": "https://files.pythonhosted.org/packages/15/20/f3489f86d81ea460b2bcdceaed094142ca6579f6be0ec527b781d39afe68/numpy-2.5.2-cp313-cp313-win_amd64.whl",
+        "byte_length": 12460532,
+        "sha256": "85aaccb24182c25df891ad0ec333585967e115269d5f1b17f2c9ae005bc96657"
+      },
       "content_sha256": "c8d7243599f1091c3ce697a84ca608bf807cc7565b592e01bec2541e3c2a3bfa"
     },
     {
@@ -82,6 +139,12 @@
       "version": "0.8.0",
       "source_url": "https://pypi.org/project/safetensors/0.8.0/",
       "license_expression": "Apache-2.0",
+      "wheel": {
+        "file_name": "safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+        "url": "https://files.pythonhosted.org/packages/1b/6d/3fba214c1e5e0f69991677ec3bc17023f0421776975e1de0c682dca475e2/safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+        "byte_length": 355540,
+        "sha256": "096ec1a98435df7beb08853bb5aa9081a84f23d0adc67ed1a0a10550f608373f"
+      },
       "content_sha256": "9f17c2a3ee03a8926a4218391fa8895df79e5a8ca8d4c37142d0ba35920078a5"
     },
     {
@@ -89,6 +152,12 @@
       "version": "84.0.0",
       "source_url": "https://pypi.org/project/setuptools/84.0.0/",
       "license_expression": "MIT",
+      "wheel": {
+        "file_name": "setuptools-84.0.0-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/95/9c/c510029fc6ef33a6275cd2c5d3cecd6613dfd6aa401d57c54f1c18852ccf/setuptools-84.0.0-py3-none-any.whl",
+        "byte_length": 818216,
+        "sha256": "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"
+      },
       "content_sha256": "b21d00bccb8dfde644f089a47cefb68041a65ba7bd24c53a46c1c0b60575f2ff"
     },
     {
@@ -96,6 +165,12 @@
       "version": "1.14.0",
       "source_url": "https://pypi.org/project/sympy/1.14.0/",
       "license_expression": "BSD-3-Clause",
+      "wheel": {
+        "file_name": "sympy-1.14.0-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl",
+        "byte_length": 6299353,
+        "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5"
+      },
       "content_sha256": "b27af39e256acaf076f7e84c449695d3c8ff9356fdf67e2b7451dd2bb6d3fb7e"
     },
     {
@@ -103,6 +178,12 @@
       "version": "2.13.0+cu130",
       "source_url": "https://download.pytorch.org/whl/cu130/torch/",
       "license_expression": "Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND MIT",
+      "wheel": {
+        "file_name": "torch-2.13.0+cu130-cp313-cp313-win_amd64.whl",
+        "url": "https://download-r2.pytorch.org/whl/cu130/torch-2.13.0%2Bcu130-cp313-cp313-win_amd64.whl",
+        "byte_length": 1915517499,
+        "sha256": "cf23236e9deed7d3510d14d9b9592d75d272ef7b35bbfee31a02bea339c73971"
+      },
       "content_sha256": "66d8b79cb4119944b02d041c39262690727c1dab088efe3dd180722d134a8ba2"
     },
     {
@@ -110,6 +191,12 @@
       "version": "4.70.0",
       "source_url": "https://pypi.org/project/tqdm/4.70.0/",
       "license_expression": "MPL-2.0 AND MIT",
+      "wheel": {
+        "file_name": "tqdm-4.70.0-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/f9/1c/01bfd571a64e7f270e6bab5e33777debe0edc56759233ce84f27dec92d14/tqdm-4.70.0-py3-none-any.whl",
+        "byte_length": 80184,
+        "sha256": "7f585706bfddbdebf89daac705b2dfcc16890130727d3197ca62c732b4310953"
+      },
       "content_sha256": "076fbd6cc503c65eb20c0fc14993a880c2435dbe3db7c794b4f9422d6668ab08"
     },
     {
@@ -117,6 +204,12 @@
       "version": "4.16.0",
       "source_url": "https://pypi.org/project/typing-extensions/4.16.0/",
       "license_expression": "PSF-2.0",
+      "wheel": {
+        "file_name": "typing_extensions-4.16.0-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl",
+        "byte_length": 45571,
+        "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
+      },
       "content_sha256": "a7ebb20fb1ee57e955b7132d3bd51c71ff498d386453f17b3515527eb02ea8cd"
     }
   ],
@@ -124,37 +217,37 @@
     {
       "name": "latentdeck-cartridge",
       "version": "0.1.0",
-      "source_url": "https://latentdeck.org/",
+      "source_url": "https://github.com/f00br/latentdeck/tree/main/sdk/python",
       "license_expression": "Apache-2.0"
     },
     {
       "name": "latentdeck-codec-host",
       "version": "0.1.0",
-      "source_url": "https://latentdeck.org/",
+      "source_url": "https://github.com/f00br/latentdeck/tree/main/codec-host/python",
       "license_expression": "Apache-2.0"
     },
     {
       "name": "latentdeck-codec-sdk",
       "version": "0.2.0",
-      "source_url": "https://latentdeck.org/",
+      "source_url": "https://github.com/f00br/latentdeck/tree/main/sdk/codec-python",
       "license_expression": "Apache-2.0"
     },
     {
       "name": "latentdeck-deck-sdk",
       "version": "0.2.0",
-      "source_url": "https://latentdeck.org/",
+      "source_url": "https://github.com/f00br/latentdeck/tree/main/sdk/deck-python",
       "license_expression": "Apache-2.0"
     },
     {
       "name": "latentdeck-rgb-ring",
       "version": "0.1.0",
-      "source_url": "https://latentdeck.org/",
+      "source_url": "https://github.com/f00br/latentdeck/tree/main/codec-host/rgb-ring",
       "license_expression": "Apache-2.0"
     },
     {
       "name": "latentdeck-codec-h3",
       "version": "0.2.0",
-      "source_url": "https://latentdeck.org/",
+      "source_url": "https://github.com/f00br/latentdeck/tree/main/codec-host/codecs/h3",
       "license_expression": "Apache-2.0"
     }
   ],

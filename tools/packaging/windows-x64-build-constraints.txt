@@ -1,0 +1,3 @@
+# Exact Windows x64 build backends for release wheel construction.
+maturin==1.15.0 --hash=sha256:552c2be4afd43fe8d5c9f3ec8d4c4756d973b8dcbe94c14084390301f50243e1
+uv-build==0.12.7 --hash=sha256:2c0baba9f1f1dfbfcb3dede01d04e7e9b94062b00aaf9880dcde73bd5e5c127b

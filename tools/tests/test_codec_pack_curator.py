@@ -85,7 +85,10 @@ def _write_distribution(
 def _lock(*, content_sha256: str) -> dict[str, object]:
     return {
         "schema_version": 1,
+        "pack_version": "0.2.1",
         "platform": "windows-x86_64",
+        "worker_protocol": 2,
+        "codec_adapter_api": 1,
         "uv_version": "0.11.8",
         "python_runtime": {
             "version": "3.13.14",
@@ -103,6 +106,15 @@ def _lock(*, content_sha256: str) -> dict[str, object]:
                 "source_url": "https://pypi.org/project/demo-runtime/1.2.3/",
                 "license_expression": "MIT",
                 "content_sha256": content_sha256,
+                "wheel": {
+                    "file_name": "demo_runtime-1.2.3-py3-none-any.whl",
+                    "url": (
+                        "https://files.pythonhosted.org/packages/test/"
+                        "demo_runtime-1.2.3-py3-none-any.whl"
+                    ),
+                    "byte_length": 123,
+                    "sha256": "a" * 64,
+                },
             }
         ],
         "local_projects": [],
@@ -111,6 +123,151 @@ def _lock(*, content_sha256: str) -> dict[str, object]:
             "relative_paths": ["bin", "share/man", "distutils-precedence.pth"],
         },
     }
+
+
+def _native_metadata(pack_version: str = "0.2.1") -> tuple[str, str]:
+    artifact_name = "LatentDeck H3 Native Extensions"
+    artifact_ref = f"pkg:generic/LatentDeck%20H3%20Native%20Extensions@{pack_version}"
+    components = [
+        {
+            "type": "library",
+            "bom-ref": "rust:latentdeck-cartridge-python@0.1.0",
+            "name": "latentdeck-cartridge-python",
+            "version": "0.1.0",
+            "licenses": [{"license": {"name": "Apache-2.0"}}],
+            "properties": [
+                {"name": "latentdeck:ecosystem", "value": "rust"},
+                {"name": "latentdeck:dependency-scope", "value": "artifact"},
+                {"name": "latentdeck:selection-root", "value": "true"},
+            ],
+        },
+        {
+            "type": "library",
+            "bom-ref": "rust:latentdeck-gpu-python@0.1.0",
+            "name": "latentdeck-gpu-python",
+            "version": "0.1.0",
+            "licenses": [{"license": {"name": "Apache-2.0"}}],
+            "properties": [
+                {"name": "latentdeck:ecosystem", "value": "rust"},
+                {"name": "latentdeck:dependency-scope", "value": "artifact"},
+                {"name": "latentdeck:selection-root", "value": "true"},
+            ],
+        },
+    ]
+    sbom = {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "serialNumber": "urn:uuid:00000000-0000-0000-0000-000000000001",
+        "version": 1,
+        "metadata": {
+            "component": {
+                "type": "application",
+                "bom-ref": artifact_ref,
+                "name": artifact_name,
+                "version": pack_version,
+                "licenses": [{"license": {"name": "Apache-2.0"}}],
+                "properties": [
+                    {"name": "latentdeck:artifact-scope", "value": "h3-native"},
+                    {"name": "latentdeck:dependency-scope", "value": "artifact"},
+                    {
+                        "name": "latentdeck:target-platform",
+                        "value": "x86_64-pc-windows-msvc",
+                    },
+                ],
+            }
+        },
+        "components": components,
+    }
+    sbom_text = json.dumps(sbom, indent=2, sort_keys=True) + "\n"
+    license_text = "Synthetic Apache-2.0 test text.\n"
+    text_hash = hashlib.sha256(license_text.encode()).hexdigest()
+    mappings = []
+    for component, ecosystem in [
+        (sbom["metadata"]["component"], "artifact"),
+        *[(component, "rust") for component in components],
+    ]:
+        scope = next(
+            item["value"]
+            for item in component["properties"]
+            if item["name"] == "latentdeck:dependency-scope"
+        )
+        mappings.append(
+            {
+                "bom-ref": component["bom-ref"],
+                "name": component["name"],
+                "version": component["version"],
+                "ecosystem": ecosystem,
+                "dependency_scope": scope,
+                "license_expression": "Apache-2.0",
+                "artifacts": [artifact_name],
+                "disposition": "license_text_in_bundle",
+                "rationale": "",
+                "text_sha256s": [text_hash],
+            }
+        )
+    license_bundle = {
+        "schema_version": 1,
+        "artifact": {"name": artifact_name, "version": pack_version},
+        "policy": {
+            "component_coverage": "exact-sbom-closure",
+            "redistributed_components_require_text": True,
+            "build_only_disposition": "not_redistributed_no_text_required",
+            "text_canonicalization": "strict-utf8-lf-final-newline",
+        },
+        "sboms": [
+            {
+                "name": "NATIVE_RUST_SBOM.cdx.json",
+                "artifact": artifact_name,
+                "byte_length": len(sbom_text.encode()),
+                "sha256": hashlib.sha256(sbom_text.encode()).hexdigest(),
+            }
+        ],
+        "component_count": len(mappings),
+        "text_count": 1,
+        "components": mappings,
+        "texts": [
+            {
+                "sha256": text_hash,
+                "byte_length": len(license_text.encode()),
+                "sources": [{"source_kind": "synthetic-test"}],
+                "text": license_text,
+            }
+        ],
+    }
+    return sbom_text, json.dumps(license_bundle, indent=2, sort_keys=True) + "\n"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing", "contract is not exact"),
+        ("hash", "sha256"),
+        ("length", "byte_length"),
+        ("url", "exact HTTPS wheel"),
+        ("sdist", "one wheel filename"),
+    ],
+)
+def test_dependency_wheel_lock_fails_closed(mutation: str, message: str) -> None:
+    lock = _lock(content_sha256="1" * 64)
+    dependency = lock["dependencies"][0]
+    if mutation == "missing":
+        dependency.pop("wheel")
+    elif mutation == "hash":
+        dependency["wheel"]["sha256"] = "not-a-sha256"
+    elif mutation == "length":
+        dependency["wheel"]["byte_length"] = 0
+    elif mutation == "url":
+        dependency["wheel"]["url"] = (
+            "https://files.pythonhosted.org/packages/test/other-1.2.3-py3-none-any.whl"
+        )
+    else:
+        dependency["wheel"]["file_name"] = "demo-runtime-1.2.3.tar.gz"
+        dependency["wheel"]["url"] = (
+            "https://files.pythonhosted.org/packages/test/demo-runtime-1.2.3.tar.gz"
+        )
+
+    with pytest.raises(curator.CuratorError, match=message):
+        curator._validate_lock(lock)
 
 
 def test_curates_exact_recorded_distribution_and_removes_installer_paths(tmp_path: Path) -> None:
@@ -237,19 +394,52 @@ def test_metadata_is_deterministic_path_free_and_atomic(tmp_path: Path) -> None:
     )
     lock = _lock(content_sha256=expected_digest)
     components = curator.curate_site_packages(site_packages, lock)
+    native_sbom, native_licenses = _native_metadata()
     metadata = curator.build_metadata(
         lock,
         components,
         base_notice="# H3 notice\n\nNo model weight is included.\n",
-        pack_version="0.1.0",
+        native_rust_sbom=native_sbom,
+        native_rust_licenses=native_licenses,
+        pack_version="0.2.1",
+        source_commit="a" * 40,
     )
 
     inventory = json.loads(metadata["DEPENDENCY_INVENTORY.json"])
     sbom = json.loads(metadata["SBOM.cdx.json"])
     assert inventory["components"][0]["name"] == "CPython"
     assert inventory["components"][1]["name"] == "demo-runtime"
+    assert inventory["source_commit"] == "a" * 40
     assert sbom["bomFormat"] == "CycloneDX"
     assert sbom["specVersion"] == "1.5"
+    root_properties = {
+        item["name"]: item["value"] for item in sbom["metadata"]["component"]["properties"]
+    }
+    assert root_properties["latentdeck:dependency-scope"] == "artifact"
+    assert root_properties["latentdeck:included-dependency-scopes"] == (
+        "artifact,runtime,build,runtime+build"
+    )
+    assert root_properties["latentdeck:excluded-dependency-scopes"] == "development"
+    assert all(
+        component["properties"]
+        == [
+            {"name": "latentdeck:ecosystem", "value": "python"},
+            {"name": "latentdeck:dependency-scope", "value": "runtime"},
+        ]
+        for component in sbom["components"]
+        if component["bom-ref"].startswith("pkg:")
+    )
+    assert inventory["native_rust"]["selection_roots"] == [
+        "latentdeck-cartridge-python",
+        "latentdeck-gpu-python",
+    ]
+    assert set(metadata) == {
+        "DEPENDENCY_INVENTORY.json",
+        "NATIVE_RUST_LICENSES.json",
+        "NATIVE_RUST_SBOM.cdx.json",
+        "SBOM.cdx.json",
+        "THIRD_PARTY_NOTICES.md",
+    }
     assert "demo_runtime-1.2.3.dist-info/licenses/LICENSE.txt" in metadata["THIRD_PARTY_NOTICES.md"]
     serialized = "\n".join(metadata.values())
     assert "file:///" not in serialized
@@ -262,6 +452,39 @@ def test_metadata_is_deterministic_path_free_and_atomic(tmp_path: Path) -> None:
     with pytest.raises(curator.CuratorError, match="overwrite"):
         curator.write_metadata_atomic(output, metadata)
     assert first == {path.name: path.read_bytes() for path in output.iterdir()}
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing_mapping", "mapping"),
+        ("scope_drift", "mapping"),
+        ("sbom_hash", "hash binding"),
+    ],
+)
+def test_metadata_rejects_tampered_native_rust_evidence(
+    tmp_path: Path, mutation: str, message: str
+) -> None:
+    native_sbom, native_licenses = _native_metadata()
+    licenses = json.loads(native_licenses)
+    if mutation == "missing_mapping":
+        licenses["components"].pop()
+        licenses["component_count"] -= 1
+    elif mutation == "scope_drift":
+        licenses["components"][0]["dependency_scope"] = "runtime"
+    else:
+        licenses["sboms"][0]["sha256"] = "0" * 64
+
+    with pytest.raises(curator.CuratorError, match=message):
+        curator.build_metadata(
+            _lock(content_sha256="1" * 64),
+            [],
+            base_notice="# H3 notice\n",
+            native_rust_sbom=native_sbom,
+            native_rust_licenses=json.dumps(licenses),
+            pack_version="0.2.1",
+            source_commit="a" * 40,
+        )
 
 
 def test_sensitive_metadata_rejects_private_paths_without_rejecting_code_examples(

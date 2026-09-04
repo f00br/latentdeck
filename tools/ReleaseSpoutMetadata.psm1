@@ -169,8 +169,8 @@ function Assert-Spout2CycloneDxComponent {
     }
 
     $properties = @(Get-RequiredObjectProperty -Object $component -Name 'properties' -Context 'Spout2 SBOM component')
-    if ($properties.Count -ne 5) {
-        throw 'Spout2 SBOM component must declare exactly five integration properties.'
+    if ($properties.Count -notin @(5, 6)) {
+        throw 'Spout2 SBOM component must declare five integration properties and at most one dependency scope.'
     }
     foreach ($expected in @(
         @{ Name = 'latentdeck:ecosystem'; Value = 'native-cpp' },
@@ -188,6 +188,20 @@ function Assert-Spout2CycloneDxComponent {
         )
         if ($propertyMatches.Count -ne 1) {
             throw "Spout2 SBOM component is missing exact property '$($expected.Name)'."
+        }
+    }
+    if ($properties.Count -eq 6) {
+        $dependencyScopes = @(
+            $properties |
+                Where-Object {
+                    [string](Get-RequiredObjectProperty -Object $_ -Name 'name' -Context 'Spout2 property') -ceq
+                        'latentdeck:dependency-scope' -and
+                    [string](Get-RequiredObjectProperty -Object $_ -Name 'value' -Context 'Spout2 property') -in
+                        @('runtime', 'development')
+                }
+        )
+        if ($dependencyScopes.Count -ne 1) {
+            throw 'Spout2 SBOM component has an invalid dependency scope.'
         }
     }
     return $component

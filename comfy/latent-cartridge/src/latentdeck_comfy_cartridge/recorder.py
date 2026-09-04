@@ -351,11 +351,21 @@ def _sdk_pack(
     )
 
 
-def _write_safetensors(path: Path, tensors: dict[str, object]) -> None:
+def _resolve_safetensors_save_file() -> Callable[..., object]:
+    """Resolve the host package first, then the bundle's private fallback."""
+
     try:
         from safetensors.torch import save_file
     except ImportError as error:
-        raise RecorderError("install safetensors in the ComfyUI environment") from error
+        try:
+            from latentdeck_recorder_vendor.safetensors.torch import save_file
+        except ImportError:
+            raise RecorderError("install safetensors in the ComfyUI environment") from error
+    return save_file
+
+
+def _write_safetensors(path: Path, tensors: dict[str, object]) -> None:
+    save_file = _resolve_safetensors_save_file()
 
     detached_tensors: dict[str, Any] = {}
     for name, tensor in tensors.items():

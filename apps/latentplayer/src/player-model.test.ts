@@ -62,7 +62,7 @@ const READY: PlayerView = {
     packId: "org.latentdeck.h3",
     packVersion: "0.1.0",
     publisherName: "LatentDeck",
-    publisherUrl: "https://latentdeck.org",
+    publisherUrl: "https://github.com/f00br/latentdeck",
     packLicenseLabel: "Apache-2.0",
     decoderAssetId: "taeh3",
     decoderDisplayName: "TAEH3",

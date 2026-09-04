@@ -24,6 +24,7 @@ from email.parser import BytesParser
 from email.policy import compat32
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 MAX_RUNTIME_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_RUNTIME_ENTRIES = 128
@@ -128,7 +129,13 @@ GENERATED_DIST_INFO_FILES = frozenset(
     {"DELVEWHEEL", "INSTALLER", "REQUESTED", "direct_url.json", "uv_cache.json"}
 )
 METADATA_FILENAMES = frozenset(
-    {"DEPENDENCY_INVENTORY.json", "SBOM.cdx.json", "THIRD_PARTY_NOTICES.md"}
+    {
+        "DEPENDENCY_INVENTORY.json",
+        "NATIVE_RUST_LICENSES.json",
+        "NATIVE_RUST_SBOM.cdx.json",
+        "SBOM.cdx.json",
+        "THIRD_PARTY_NOTICES.md",
+    }
 )
 HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 NORMALIZED_NAME = re.compile(r"[-_.]+")
@@ -216,7 +223,10 @@ def _validate_lock(lock: object) -> dict[str, Any]:
         raise CuratorError("curation lock must be a JSON object")
     required = {
         "schema_version",
+        "pack_version",
         "platform",
+        "worker_protocol",
+        "codec_adapter_api",
         "uv_version",
         "python_runtime",
         "dependencies",
@@ -227,6 +237,10 @@ def _validate_lock(lock: object) -> dict[str, Any]:
         raise CuratorError("curation lock has missing or unknown top-level fields")
     if lock["schema_version"] != 1 or lock["platform"] != "windows-x86_64":
         raise CuratorError("curation lock schema or platform is unsupported")
+    if lock["pack_version"] != "0.2.1":
+        raise CuratorError("curation lock pack_version must be the immutable H3 0.2.1 identity")
+    if lock["worker_protocol"] != 2 or lock["codec_adapter_api"] != 1:
+        raise CuratorError("curation lock protocol/API identity is unsupported")
     _require_string(lock["uv_version"], "uv_version", maximum=32)
     runtime = lock["python_runtime"]
     if not isinstance(runtime, dict) or set(runtime) != {
@@ -279,6 +293,9 @@ def _validate_lock(lock: object) -> dict[str, Any]:
                 raise CuratorError(f"{collection_name}[{index}] must be an object")
             required_component = {"name", "version", "source_url", "license_expression"}
             allowed_component = required_component | {"content_sha256"}
+            if collection_name == "dependencies":
+                required_component.add("wheel")
+                allowed_component.add("wheel")
             if not required_component.issubset(component) or not set(component).issubset(
                 allowed_component
             ):
@@ -294,6 +311,38 @@ def _validate_lock(lock: object) -> dict[str, Any]:
             _require_string(component["license_expression"], "component.license_expression")
             if "content_sha256" in component:
                 _require_sha256(component["content_sha256"], "component.content_sha256")
+            if collection_name == "dependencies":
+                wheel = component["wheel"]
+                if not isinstance(wheel, dict) or set(wheel) != {
+                    "file_name",
+                    "url",
+                    "byte_length",
+                    "sha256",
+                }:
+                    raise CuratorError("component.wheel contract is not exact")
+                file_name = _portable_relative(
+                    _require_string(wheel["file_name"], "component.wheel.file_name"),
+                    "component.wheel.file_name",
+                )
+                if "/" in file_name or not file_name.endswith(".whl"):
+                    raise CuratorError("component.wheel.file_name must be one wheel filename")
+                wheel_url = _require_string(wheel["url"], "component.wheel.url")
+                parsed_url = urlsplit(wheel_url)
+                if (
+                    parsed_url.scheme != "https"
+                    or parsed_url.query
+                    or parsed_url.fragment
+                    or unquote(PurePosixPath(parsed_url.path).name) != file_name
+                ):
+                    raise CuratorError("component.wheel.url does not name the exact HTTPS wheel")
+                byte_length = wheel["byte_length"]
+                if (
+                    not isinstance(byte_length, int)
+                    or isinstance(byte_length, bool)
+                    or not (0 < byte_length < 2 * 1024 * 1024 * 1024)
+                ):
+                    raise CuratorError("component.wheel.byte_length is invalid")
+                _require_sha256(wheel["sha256"], "component.wheel.sha256")
 
     prune = lock["prune"]
     if not isinstance(prune, dict) or set(prune) != {"path_segments", "relative_paths"}:
@@ -757,12 +806,19 @@ def build_metadata(
     components: list[dict[str, Any]],
     *,
     base_notice: str,
+    native_rust_sbom: str,
+    native_rust_licenses: str,
     pack_version: str,
+    source_commit: str,
 ) -> dict[str, str]:
     """Create deterministic inventory, CycloneDX 1.5 SBOM, and notice text."""
 
     lock = _validate_lock(lock)
     _require_string(pack_version, "pack_version", maximum=64)
+    if pack_version != lock["pack_version"]:
+        raise CuratorError("pack_version does not match the immutable curation lock")
+    if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+        raise CuratorError("source_commit must be a lowercase full Git commit")
     if len(base_notice.encode()) > MAX_METADATA_BYTES:
         raise CuratorError("base notice is oversized")
     if (
@@ -772,6 +828,163 @@ def build_metadata(
         or CREDENTIAL.search(base_notice)
     ):
         raise CuratorError("base notice contains a private path or credential")
+
+    for label, text in (
+        ("native Rust SBOM", native_rust_sbom),
+        ("native Rust license bundle", native_rust_licenses),
+    ):
+        if not text or len(text.encode()) > MAX_METADATA_BYTES:
+            raise CuratorError(f"{label} is empty or oversized")
+    try:
+        native_sbom = json.loads(native_rust_sbom)
+        native_licenses = json.loads(native_rust_licenses)
+    except (TypeError, ValueError) as error:
+        raise CuratorError("native Rust metadata is not valid JSON") from error
+    if (
+        native_sbom.get("bomFormat") != "CycloneDX"
+        or native_sbom.get("specVersion") != "1.5"
+        or native_sbom.get("version") != 1
+    ):
+        raise CuratorError("native Rust SBOM identity is invalid")
+    native_root = native_sbom.get("metadata", {}).get("component", {})
+    if (
+        native_root.get("name") != "LatentDeck H3 Native Extensions"
+        or native_root.get("version") != pack_version
+        or native_root.get("bom-ref")
+        != f"pkg:generic/LatentDeck%20H3%20Native%20Extensions@{pack_version}"
+    ):
+        raise CuratorError("native Rust SBOM artifact identity is invalid")
+    native_root_properties = {
+        item.get("name"): item.get("value")
+        for item in native_root.get("properties", [])
+        if isinstance(item, dict)
+    }
+    if (
+        native_root_properties.get("latentdeck:artifact-scope") != "h3-native"
+        or native_root_properties.get("latentdeck:dependency-scope") != "artifact"
+        or native_root_properties.get("latentdeck:target-platform")
+        != "x86_64-pc-windows-msvc"
+    ):
+        raise CuratorError("native Rust SBOM scope is invalid")
+    native_components = native_sbom.get("components")
+    if not isinstance(native_components, list) or not (2 <= len(native_components) <= 256):
+        raise CuratorError("native Rust SBOM component count is invalid")
+    native_references: set[str] = set()
+    native_selection_roots: set[str] = set()
+    for component in native_components:
+        if not isinstance(component, dict):
+            raise CuratorError("native Rust SBOM component is not an object")
+        reference = component.get("bom-ref")
+        name = component.get("name")
+        version = component.get("version")
+        licenses = component.get("licenses")
+        properties = component.get("properties")
+        if (
+            not isinstance(reference, str)
+            or not reference.startswith("rust:")
+            or reference in native_references
+            or not isinstance(name, str)
+            or not isinstance(version, str)
+            or not isinstance(licenses, list)
+            or not licenses
+            or not isinstance(properties, list)
+        ):
+            raise CuratorError("native Rust SBOM component identity is incomplete")
+        native_references.add(reference)
+        property_map = {
+            item.get("name"): item.get("value")
+            for item in properties
+            if isinstance(item, dict)
+        }
+        if property_map.get("latentdeck:ecosystem") != "rust" or property_map.get(
+            "latentdeck:dependency-scope"
+        ) not in {"artifact", "runtime", "build", "runtime+build"}:
+            raise CuratorError("native Rust SBOM component scope is invalid")
+        if property_map.get("latentdeck:selection-root") == "true":
+            native_selection_roots.add(name)
+    if native_selection_roots != {
+        "latentdeck-cartridge-python",
+        "latentdeck-gpu-python",
+    }:
+        raise CuratorError("native Rust SBOM selection roots are not exact")
+
+    native_sbom_bytes = native_rust_sbom.encode()
+    native_license_bytes = native_rust_licenses.encode()
+    if (
+        native_licenses.get("schema_version") != 1
+        or native_licenses.get("artifact", {}).get("name")
+        != "LatentDeck H3 Native Extensions"
+        or native_licenses.get("artifact", {}).get("version") != pack_version
+    ):
+        raise CuratorError("native Rust license bundle identity is invalid")
+    bound_sboms = native_licenses.get("sboms")
+    if not isinstance(bound_sboms, list) or len(bound_sboms) != 1:
+        raise CuratorError("native Rust license bundle SBOM binding is incomplete")
+    native_sbom_binding = bound_sboms[0]
+    if (
+        native_sbom_binding.get("name") != "NATIVE_RUST_SBOM.cdx.json"
+        or native_sbom_binding.get("byte_length") != len(native_sbom_bytes)
+        or native_sbom_binding.get("sha256")
+        != hashlib.sha256(native_sbom_bytes).hexdigest()
+    ):
+        raise CuratorError("native Rust license bundle SBOM hash binding is invalid")
+    expected_mapping_components = [
+        (native_root, "artifact"),
+        *((component, "rust") for component in native_components),
+    ]
+    expected_mappings: dict[str, dict[str, Any]] = {}
+    for component, ecosystem in expected_mapping_components:
+        reference = component.get("bom-ref")
+        property_map = {
+            item.get("name"): item.get("value")
+            for item in component.get("properties", [])
+            if isinstance(item, dict)
+        }
+        labels: list[str] = []
+        for license_entry in component.get("licenses", []):
+            if not isinstance(license_entry, dict):
+                continue
+            expression = license_entry.get("expression")
+            license_object = license_entry.get("license")
+            if isinstance(expression, str) and expression:
+                labels.append(expression)
+            elif isinstance(license_object, dict):
+                label = license_object.get("id") or license_object.get("name")
+                if isinstance(label, str) and label:
+                    labels.append(label)
+        if not isinstance(reference, str) or not labels:
+            raise CuratorError("native Rust SBOM mapping identity is incomplete")
+        expected_mappings[reference] = {
+            "name": component.get("name"),
+            "version": component.get("version"),
+            "ecosystem": ecosystem,
+            "dependency_scope": property_map.get("latentdeck:dependency-scope"),
+            "license_expression": " OR ".join(sorted(set(labels))),
+            "artifacts": ["LatentDeck H3 Native Extensions"],
+        }
+    mappings = native_licenses.get("components")
+    if not isinstance(mappings, list) or len(mappings) != len(expected_mappings):
+        raise CuratorError("native Rust license component mapping is incomplete")
+    actual_mapping_refs: set[str] = set()
+    for mapping in mappings:
+        if not isinstance(mapping, dict):
+            raise CuratorError("native Rust license component mapping is incomplete")
+        reference = mapping.get("bom-ref")
+        if (
+            not isinstance(reference, str)
+            or reference in actual_mapping_refs
+            or reference not in expected_mappings
+        ):
+            raise CuratorError("native Rust license component mapping is incomplete")
+        actual_mapping_refs.add(reference)
+        expected = expected_mappings[reference]
+        for field, value in expected.items():
+            if mapping.get(field) != value:
+                raise CuratorError(
+                    f"native Rust license component mapping drifted: {reference}/{field}"
+                )
+    if actual_mapping_refs != set(expected_mappings):
+        raise CuratorError("native Rust license component mapping is incomplete")
 
     runtime = lock["python_runtime"]
     python_component = {
@@ -784,16 +997,32 @@ def build_metadata(
         "license_files": [f"runtime/{runtime['license_path']}"],
     }
     normalized_components = [python_component]
-    normalized_components.extend(
-        sorted(components, key=lambda component: _normalize_name(component["name"]))
-    )
+    for component in sorted(components, key=lambda item: _normalize_name(item["name"])):
+        normalized = dict(component)
+        project_prefix = "https://github.com/f00br/latentdeck/tree/main/"
+        if normalized["source_url"].startswith(project_prefix):
+            normalized["source_url"] = normalized["source_url"].replace(
+                project_prefix,
+                f"https://github.com/f00br/latentdeck/tree/{source_commit}/",
+                1,
+            )
+        normalized_components.append(normalized)
     inventory = {
         "schema_version": 1,
         "pack_id": "org.latentdeck.h3",
         "pack_version": pack_version,
+        "source_commit": source_commit,
         "platform": lock["platform"],
         "curator": {"name": "latentdeck-codec-pack-curator", "schema_version": 1},
         "components": normalized_components,
+        "native_rust": {
+            "sbom_path": "NATIVE_RUST_SBOM.cdx.json",
+            "sbom_sha256": hashlib.sha256(native_sbom_bytes).hexdigest(),
+            "license_bundle_path": "NATIVE_RUST_LICENSES.json",
+            "license_bundle_sha256": hashlib.sha256(native_license_bytes).hexdigest(),
+            "component_count": len(native_components),
+            "selection_roots": sorted(native_selection_roots),
+        },
     }
 
     sbom_components: list[dict[str, Any]] = []
@@ -809,6 +1038,10 @@ def build_metadata(
             "hashes": [{"alg": "SHA-256", "content": component["content_sha256"]}],
             "licenses": [{"expression": component["license_expression"]}],
             "externalReferences": [{"type": "distribution", "url": component["source_url"]}],
+            "properties": [
+                {"name": "latentdeck:ecosystem", "value": "python"},
+                {"name": "latentdeck:dependency-scope", "value": "runtime"},
+            ],
         }
         if not is_python:
             sbom_component["purl"] = f"pkg:pypi/{normalized}@{component['version']}"
@@ -823,9 +1056,26 @@ def build_metadata(
                 "type": "application",
                 "name": "LatentDeck H3 Codec Pack",
                 "version": pack_version,
+                "licenses": [{"expression": "Apache-2.0"}],
+                "properties": [
+                    {"name": "latentdeck:source-commit", "value": source_commit},
+                    {"name": "latentdeck:artifact-scope", "value": "h3-codec-pack"},
+                    {"name": "latentdeck:dependency-scope", "value": "artifact"},
+                    {
+                        "name": "latentdeck:included-dependency-scopes",
+                        "value": "artifact,runtime,build,runtime+build",
+                    },
+                    {
+                        "name": "latentdeck:excluded-dependency-scopes",
+                        "value": "development",
+                    },
+                    {"name": "latentdeck:target-platform", "value": "windows-x86_64"},
+                ],
             }
         },
-        "components": sbom_components,
+        "components": sorted(
+            [*sbom_components, *native_components], key=lambda item: item["bom-ref"]
+        ),
     }
 
     notice_lines = [base_notice.rstrip(), "", "## Runtime dependency inventory", ""]
@@ -852,6 +1102,13 @@ def build_metadata(
         notice_lines.append("")
     notice_lines.extend(
         [
+            "## Native Python extension Rust closure",
+            "",
+            "The shipped native Python extensions and their locked Windows Cargo",
+            "dependency closure are recorded in `NATIVE_RUST_SBOM.cdx.json`.",
+            "Full redistributed-component license texts and explicit build-only",
+            "dispositions are recorded in `NATIVE_RUST_LICENSES.json`.",
+            "",
             "No model weight, cartridge, generator, or ComfyUI component is included.",
             "The decoder weight remains an explicitly selected external asset.",
             "",
@@ -863,6 +1120,8 @@ def build_metadata(
             inventory, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False
         )
         + "\n",
+        "NATIVE_RUST_LICENSES.json": native_rust_licenses,
+        "NATIVE_RUST_SBOM.cdx.json": native_rust_sbom,
         "SBOM.cdx.json": json.dumps(
             sbom, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False
         )
@@ -921,16 +1180,26 @@ def _command_curate(args: argparse.Namespace) -> int:
     lock = load_lock(args.lock)
     components = curate_site_packages(args.site_packages, lock)
     base_notice = Path(args.base_notice).read_text(encoding="utf-8", errors="strict")
+    native_rust_sbom = Path(args.native_rust_sbom).read_text(
+        encoding="utf-8", errors="strict"
+    )
+    native_rust_licenses = Path(args.native_rust_licenses).read_text(
+        encoding="utf-8", errors="strict"
+    )
     metadata = build_metadata(
         lock,
         components,
         base_notice=base_notice,
+        native_rust_sbom=native_rust_sbom,
+        native_rust_licenses=native_rust_licenses,
         pack_version=args.pack_version,
+        source_commit=args.source_commit,
     )
     write_metadata_atomic(args.metadata_output, metadata)
     receipt = {
         "component_count": len(components) + 1,
         "pack_version": args.pack_version,
+        "source_commit": args.source_commit,
         "site_packages": "curated",
     }
     print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
@@ -950,8 +1219,11 @@ def _parser() -> argparse.ArgumentParser:
     curate.add_argument("--lock", required=True)
     curate.add_argument("--site-packages", required=True)
     curate.add_argument("--base-notice", required=True)
+    curate.add_argument("--native-rust-sbom", required=True)
+    curate.add_argument("--native-rust-licenses", required=True)
     curate.add_argument("--metadata-output", required=True)
     curate.add_argument("--pack-version", required=True)
+    curate.add_argument("--source-commit", required=True)
     curate.set_defaults(handler=_command_curate)
     return parser
 

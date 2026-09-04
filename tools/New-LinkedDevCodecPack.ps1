@@ -12,7 +12,8 @@ param(
     [Parameter(Mandatory)]
     [string]$OutputRoot,
 
-    [string]$PackVersion = '0.1.0'
+    [Parameter(Mandatory)]
+    [string]$PackVersion
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,8 +44,11 @@ foreach ($entrypoint in @('__init__.py', 'worker.py')) {
         throw "Linked Codec Pack entrypoint must be a regular file: latentdeck_codec_h3/$entrypoint."
     }
 }
-if ($PackVersion -notmatch '^0\.1\.0$') {
-    throw 'The linked development pack currently supports only version 0.1.0.'
+if ($PackVersion -cne '0.1.0') {
+    throw (
+        'The non-distributable Protocol 1 linked development pack is deliberately bound to ' +
+        'version 0.1.0. Public H3 Codec Pack releases use the separate 0.2.1 builder.'
+    )
 }
 
 $outputBase = [System.IO.Path]::GetFullPath($OutputRoot)
@@ -215,12 +219,12 @@ $manifest = [ordered]@{
             format            = 'safetensors'
             accepted_variants = @(
                 [ordered]@{
-                    variant_id   = 'madebyollin-taeh3-e743234f'
+                    variant_id   = 'madebyollin-taeh3-62f7591f'
                     sha256       = '4fd022bfcab08772fe0536b17ea1a3bbb5625be11e397868d1c5d891863d4c13'
                     byte_length  = 22709752
-                    source_url   = 'https://huggingface.co/madebyollin/taehv/resolve/main/taeh3.safetensors'
+                    source_url   = 'https://raw.githubusercontent.com/madebyollin/taehv/62f7591f59dfbb4c3c02b7a621d180a9eeaba26c/safetensors/taeh3.safetensors'
                     license_label = 'MIT'
-                    license_url  = 'https://github.com/madebyollin/taehv/blob/e743234f/LICENSE'
+                    license_url  = 'https://github.com/madebyollin/taehv/blob/62f7591f59dfbb4c3c02b7a621d180a9eeaba26c/LICENSE'
                 }
             )
         }

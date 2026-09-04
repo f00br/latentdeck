@@ -4,12 +4,25 @@ param(
 
     [string]$SpoutArchivePath,
 
-    [string]$SbomPath
+    [string]$SbomPath,
+
+    [ValidateSet('unsigned_preview', 'stable')]
+    [string]$ReleaseChannel = 'unsigned_preview',
+
+    [string]$ReleaseLabel,
+
+    [string]$SigningCommand,
+
+    [switch]$DevelopmentBuild
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $ProgressPreference = 'SilentlyContinue'
+
+if ($ReleaseChannel -cnotin @('unsigned_preview', 'stable')) {
+    throw 'ReleaseChannel must be exactly unsigned_preview or stable.'
+}
 
 if ($PSBoundParameters.ContainsKey('SbomPath')) {
     throw (
@@ -20,9 +33,56 @@ if ($PSBoundParameters.ContainsKey('SbomPath')) {
 
 Import-Module (Join-Path $PSScriptRoot 'ReleaseSpoutMetadata.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'TauriReleaseContract.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'ReleaseLicenseBundle.psm1') -Force
 
-$releaseVersion = '0.1.0'
+$applicationApiVersion = '0.1.0'
+$windowsInstallerVersion = '0.1.0+1'
+if ([string]::IsNullOrWhiteSpace($ReleaseLabel)) {
+    $ReleaseLabel = if ($ReleaseChannel -ceq 'unsigned_preview') {
+        '0.1.0-preview.1'
+    } else {
+        '0.1.0'
+    }
+}
+if ($ReleaseLabel -cnotmatch '^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') {
+    throw "ReleaseLabel is not canonical SemVer: $ReleaseLabel"
+}
+if ($ReleaseChannel -ceq 'unsigned_preview') {
+    if ($ReleaseLabel -cne '0.1.0-preview.1') {
+        throw 'The unsigned preview channel requires release label 0.1.0-preview.1.'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($SigningCommand)) {
+        throw 'The unsigned preview channel refuses a signing command.'
+    }
+} else {
+    if ($ReleaseLabel -cne '0.1.0') {
+        throw 'The stable channel requires release label 0.1.0.'
+    }
+    if ([string]::IsNullOrWhiteSpace($SigningCommand) -or
+        $SigningCommand -notmatch '%1' -or
+        $SigningCommand.Contains("'") -or
+        $SigningCommand.Contains("`r") -or
+        $SigningCommand.Contains("`n")) {
+        throw 'The stable channel requires a single-line Tauri signCommand containing %1 and no single quote.'
+    }
+    throw (
+        'Stable application builds remain disabled until the release workflow can verify ' +
+        'Authenticode on both each installer and the corresponding installed executable. ' +
+        'Build the unsigned_preview channel for 0.1.0-preview.1.'
+    )
+}
+$artifactTrustSuffix = 'unsigned'
 $targetTriple = 'x86_64-pc-windows-msvc'
+$nodeBuildPackageNames = @(
+    '@sveltejs/vite-plugin-svelte',
+    '@tailwindcss/vite',
+    '@tauri-apps/cli',
+    'svelte',
+    'tailwindcss',
+    'typescript',
+    'vite',
+    'vitest'
+)
 $spoutMetadata = Get-Spout2ReleaseMetadata
 $spoutTag = $spoutMetadata.Tag
 $spoutCommit = $spoutMetadata.Commit
@@ -32,6 +92,66 @@ $spoutArchiveUrl = $spoutMetadata.ArchiveUrl
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $artifactsRoot = Join-Path $repoRoot 'artifacts'
 [System.IO.Directory]::CreateDirectory($artifactsRoot) | Out-Null
+
+function Get-PythonProjectIdentity {
+    param([Parameter(Mandatory)][string]$ProjectPath)
+
+    $manifestPath = Join-Path $repoRoot "$ProjectPath/pyproject.toml"
+    $text = Get-Content -LiteralPath $manifestPath -Raw
+    $nameMatches = [regex]::Matches($text, '(?m)^name\s*=\s*"(?<value>[^"]+)"\s*$')
+    $versionMatches = [regex]::Matches($text, '(?m)^version\s*=\s*"(?<value>[^"]+)"\s*$')
+    if ($nameMatches.Count -ne 1 -or $versionMatches.Count -ne 1) {
+        throw "Release component must declare one Python project name and version: $manifestPath"
+    }
+    return [pscustomobject]@{
+        Name = $nameMatches[0].Groups['value'].Value
+        Version = $versionMatches[0].Groups['value'].Value
+    }
+}
+
+$d2DeckIdentity = Get-Content -LiteralPath (
+    Join-Path $repoRoot 'operators/builtin/d2/package/deck-pack.json'
+) -Raw | ConvertFrom-Json -Depth 32
+$q4DeckIdentity = Get-Content -LiteralPath (
+    Join-Path $repoRoot 'operators/builtin/q4/package/deck-pack.json'
+) -Raw | ConvertFrom-Json -Depth 32
+$cartridgeSdkIdentity = Get-PythonProjectIdentity -ProjectPath 'sdk/python'
+$deckSdkIdentity = Get-PythonProjectIdentity -ProjectPath 'sdk/deck-python'
+$codecSdkIdentity = Get-PythonProjectIdentity -ProjectPath 'sdk/codec-python'
+$invalidSdkVersions = @(
+    @(
+        $cartridgeSdkIdentity.Version,
+        $deckSdkIdentity.Version,
+        $codecSdkIdentity.Version
+    ) | Where-Object { [string]$_ -cnotmatch '^\d+\.\d+\.\d+$' }
+)
+if ([string]$d2DeckIdentity.deck_id -cne 'org.latentdeck.deck.d2' -or
+    [string]$q4DeckIdentity.deck_id -cne 'org.latentdeck.deck.q4' -or
+    [string]$d2DeckIdentity.deck_version -cnotmatch '^\d+\.\d+\.\d+$' -or
+    [string]$q4DeckIdentity.deck_version -cnotmatch '^\d+\.\d+\.\d+$' -or
+    [string]$cartridgeSdkIdentity.Name -cne 'latentdeck-cartridge' -or
+    [string]$deckSdkIdentity.Name -cne 'latentdeck-deck-sdk' -or
+    [string]$codecSdkIdentity.Name -cne 'latentdeck-codec-sdk' -or
+    $invalidSdkVersions.Count -gt 0) {
+    throw 'Release component identities drifted from the supported Deck/SDK contracts.'
+}
+$releaseComponentVersions = [ordered]@{
+    decks = [ordered]@{
+        d2 = [ordered]@{
+            deck_id = [string]$d2DeckIdentity.deck_id
+            deck_version = [string]$d2DeckIdentity.deck_version
+        }
+        q4 = [ordered]@{
+            deck_id = [string]$q4DeckIdentity.deck_id
+            deck_version = [string]$q4DeckIdentity.deck_version
+        }
+    }
+    sdks = [ordered]@{
+        cartridge = [string]$cartridgeSdkIdentity.Version
+        deck = [string]$deckSdkIdentity.Version
+        codec = [string]$codecSdkIdentity.Version
+    }
+}
 
 function Assert-ChildPath {
     param(
@@ -58,6 +178,32 @@ function Assert-ChildPath {
     return $candidate
 }
 
+function Assert-PathComponentsNotReparsePoints {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+    $volumeRoot = [System.IO.Path]::GetPathRoot($fullPath)
+    if ([string]::IsNullOrWhiteSpace($volumeRoot)) {
+        throw "Release path has no filesystem root: $fullPath"
+    }
+    $current = $volumeRoot.TrimEnd('\', '/')
+    if ([string]::IsNullOrWhiteSpace($current)) {
+        $current = $volumeRoot
+    }
+    foreach ($component in $fullPath.Substring($volumeRoot.Length).Split(
+        @([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar),
+        [System.StringSplitOptions]::RemoveEmptyEntries
+    )) {
+        $current = Join-Path $current $component
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Release path contains a reparse-point component: $current"
+            }
+        }
+    }
+}
+
 function Assert-TauriReleaseConfig {
     param(
         [Parameter(Mandatory)]
@@ -79,8 +225,12 @@ function Assert-TauriReleaseConfig {
     $config = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
     if ($config.productName -cne $ProductName -or
         $config.identifier -cne $Identifier -or
-        $config.version -cne $releaseVersion) {
+        $config.version -cne $windowsInstallerVersion) {
         throw "Tauri identity/version mismatch in $Path"
+    }
+    $package = Get-Content -LiteralPath $PackageJsonPath -Raw | ConvertFrom-Json
+    if ($package.version -cne $applicationApiVersion) {
+        throw "Application API/package version mismatch in $PackageJsonPath"
     }
     if ($config.bundle.active -ne $true -or
         (@($config.bundle.targets) -join ',') -cne 'nsis' -or
@@ -248,7 +398,13 @@ function Get-RequiredJsonPropertyElement {
 function Assert-CycloneDxSbom {
     param(
         [Parameter(Mandatory)]
-        [string]$Path
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [string]$ExpectedName,
+
+        [Parameter(Mandatory)]
+        [string]$ExpectedVersion
     )
 
     $resolved = (Resolve-Path -LiteralPath $Path).Path
@@ -296,11 +452,11 @@ function Assert-CycloneDxSbom {
             $documentVersion.ValueKind -ne [System.Text.Json.JsonValueKind]::Number -or
             $documentVersion.GetRawText() -cne '1' -or
             $componentName.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or
-            $componentName.GetString() -cne 'LatentDeck' -or
+            $componentName.GetString() -cne $ExpectedName -or
             $componentVersion.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or
-            $componentVersion.GetString() -cne $releaseVersion -or
+            $componentVersion.GetString() -cne $ExpectedVersion -or
             $components.ValueKind -ne [System.Text.Json.JsonValueKind]::Array) {
-            throw 'Release SBOM is not the LatentDeck 0.1.0 CycloneDX 1.5 document.'
+            throw "Release SBOM is not the expected $ExpectedName $ExpectedVersion CycloneDX 1.5 document."
         }
         $componentCount = $components.GetArrayLength()
         if ($componentCount -eq 0 -or $componentCount -gt 100000) {
@@ -315,6 +471,177 @@ function Assert-CycloneDxSbom {
         }
         $decoded = $text | ConvertFrom-Json -Depth 100
         Assert-Spout2CycloneDxComponent -Components @($decoded.components) | Out-Null
+        $rootLicenseMatches = @($decoded.metadata.component.licenses | Where-Object {
+            $null -ne $_.PSObject.Properties['license'] -and
+            [string]$_.license.name -ceq 'Apache-2.0'
+        })
+        if (@($decoded.metadata.component.licenses).Count -ne 1 -or
+            $rootLicenseMatches.Count -ne 1) {
+            throw 'Release SBOM root component does not declare the reviewed Apache-2.0 artifact license.'
+        }
+        $rootProperties = @($decoded.metadata.component.properties)
+        $includedScopePolicy = @($rootProperties | Where-Object {
+            [string]$_.name -ceq 'latentdeck:included-dependency-scopes' -and
+            [string]$_.value -ceq 'artifact,runtime,build,runtime+build'
+        })
+        $excludedScopePolicy = @($rootProperties | Where-Object {
+            [string]$_.name -ceq 'latentdeck:excluded-dependency-scopes' -and
+            [string]$_.value -ceq 'development'
+        })
+        $targetPlatformPolicy = @($rootProperties | Where-Object {
+            [string]$_.name -ceq 'latentdeck:target-platform' -and
+            [string]$_.value -ceq 'x86_64-pc-windows-msvc'
+        })
+        $excludedNodeDevelopmentProperties = @($rootProperties | Where-Object {
+            [string]$_.name -ceq 'latentdeck:excluded-node-development-component-count'
+        })
+        $excludedNodeDevelopmentCount = 0
+        if ($excludedNodeDevelopmentProperties.Count -eq 1) {
+            $excludedNodeDevelopmentValue = [string]$excludedNodeDevelopmentProperties[0].value
+            if ($excludedNodeDevelopmentValue -notmatch '^(?:0|[1-9][0-9]*)$') {
+                throw 'Release SBOM has an invalid excluded Node development component count.'
+            }
+            $excludedNodeDevelopmentCount = [int64]$excludedNodeDevelopmentValue
+        }
+        if ($includedScopePolicy.Count -ne 1 -or $excludedScopePolicy.Count -ne 1 -or
+            $targetPlatformPolicy.Count -ne 1 -or
+            $excludedNodeDevelopmentProperties.Count -ne 1 -or
+            $excludedNodeDevelopmentCount -le 0) {
+            throw 'Release SBOM does not declare the exact Windows dependency-scope policy.'
+        }
+        $allowedDependencyScopes = @('artifact', 'runtime', 'build', 'runtime+build')
+        $dependencyScopeCounts = [ordered]@{}
+        foreach ($decodedComponent in @($decoded.metadata.component) + @($decoded.components)) {
+            $scopeProperties = @($decodedComponent.properties | Where-Object {
+                [string]$_.name -ceq 'latentdeck:dependency-scope'
+            })
+            if ($scopeProperties.Count -ne 1 -or
+                [string]$scopeProperties[0].value -cnotin $allowedDependencyScopes) {
+                throw (
+                    'Release SBOM component has no exact distributable dependency scope: ' +
+                    "$($decodedComponent.name)@$($decodedComponent.version)"
+                )
+            }
+            $scope = [string]$scopeProperties[0].value
+            if (-not $dependencyScopeCounts.Contains($scope)) {
+                $dependencyScopeCounts[$scope] = 0
+            }
+            $dependencyScopeCounts[$scope] = [int]$dependencyScopeCounts[$scope] + 1
+        }
+        $missingLicenseComponents = @(
+            foreach ($decodedComponent in @($decoded.metadata.component) + @($decoded.components)) {
+                $licenseProperty = $decodedComponent.PSObject.Properties['licenses']
+                $validLicenseCount = 0
+                if ($null -ne $licenseProperty) {
+                    foreach ($licenseEntry in @($licenseProperty.Value)) {
+                        if (($null -ne $licenseEntry.PSObject.Properties['expression'] -and
+                            -not [string]::IsNullOrWhiteSpace([string]$licenseEntry.expression)) -or
+                            ($null -ne $licenseEntry.PSObject.Properties['license'] -and
+                            (($null -ne $licenseEntry.license.PSObject.Properties['id'] -and
+                            -not [string]::IsNullOrWhiteSpace([string]$licenseEntry.license.id)) -or
+                            ($null -ne $licenseEntry.license.PSObject.Properties['name'] -and
+                            -not [string]::IsNullOrWhiteSpace([string]$licenseEntry.license.name))))) {
+                            $validLicenseCount += 1
+                        }
+                    }
+                }
+                if ($validLicenseCount -eq 0) {
+                    "$($decodedComponent.name)@$($decodedComponent.version)"
+                }
+            }
+        )
+        if ($missingLicenseComponents.Count -gt 0) {
+            throw (
+                'Release SBOM has missing license metadata and cannot be distributed: ' +
+                ($missingLicenseComponents -join ', ')
+            )
+        }
+        $workspaceNodeManifest = Get-Content -LiteralPath (Join-Path $repoRoot 'package.json') -Raw |
+            ConvertFrom-Json -Depth 16
+        foreach ($nodeBuildPackageName in $nodeBuildPackageNames) {
+            $expectedVersionProperty = $workspaceNodeManifest.devDependencies.PSObject.Properties[
+                $nodeBuildPackageName
+            ]
+            if ($null -eq $expectedVersionProperty -or
+                [string]::IsNullOrWhiteSpace([string]$expectedVersionProperty.Value)) {
+                throw "Release SBOM build root is not pinned in package.json: $nodeBuildPackageName"
+            }
+            $expectedBuildComponents = @($decoded.components | Where-Object {
+                if ([string]$_.name -cne $nodeBuildPackageName -or
+                    [string]$_.version -cne [string]$expectedVersionProperty.Value) {
+                    return $false
+                }
+                $ecosystem = @($_.properties | Where-Object {
+                    [string]$_.name -ceq 'latentdeck:ecosystem' -and
+                    [string]$_.value -ceq 'node'
+                })
+                $scope = @($_.properties | Where-Object {
+                    [string]$_.name -ceq 'latentdeck:dependency-scope' -and
+                    [string]$_.value -cin @('build', 'runtime+build')
+                })
+                return $ecosystem.Count -eq 1 -and $scope.Count -eq 1
+            })
+            if ($expectedBuildComponents.Count -ne 1) {
+                throw (
+                    'Release SBOM does not contain the exact locked Node build root: ' +
+                    "$nodeBuildPackageName@$($expectedVersionProperty.Value)"
+                )
+            }
+        }
+        $nsisComponents = @($decoded.components | Where-Object {
+            [string]$_.'bom-ref' -ceq 'tool:nsis@3.11' -and
+            [string]$_.name -ceq 'NSIS' -and
+            [string]$_.version -ceq '3.11'
+        })
+        $tauriUtilsComponents = @($decoded.components | Where-Object {
+            [string]$_.'bom-ref' -ceq 'native:nsis-tauri-utils@0.5.3' -and
+            [string]$_.name -ceq 'nsis-tauri-utils' -and
+            [string]$_.version -ceq '0.5.3'
+        })
+        $webViewDisposition = @($rootProperties | Where-Object {
+            [string]$_.name -ceq 'latentdeck:webview2-bootstrapper-disposition' -and
+            [string]$_.value -ceq 'not_redistributed_install_time_download'
+        })
+        $webViewMode = @($rootProperties | Where-Object {
+            [string]$_.name -ceq 'latentdeck:webview2-install-mode' -and
+            [string]$_.value -ceq 'downloadBootstrapper'
+        })
+        if ($nsisComponents.Count -ne 1 -or $tauriUtilsComponents.Count -ne 1 -or
+            $webViewDisposition.Count -ne 1 -or $webViewMode.Count -ne 1) {
+            throw 'Release SBOM does not bind the exact Tauri Windows installer runtime closure.'
+        }
+        $nsisProperties = @($nsisComponents[0].properties)
+        $tauriUtilsProperties = @($tauriUtilsComponents[0].properties)
+        if (@($nsisProperties | Where-Object {
+                [string]$_.name -ceq 'latentdeck:dependency-scope' -and
+                [string]$_.value -ceq 'runtime+build'
+            }).Count -ne 1 -or
+            @($nsisProperties | Where-Object {
+                [string]$_.name -ceq 'latentdeck:source-archive-sha1' -and
+                [string]$_.value -ceq 'ef7ff767e5cbd9edd22add3a32c9b8f4500bb10d'
+            }).Count -ne 1 -or
+            @($nsisProperties | Where-Object {
+                [string]$_.name -ceq 'latentdeck:source-tree-sha256' -and
+                [string]$_.value -ceq 'e9ddbf15e780350628b8e9e334b770bfbb59004f2d6b5c2c43ce764d9530e063'
+            }).Count -ne 1 -or
+            @($nsisProperties | Where-Object {
+                [string]$_.name -ceq 'latentdeck:license-text-sha256' -and
+                [string]$_.value -ceq 'e7dd514003ab96cb3ddccbc028fe5c795fccf57dc41f21cfb9d4dd16ead23bf5'
+            }).Count -ne 1 -or
+            @($tauriUtilsProperties | Where-Object {
+                [string]$_.name -ceq 'latentdeck:dependency-scope' -and
+                [string]$_.value -ceq 'runtime+build'
+            }).Count -ne 1 -or
+            @($tauriUtilsProperties | Where-Object {
+                [string]$_.name -ceq 'latentdeck:source-commit' -and
+                [string]$_.value -ceq '13d9edd27b69310e108d6fbd49f90992f8a05390'
+            }).Count -ne 1 -or
+            @($tauriUtilsComponents[0].hashes | Where-Object {
+                [string]$_.alg -ceq 'SHA-256' -and
+                [string]$_.content -ceq '5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709'
+            }).Count -ne 1) {
+            throw 'Release SBOM Tauri Windows installer identity or redistribution scope drifted.'
+        }
     } finally {
         $document.Dispose()
     }
@@ -323,6 +650,106 @@ function Assert-CycloneDxSbom {
         ByteLength = [int64]$item.Length
         Sha256 = (Get-FileHash -LiteralPath $resolved -Algorithm SHA256).Hash.ToLowerInvariant()
         ComponentCount = $componentCount
+        MissingLicenseComponentCount = 0
+        DependencyScopeCounts = $dependencyScopeCounts
+    }
+}
+
+function New-ApplicationThirdPartyNotice {
+    param(
+        [Parameter(Mandatory)][string]$LatentDeckSbomPath,
+        [Parameter(Mandatory)][string]$LatentPlayerSbomPath,
+        [Parameter(Mandatory)][string]$RepositoryNoticePath,
+        [Parameter(Mandatory)][string]$DestinationPath,
+        [Parameter(Mandatory)][string]$ReleaseLabel
+    )
+
+    [void](Test-Spout2ThirdPartyNotice -Path $RepositoryNoticePath)
+    $repositoryNotice = [System.IO.File]::ReadAllText($RepositoryNoticePath)
+    $spoutStart = $repositoryNotice.IndexOf(
+        '## Spout2',
+        [System.StringComparison]::Ordinal
+    )
+    if ($spoutStart -lt 0) {
+        throw 'Could not extract the reviewed Spout2 notice section.'
+    }
+    $spoutSection = $repositoryNotice.Substring($spoutStart).Trim()
+    if ($spoutSection -match '(?i)\b(?:taehv|taeh3|H3)\b') {
+        throw 'The extracted application Spout2 notice contains codec-only material.'
+    }
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in @(
+        '# LatentDeck applications third-party notices',
+        '',
+        "Artifact set: LatentDeck App and LatentPlayer $ReleaseLabel",
+        '',
+        'This notice is scoped to the two Windows application installers. It does not',
+        'cover separately distributed codec packs, decoder assets, or the Developer Kit.',
+        'Dependency labels below come from the artifact-scoped, lock-generated SBOMs;',
+        'no absent license value is inferred.',
+        ''
+    )) {
+        $lines.Add($line)
+    }
+    foreach ($application in @(
+        [pscustomobject]@{ Name = 'LatentDeck App'; Path = $LatentDeckSbomPath },
+        [pscustomobject]@{ Name = 'LatentPlayer'; Path = $LatentPlayerSbomPath }
+    )) {
+        $bom = Get-Content -LiteralPath $application.Path -Raw | ConvertFrom-Json -Depth 100
+        $lines.Add("## $($application.Name) locked component license inventory")
+        $lines.Add('')
+        foreach ($component in @($bom.components | Sort-Object 'bom-ref')) {
+            if ([string]$component.name -ceq 'Spout2') {
+                continue
+            }
+            $labels = @(
+                foreach ($entry in @($component.licenses)) {
+                    if ($null -ne $entry.PSObject.Properties['expression'] -and
+                        -not [string]::IsNullOrWhiteSpace([string]$entry.expression)) {
+                        [string]$entry.expression
+                    } elseif ($null -ne $entry.PSObject.Properties['license']) {
+                        if ($null -ne $entry.license.PSObject.Properties['id'] -and
+                            -not [string]::IsNullOrWhiteSpace([string]$entry.license.id)) {
+                            [string]$entry.license.id
+                        } elseif ($null -ne $entry.license.PSObject.Properties['name'] -and
+                            -not [string]::IsNullOrWhiteSpace([string]$entry.license.name)) {
+                            [string]$entry.license.name
+                        }
+                    }
+                }
+            )
+            if ($labels.Count -eq 0) {
+                throw "Application notice source has missing license metadata: $($component.name)"
+            }
+            $lines.Add(
+                "- $($component.name) $($component.version) - $(@($labels | Sort-Object -Unique) -join ' OR ')"
+            )
+        }
+        $lines.Add('')
+    }
+    $lines.Add($spoutSection)
+    $text = ($lines -join "`n") + "`n"
+    if ($text -match '(?i)\b(?:taehv|taeh3|H3)\b' -or
+        -not $text.Contains(
+            '# LatentDeck applications third-party notices',
+            [System.StringComparison]::Ordinal
+        )) {
+        throw 'Generated application notices are not artifact-scoped.'
+    }
+    [System.IO.File]::WriteAllText(
+        $DestinationPath,
+        $text,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    $item = Get-Item -LiteralPath $DestinationPath -Force
+    if ($item.Length -eq 0 -or $item.Length -gt 1MB) {
+        throw 'Generated application notices are empty or unbounded.'
+    }
+    return [pscustomobject]@{
+        Path = $item.FullName
+        ByteLength = [int64]$item.Length
+        Sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     }
 }
 
@@ -563,7 +990,8 @@ $outputRoot = Assert-ChildPath `
     -ParentPath $artifactsRoot `
     -CandidatePath $OutputDirectory `
     -AllowParent
-$finalDirectory = Join-Path $outputRoot "$releaseVersion-windows-x64"
+Assert-PathComponentsNotReparsePoints -Path $outputRoot
+$finalDirectory = Join-Path $outputRoot "$ReleaseLabel-windows-x64"
 Assert-ChildPath -ParentPath $artifactsRoot -CandidatePath $finalDirectory | Out-Null
 if (Test-Path -LiteralPath $finalDirectory) {
     throw "Refusing to overwrite an existing release-candidate directory: $finalDirectory"
@@ -572,12 +1000,14 @@ if (Test-Path -LiteralPath $finalDirectory) {
 Invoke-Checked `
     -Description 'Pre-build public-tree audit' `
     -Command { & pwsh -NoProfile -File (Join-Path $repoRoot 'tools/Test-PublicTree.ps1') }
-$noticeInput = Test-Spout2ThirdPartyNotice `
-    -Path (Join-Path $repoRoot 'THIRD_PARTY_NOTICES.md')
 $sourceSnapshotBefore = Get-ReleaseSourceSnapshot -RepositoryRoot $repoRoot
 $gitCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $gitCommit -cnotmatch '^[0-9a-f]{40}$') {
     throw 'Could not resolve the release source Git commit.'
+}
+$gitTree = (& git -C $repoRoot rev-parse 'HEAD^{tree}').Trim()
+if ($LASTEXITCODE -ne 0 -or $gitTree -cnotmatch '^[0-9a-f]{40}$') {
+    throw 'Could not resolve the release source Git tree.'
 }
 $gitBranch = (& git -C $repoRoot branch --show-current).Trim()
 if ($LASTEXITCODE -ne 0) {
@@ -589,6 +1019,11 @@ if ([string]::IsNullOrWhiteSpace($gitBranch)) {
 $gitStatusBefore = @(& git -C $repoRoot status --porcelain=v1 --untracked-files=all)
 if ($LASTEXITCODE -ne 0) {
     throw 'Could not inspect the release source working-tree state.'
+}
+$distributable = (-not $DevelopmentBuild.IsPresent -and
+    $gitBranch -ceq 'main' -and $gitStatusBefore.Count -eq 0)
+if (-not $DevelopmentBuild.IsPresent -and -not $distributable) {
+    throw 'Release candidates must be built from a clean main checkout; use -DevelopmentBuild only for non-distributable local contract work.'
 }
 
 $deckRoot = Join-Path $repoRoot 'apps/latentdeck'
@@ -678,13 +1113,58 @@ try {
         -Description 'Frozen workspace dependency install' `
         -Command { & $pnpm --dir $repoRoot install --frozen-lockfile }
 
-    $generatedSbomPath = Join-Path $buildRoot "latentdeck-$releaseVersion-sbom.cdx.json"
+    $generatedDeckSbomPath = Join-Path $buildRoot "LatentDeck-App-$ReleaseLabel-sbom.cdx.json"
+    $generatedPlayerSbomPath = Join-Path $buildRoot "LatentPlayer-$ReleaseLabel-sbom.cdx.json"
     Invoke-Checked `
-        -Description 'Fresh locked workspace SBOM generation' `
+        -Description 'Fresh LatentDeck App artifact SBOM generation' `
         -Command {
-            & (Join-Path $PSScriptRoot 'New-Sbom.ps1') -OutputPath $generatedSbomPath
+            & (Join-Path $PSScriptRoot 'New-Sbom.ps1') `
+                -OutputPath $generatedDeckSbomPath `
+                -ArtifactName 'LatentDeck App' `
+                -ArtifactVersion $windowsInstallerVersion `
+                -ArtifactScope application `
+                -CargoPackage latentdeck-app `
+                -NodePackage '@latentdeck/app' `
+                -NodeBuildPackage $nodeBuildPackageNames `
+                -NodeRuntimeBuildPackage @('svelte', 'tailwindcss', 'vite') `
+                -IncludeSpout2 `
+                -IncludeTauriWindowsInstaller
         }
-    $sbomInput = Assert-CycloneDxSbom -Path $generatedSbomPath
+    Invoke-Checked `
+        -Description 'Fresh LatentPlayer artifact SBOM generation' `
+        -Command {
+            & (Join-Path $PSScriptRoot 'New-Sbom.ps1') `
+                -OutputPath $generatedPlayerSbomPath `
+                -ArtifactName 'LatentPlayer' `
+                -ArtifactVersion $windowsInstallerVersion `
+                -ArtifactScope application `
+                -CargoPackage latentplayer-app `
+                -NodePackage '@latentdeck/player' `
+                -NodeBuildPackage $nodeBuildPackageNames `
+                -NodeRuntimeBuildPackage @('svelte', 'tailwindcss', 'vite') `
+                -IncludeSpout2 `
+                -IncludeTauriWindowsInstaller
+        }
+    $deckSbomInput = Assert-CycloneDxSbom `
+        -Path $generatedDeckSbomPath `
+        -ExpectedName 'LatentDeck App' `
+        -ExpectedVersion $windowsInstallerVersion
+    $playerSbomInput = Assert-CycloneDxSbom `
+        -Path $generatedPlayerSbomPath `
+        -ExpectedName 'LatentPlayer' `
+        -ExpectedVersion $windowsInstallerVersion
+    $applicationNoticeInput = New-ApplicationThirdPartyNotice `
+        -LatentDeckSbomPath $generatedDeckSbomPath `
+        -LatentPlayerSbomPath $generatedPlayerSbomPath `
+        -RepositoryNoticePath (Join-Path $repoRoot 'THIRD_PARTY_NOTICES.md') `
+        -DestinationPath (Join-Path $buildRoot 'APPLICATION_THIRD_PARTY_NOTICES.md') `
+        -ReleaseLabel $ReleaseLabel
+    $applicationLicenseBundleInput = New-ReleaseLicenseBundle `
+        -SbomPath @($generatedDeckSbomPath, $generatedPlayerSbomPath) `
+        -ArtifactName 'LatentDeck Windows Applications' `
+        -ArtifactVersion $ReleaseLabel `
+        -OutputPath (Join-Path $buildRoot 'APPLICATION_THIRD_PARTY_LICENSES.json') `
+        -RepositoryNoticePath (Join-Path $repoRoot 'THIRD_PARTY_NOTICES.md')
     Assert-ReleaseLocksUnchanged `
         -CargoLockPath $cargoLockPath `
         -CargoLockSha256 $cargoLockHash `
@@ -692,7 +1172,7 @@ try {
         -PnpmLockSha256 $pnpmLockHash `
         -UvLockPath $uvLockPath `
         -UvLockSha256 $uvLockHash `
-        -Context 'during fresh SBOM generation'
+        -Context 'during fresh artifact-scoped SBOM generation'
 
     $tauriVersion = (& $pnpm --dir $deckRoot exec tauri --version).Trim()
     if ($LASTEXITCODE -ne 0 -or $tauriVersion -cne 'tauri-cli 2.11.4') {
@@ -725,15 +1205,29 @@ try {
         '--ci',
         '--target', $targetTriple,
         '--bundles', 'nsis',
-        '--features', 'spout-sdk',
-        '--no-sign',
-        '--', '--locked'
+        '--features', 'spout-sdk'
     )
+    if ($ReleaseChannel -ceq 'unsigned_preview') {
+        $tauriArguments += '--no-sign'
+    } else {
+        $signingConfigPath = Join-Path $buildRoot 'tauri-signing.json'
+        [System.IO.File]::WriteAllText(
+            $signingConfigPath,
+            (([ordered]@{
+                bundle = [ordered]@{
+                    windows = [ordered]@{ signCommand = $SigningCommand }
+                }
+            } | ConvertTo-Json -Depth 8) + "`n"),
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        $tauriArguments += @('--config', $signingConfigPath)
+    }
+    $tauriArguments += @('--', '--locked')
     Invoke-Checked `
-        -Description 'LatentDeck unsigned NSIS build' `
+        -Description "LatentDeck $ReleaseChannel NSIS build" `
         -Command { & $pnpm --dir $deckRoot @tauriArguments }
     Invoke-Checked `
-        -Description 'LatentPlayer unsigned NSIS build' `
+        -Description "LatentPlayer $ReleaseChannel NSIS build" `
         -Command { & $pnpm --dir $playerRoot @tauriArguments }
 
     $releaseBinaryRoot = Join-Path $env:CARGO_TARGET_DIR "$targetTriple/release"
@@ -760,20 +1254,35 @@ try {
         $sourceSnapshotAfter.FileCount -ne $sourceSnapshotBefore.FileCount) {
         throw 'The public source snapshot changed while the release candidate was building.'
     }
+    $gitCommitAfter = (& git -C $repoRoot rev-parse HEAD).Trim()
+    $gitTreeAfter = (& git -C $repoRoot rev-parse 'HEAD^{tree}').Trim()
+    $gitBranchAfter = (& git -C $repoRoot branch --show-current).Trim()
+    $gitStatusAfter = @(& git -C $repoRoot status --porcelain=v1 --untracked-files=all)
+    if ($LASTEXITCODE -ne 0 -or
+        $gitCommitAfter -cne $gitCommit -or
+        $gitTreeAfter -cne $gitTree -or
+        $gitBranchAfter -cne $gitBranch -or
+        ($gitStatusAfter -join "`n") -cne ($gitStatusBefore -join "`n")) {
+        throw 'The Git source identity changed while the release candidate was building.'
+    }
 
     $nsisRoot = Join-Path $env:CARGO_TARGET_DIR "$targetTriple/release/bundle/nsis"
     $expectedSources = @(
         [ordered]@{
             product = 'LatentDeck App'
             identifier = 'studio.latentdeck.deck'
-            source_name = 'LatentDeck App_0.1.0_x64-setup.exe'
-            artifact_name = 'LatentDeck-0.1.0-windows-x64-unsigned-setup.exe'
+            source_name = "LatentDeck App_${windowsInstallerVersion}_x64-setup.exe"
+            artifact_name = "LatentDeck-$ReleaseLabel-windows-x64-$artifactTrustSuffix-setup.exe"
+            sbom_input = $deckSbomInput
+            sbom_slug = 'LatentDeck-App'
         },
         [ordered]@{
             product = 'LatentPlayer'
             identifier = 'studio.latentdeck.player'
-            source_name = 'LatentPlayer_0.1.0_x64-setup.exe'
-            artifact_name = 'LatentPlayer-0.1.0-windows-x64-unsigned-setup.exe'
+            source_name = "LatentPlayer_${windowsInstallerVersion}_x64-setup.exe"
+            artifact_name = "LatentPlayer-$ReleaseLabel-windows-x64-$artifactTrustSuffix-setup.exe"
+            sbom_input = $playerSbomInput
+            sbom_slug = 'LatentPlayer'
         }
     )
 
@@ -793,6 +1302,15 @@ try {
             )
         }
         Assert-PlausibleInstaller -Path $source
+        $authenticode = Get-AuthenticodeSignature -LiteralPath $source
+        if ($ReleaseChannel -ceq 'unsigned_preview' -and
+            $authenticode.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned) {
+            throw "Unsigned preview installer unexpectedly crossed the signing boundary: $($expected.source_name)"
+        }
+        if ($ReleaseChannel -ceq 'stable' -and
+            $authenticode.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+            throw "Stable installer failed Authenticode verification: $($expected.source_name)"
+        }
         $destination = Join-Path $installerDirectory $expected.artifact_name
         [System.IO.File]::Copy($source, $destination, $false)
         $item = Get-Item -LiteralPath $destination
@@ -804,49 +1322,65 @@ try {
             sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             installer = 'nsis'
             install_mode = 'currentUser'
-            unsigned = $true
+            application_api_version = $applicationApiVersion
+            windows_installer_version = $windowsInstallerVersion
+            unsigned = ($ReleaseChannel -ceq 'unsigned_preview')
+            authenticode = if ($ReleaseChannel -ceq 'unsigned_preview') { 'not_present' } else { 'valid' }
             spout_sdk = $true
+            sbom_file_name = "metadata/$($expected.sbom_slug)-$ReleaseLabel-sbom.cdx.json"
         }
     }
 
     $metadataDirectory = Join-Path $outputStage 'metadata'
     [System.IO.Directory]::CreateDirectory($metadataDirectory) | Out-Null
-    $sbomFileName = "latentdeck-$releaseVersion-sbom.cdx.json"
-    $sbomDestination = Join-Path $metadataDirectory $sbomFileName
-    [System.IO.File]::Copy($sbomInput.Path, $sbomDestination, $false)
-    $stagedSbom = Assert-CycloneDxSbom -Path $sbomDestination
-    if ($stagedSbom.Sha256 -cne $sbomInput.Sha256 -or
-        $stagedSbom.ByteLength -ne $sbomInput.ByteLength -or
-        $stagedSbom.ComponentCount -ne $sbomInput.ComponentCount) {
-        throw 'Staged SBOM does not match the freshly generated locked-workspace SBOM.'
-    }
-    $sbomReceipt = [ordered]@{
-        file_name = "metadata/$sbomFileName"
-        byte_length = $stagedSbom.ByteLength
-        sha256 = $stagedSbom.Sha256
-        format = 'CycloneDX'
-        spec_version = '1.5'
-        component_count = $stagedSbom.ComponentCount
-        generated_from_locks = [ordered]@{
-            cargo_lock_sha256 = $cargoLockHash
-            pnpm_lock_sha256 = $pnpmLockHash
-            uv_lock_sha256 = $uvLockHash
+    $sbomReceipts = @()
+    foreach ($expected in $expectedSources) {
+        $sbomFileName = "$($expected.sbom_slug)-$ReleaseLabel-sbom.cdx.json"
+        $sbomDestination = Join-Path $metadataDirectory $sbomFileName
+        [System.IO.File]::Copy($expected.sbom_input.Path, $sbomDestination, $false)
+        $stagedSbom = Assert-CycloneDxSbom `
+            -Path $sbomDestination `
+            -ExpectedName $expected.product `
+            -ExpectedVersion $windowsInstallerVersion
+        if ($stagedSbom.Sha256 -cne $expected.sbom_input.Sha256 -or
+            $stagedSbom.ByteLength -ne $expected.sbom_input.ByteLength -or
+            $stagedSbom.ComponentCount -ne $expected.sbom_input.ComponentCount) {
+            throw "Staged $($expected.product) SBOM does not match its fresh artifact inventory."
+        }
+        $sbomReceipts += [ordered]@{
+            product = $expected.product
+            file_name = "metadata/$sbomFileName"
+            byte_length = $stagedSbom.ByteLength
+            sha256 = $stagedSbom.Sha256
+            format = 'CycloneDX'
+            spec_version = '1.5'
+            component_count = $stagedSbom.ComponentCount
+            artifact_scope = 'application'
+            dependency_scope_counts = $stagedSbom.DependencyScopeCounts
+            license_review = [ordered]@{
+                status = 'complete'
+                missing_license_component_count = $stagedSbom.MissingLicenseComponentCount
+            }
+            generated_from_locks = [ordered]@{
+                cargo_lock_sha256 = $cargoLockHash
+                pnpm_lock_sha256 = $pnpmLockHash
+            }
         }
     }
 
     $noticeFileName = 'THIRD_PARTY_NOTICES.md'
-    $stagedNotice = Copy-Spout2ThirdPartyNotice `
-        -SourcePath $noticeInput.Path `
-        -DestinationDirectory $metadataDirectory
-    $noticeDestination = $stagedNotice.Path
-    if ($stagedNotice.Sha256 -cne $noticeInput.Sha256 -or
-        $stagedNotice.ByteLength -ne $noticeInput.ByteLength) {
-        throw 'Staged third-party notices do not match the reviewed source notice.'
+    $noticeDestination = Join-Path $metadataDirectory $noticeFileName
+    [System.IO.File]::Copy($applicationNoticeInput.Path, $noticeDestination, $false)
+    $stagedNotice = Get-Item -LiteralPath $noticeDestination -Force
+    $stagedNoticeHash = (Get-FileHash -LiteralPath $stagedNotice.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($stagedNoticeHash -cne $applicationNoticeInput.Sha256 -or
+        [int64]$stagedNotice.Length -ne $applicationNoticeInput.ByteLength) {
+        throw 'Staged application notices do not match the generated artifact-scoped notice.'
     }
     $noticeReceipt = [ordered]@{
         file_name = "metadata/$noticeFileName"
-        byte_length = $stagedNotice.ByteLength
-        sha256 = $stagedNotice.Sha256
+        byte_length = [int64]$stagedNotice.Length
+        sha256 = $stagedNoticeHash
         components = @(
             [ordered]@{
                 name = 'Spout2'
@@ -856,14 +1390,46 @@ try {
             }
         )
     }
+    $licenseBundleFileName = 'THIRD_PARTY_LICENSES.json'
+    $licenseBundleDestination = Join-Path $metadataDirectory $licenseBundleFileName
+    [System.IO.File]::Copy(
+        $applicationLicenseBundleInput.Path,
+        $licenseBundleDestination,
+        $false
+    )
+    $stagedLicenseBundle = Test-ReleaseLicenseBundle `
+        -BundlePath $licenseBundleDestination `
+        -SbomPath @($generatedDeckSbomPath, $generatedPlayerSbomPath) `
+        -ExpectedArtifactName 'LatentDeck Windows Applications' `
+        -ExpectedArtifactVersion $ReleaseLabel
+    if ($stagedLicenseBundle.Sha256 -cne $applicationLicenseBundleInput.Sha256 -or
+        $stagedLicenseBundle.ByteLength -ne $applicationLicenseBundleInput.ByteLength -or
+        $stagedLicenseBundle.ComponentCount -ne $applicationLicenseBundleInput.ComponentCount) {
+        throw 'Staged application license bundle does not match its exact SBOM closure.'
+    }
+    $licenseBundleReceipt = [ordered]@{
+        file_name = "metadata/$licenseBundleFileName"
+        byte_length = $stagedLicenseBundle.ByteLength
+        sha256 = $stagedLicenseBundle.Sha256
+        schema_version = 1
+        component_count = $stagedLicenseBundle.ComponentCount
+        text_count = $stagedLicenseBundle.TextCount
+        build_only_no_text_disposition_count = $stagedLicenseBundle.NoTextDispositionCount
+    }
 
     $manifestPath = Join-Path $outputStage 'release-candidate.json'
     $manifest = [ordered]@{
-        schema_version = 3
-        release_version = $releaseVersion
+        schema_version = 6
+        release_label = $ReleaseLabel
+        release_channel = $ReleaseChannel
+        application_api_version = $applicationApiVersion
+        windows_installer_version = $windowsInstallerVersion
+        component_versions = $releaseComponentVersions
         target = $targetTriple
         local_release_candidate = $true
-        signed = $false
+        signed = ($ReleaseChannel -ceq 'stable')
+        unsigned = ($ReleaseChannel -ceq 'unsigned_preview')
+        distributable = $distributable
         updater_artifacts = $false
         contains_codec_pack = $false
         contains_model_weights = $false
@@ -871,6 +1437,7 @@ try {
         source = [ordered]@{
             git_commit = $gitCommit
             git_branch = $gitBranch
+            git_tree = $gitTree
             git_dirty = ($gitStatusBefore.Count -gt 0)
             git_dirty_entry_count = $gitStatusBefore.Count
             public_snapshot_sha256 = $sourceSnapshotBefore.Sha256
@@ -895,7 +1462,13 @@ try {
             archive_sha256 = $spoutArchiveSha256
             feature = 'spout-sdk'
         }
-        sbom = $sbomReceipt
+        sboms = $sbomReceipts
+        license_review = [ordered]@{
+            status = 'complete'
+            missing_license_component_count = 0
+            redistributed_component_text_coverage = 'complete'
+        }
+        license_bundle = $licenseBundleReceipt
         third_party_notices = @($noticeReceipt)
         applications = $receipts
     }
@@ -909,8 +1482,11 @@ try {
         foreach ($receipt in $receipts) {
             "$($receipt.sha256)  installers/$($receipt.file_name)"
         }
-        "$($sbomReceipt.sha256)  $($sbomReceipt.file_name)"
+        foreach ($sbomReceipt in $sbomReceipts) {
+            "$($sbomReceipt.sha256)  $($sbomReceipt.file_name)"
+        }
         "$($noticeReceipt.sha256)  $($noticeReceipt.file_name)"
+        "$($licenseBundleReceipt.sha256)  $($licenseBundleReceipt.file_name)"
     )
     [System.IO.File]::WriteAllText(
         (Join-Path $outputStage 'SHA256SUMS.txt'),
@@ -920,13 +1496,13 @@ try {
     [System.IO.File]::WriteAllText(
         (Join-Path $outputStage 'BUILD-COMMANDS.txt'),
         (@(
-            'pwsh -NoProfile -File tools/Build-ReleaseCandidate.ps1 [-SpoutArchivePath <optional exact pinned archive>]'
+            "pwsh -NoProfile -File tools/Build-ReleaseCandidate.ps1 -ReleaseChannel $ReleaseChannel -ReleaseLabel $ReleaseLabel [-SpoutArchivePath <optional exact pinned archive>]"
             'pnpm --dir . install --frozen-lockfile'
-            'pwsh -NoProfile -File tools/New-Sbom.ps1 -OutputPath <unique private release staging path>'
+            'pwsh -NoProfile -File tools/New-Sbom.ps1 -ArtifactScope application -OutputPath <unique private release staging path> ...'
             'pwsh -NoProfile -File tools/Prepare-Spout2.ps1'
             'Build helper: exclusive verify/extract pinned Spout2 archive to private ignored staging and set LATENTDECK_SPOUT2_SOURCE_ROOT'
-            'pnpm --dir apps/latentdeck exec tauri build --ci --target x86_64-pc-windows-msvc --bundles nsis --features spout-sdk --no-sign -- --locked'
-            'pnpm --dir apps/latentplayer exec tauri build --ci --target x86_64-pc-windows-msvc --bundles nsis --features spout-sdk --no-sign -- --locked'
+            "pnpm --dir apps/latentdeck exec tauri build --ci --target x86_64-pc-windows-msvc --bundles nsis --features spout-sdk $(if ($ReleaseChannel -ceq 'unsigned_preview') { '--no-sign' } else { '--config <private signing config>' }) -- --locked"
+            "pnpm --dir apps/latentplayer exec tauri build --ci --target x86_64-pc-windows-msvc --bundles nsis --features spout-sdk $(if ($ReleaseChannel -ceq 'unsigned_preview') { '--no-sign' } else { '--config <private signing config>' }) -- --locked"
         ) -join "`n") + "`n",
         [System.Text.UTF8Encoding]::new($false)
     )
@@ -936,10 +1512,12 @@ try {
         'BUILD-COMMANDS.txt',
         'release-candidate.json',
         'SHA256SUMS.txt',
-        'metadata/latentdeck-0.1.0-sbom.cdx.json',
+        "metadata/LatentDeck-App-$ReleaseLabel-sbom.cdx.json",
+        "metadata/LatentPlayer-$ReleaseLabel-sbom.cdx.json",
         'metadata/THIRD_PARTY_NOTICES.md',
-        'installers/LatentDeck-0.1.0-windows-x64-unsigned-setup.exe',
-        'installers/LatentPlayer-0.1.0-windows-x64-unsigned-setup.exe'
+        'metadata/THIRD_PARTY_LICENSES.json',
+        "installers/LatentDeck-$ReleaseLabel-windows-x64-$artifactTrustSuffix-setup.exe",
+        "installers/LatentPlayer-$ReleaseLabel-windows-x64-$artifactTrustSuffix-setup.exe"
     )
     $actualRelativeNames = @(
         $stageFiles |
@@ -958,11 +1536,13 @@ try {
             throw "Staged installer hash changed: $($receipt.file_name)"
         }
     }
-    $finalStagedSbomHash = (
-        Get-FileHash -LiteralPath $sbomDestination -Algorithm SHA256
-    ).Hash.ToLowerInvariant()
-    if ($finalStagedSbomHash -cne $sbomReceipt.sha256) {
-        throw 'Staged SBOM hash changed before finalization.'
+    foreach ($sbomReceipt in $sbomReceipts) {
+        $finalStagedSbomHash = (
+            Get-FileHash -LiteralPath (Join-Path $outputStage $sbomReceipt.file_name) -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        if ($finalStagedSbomHash -cne $sbomReceipt.sha256) {
+            throw "Staged SBOM hash changed before finalization: $($sbomReceipt.file_name)"
+        }
     }
     $finalStagedNoticeHash = (
         Get-FileHash -LiteralPath $noticeDestination -Algorithm SHA256
@@ -980,6 +1560,8 @@ try {
         -Context 'before release-candidate finalization'
 
     [System.IO.Directory]::CreateDirectory($outputRoot) | Out-Null
+    Assert-PathComponentsNotReparsePoints -Path $outputRoot
+    Assert-PathComponentsNotReparsePoints -Path $outputStage
     if (Test-Path -LiteralPath $finalDirectory) {
         throw "Release-candidate destination appeared during build: $finalDirectory"
     }
@@ -992,6 +1574,7 @@ try {
     $env:LATENTDECK_SPOUT2_SOURCE_ROOT = $previousSpoutSourceRoot
     if (Test-Path -LiteralPath $buildRoot) {
         Assert-ChildPath -ParentPath $artifactsRoot -CandidatePath $buildRoot | Out-Null
+        Assert-PathComponentsNotReparsePoints -Path $buildRoot
         if (-not ([System.IO.Path]::GetFileName($buildRoot)).StartsWith(
             '.rc-b-',
             [System.StringComparison]::Ordinal
@@ -1002,6 +1585,7 @@ try {
     }
     if ($null -ne $outputStage -and (Test-Path -LiteralPath $outputStage)) {
         Assert-ChildPath -ParentPath $artifactsRoot -CandidatePath $outputStage | Out-Null
+        Assert-PathComponentsNotReparsePoints -Path $outputStage
         if (-not ([System.IO.Path]::GetFileName($outputStage)).StartsWith(
             '.rc-o-',
             [System.StringComparison]::Ordinal

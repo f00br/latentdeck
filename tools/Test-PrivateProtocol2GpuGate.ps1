@@ -25,7 +25,7 @@ try {
             worker_protocol = 2
             worker_module = 'latentdeck_codec_host'
             codec_manifest_version = '2.0.0'
-            codec = 'org.latentdeck.h3@0.2.0'
+            codec = 'org.latentdeck.h3@0.2.1'
             adapter = 'org.latentdeck.h3@0.2.0'
             adapter_entrypoint = 'latentdeck_codec_h3.adapter:make_adapter'
             profile = 'minimax_h3/h3_av_latent/0.1.0'

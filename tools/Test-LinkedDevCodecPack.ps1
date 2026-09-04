@@ -22,6 +22,14 @@ function Write-TestFile {
 }
 
 try {
+    $builderCommand = Get-Command $builder
+    $packVersionIsMandatory = @(
+        $builderCommand.Parameters['PackVersion'].Attributes |
+            Where-Object { $_ -is [System.Management.Automation.ParameterAttribute] }
+    ).Mandatory -contains $true
+    if (-not $packVersionIsMandatory) {
+        throw 'Linked development Codec Pack builder must require an explicit PackVersion.'
+    }
     $staleDeckModeRejected = $false
     try {
         & $privateEnvironmentStarter `
@@ -57,7 +65,8 @@ try {
             -PythonRuntimeRoot $runtime `
             -PythonSitePackages $pythonPackages `
             -WorkerSitePackages $workerPackages `
-            -OutputRoot (Join-Path $testRoot 'missing-player-output') | Out-Null
+            -OutputRoot (Join-Path $testRoot 'missing-player-output') `
+            -PackVersion '0.1.0' | Out-Null
     }
     catch {
         if ($_.Exception.Message -notmatch 'worker\.py') {
@@ -75,7 +84,8 @@ try {
         -PythonRuntimeRoot $runtime `
         -PythonSitePackages $pythonPackages `
         -WorkerSitePackages $workerPackages `
-        -OutputRoot $validOutput | Out-Null
+        -OutputRoot $validOutput `
+        -PackVersion '0.1.0' | Out-Null
     $packRoot = Join-Path $validOutput 'org.latentdeck.h3\0.1.0'
     $manifest = Get-Content -Raw -LiteralPath (Join-Path $packRoot 'codec-pack.json') |
         ConvertFrom-Json

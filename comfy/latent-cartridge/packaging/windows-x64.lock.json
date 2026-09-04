@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "release_label": "0.1.0-preview.1",
+  "release_channel": "unsigned_preview",
+  "artifact_name": "LatentDeck-0.1.0-preview.1-comfy-recorder-windows-x64",
+  "target": "windows-x64",
+  "python_abi": "cp312-abi3",
+  "supported_python": [
+    "cp312",
+    "cp313"
+  ],
+  "safetensors": {
+    "name": "safetensors",
+    "version": "0.8.0",
+    "file_name": "safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+    "url": "https://files.pythonhosted.org/packages/1b/6d/3fba214c1e5e0f69991677ec3bc17023f0421776975e1de0c682dca475e2/safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+    "sha256": "096ec1a98435df7beb08853bb5aa9081a84f23d0adc67ed1a0a10550f608373f",
+    "byte_length": 355540,
+    "license": "Apache-2.0",
+    "license_entry": "safetensors-0.8.0.dist-info/licenses/LICENSE",
+    "license_entry_byte_length": 11558,
+    "license_entry_sha256": "1eb85fc97224598dad1852b5d6483bbcf0aa8608790dcc657a5a2a761ae9c8c6",
+    "project_url": "https://pypi.org/project/safetensors/0.8.0/"
+  }
+}

@@ -1,0 +1,751 @@
+{
+  "schema_version": 1,
+  "closure_id": "safetensors-python@0.8.0/cp310-abi3-win_amd64",
+  "wheel": {
+    "file_name": "safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+    "byte_length": 355540,
+    "sha256": "096ec1a98435df7beb08853bb5aa9081a84f23d0adc67ed1a0a10550f608373f",
+    "url": "https://files.pythonhosted.org/packages/1b/6d/3fba214c1e5e0f69991677ec3bc17023f0421776975e1de0c682dca475e2/safetensors-0.8.0-cp310-abi3-win_amd64.whl"
+  },
+  "license": {
+    "entry": "safetensors-0.8.0.dist-info/licenses/LICENSE",
+    "byte_length": 11558,
+    "sha256": "1eb85fc97224598dad1852b5d6483bbcf0aa8608790dcc657a5a2a761ae9c8c6"
+  },
+  "embedded_sbom": {
+    "entry": "safetensors-0.8.0.dist-info/sboms/safetensors-python.cyclonedx.json",
+    "byte_length": 37480,
+    "sha256": "fa630fc7ae7a129ebecf29954bbb97d6ad8716cd60e8a7f1c6ff173eb25dfa1d",
+    "component_count": 32,
+    "serial_number": "urn:uuid:e1f4f72b-a7f5-40b6-9e7a-ac8fddcc73ea"
+  },
+  "native_binary": {
+    "entry": "safetensors/_safetensors_rust.pyd",
+    "byte_length": 734720,
+    "sha256": "80a2b3f7658854ade855c5fb6192ee38fe2c7fbfd38d1c7c1f4d2c44f67125e4"
+  },
+  "components": [
+    {
+      "name": "allocator-api2",
+      "version": "0.2.21",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/allocator-api2@0.2.21",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923",
+      "archive_url": "https://crates.io/api/v1/crates/allocator-api2/0.2.21/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-62c7a1e35f564068.txt",
+          "reviewed_sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+          "source_entry": "allocator-api2-0.2.21/LICENSE-APACHE",
+          "source_raw_sha256": "20fe7b00e904ed690e3b9fd6073784d3fc428141dbd10b81c01fd143d0797f58"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/rust-unic-58786053-LICENSE-MIT.txt",
+          "reviewed_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "source_entry": "allocator-api2-0.2.21/LICENSE-MIT",
+          "source_raw_sha256": "36516aefdc84c5d5a1e7485425913a22dbda69eb1930c5e84d6ae4972b5194b9"
+        }
+      ]
+    },
+    {
+      "name": "cfg-if",
+      "version": "1.0.4",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/cfg-if@1.0.4",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801",
+      "archive_url": "https://crates.io/api/v1/crates/cfg-if/1.0.4/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/rust-unic-58786053-LICENSE-APACHE.txt",
+          "reviewed_sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "source_entry": "cfg-if-1.0.4/LICENSE-APACHE",
+          "source_raw_sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-378f5840b258e277.txt",
+          "reviewed_sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397",
+          "source_entry": "cfg-if-1.0.4/LICENSE-MIT",
+          "source_raw_sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+        }
+      ]
+    },
+    {
+      "name": "equivalent",
+      "version": "1.0.2",
+      "license_expression": "Apache-2.0 OR MIT",
+      "purl": "pkg:cargo/equivalent@1.0.2",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f",
+      "archive_url": "https://crates.io/api/v1/crates/equivalent/1.0.2/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/rust-unic-58786053-LICENSE-APACHE.txt",
+          "reviewed_sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "source_entry": "equivalent-1.0.2/LICENSE-APACHE",
+          "source_raw_sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-7365cc8878a1d7ce.txt",
+          "reviewed_sha256": "7365cc8878a1d7ce155a58c4ca09c3d7a6be413efa5334a80ea842912b669349",
+          "source_entry": "equivalent-1.0.2/LICENSE-MIT",
+          "source_raw_sha256": "7365cc8878a1d7ce155a58c4ca09c3d7a6be413efa5334a80ea842912b669349"
+        }
+      ]
+    },
+    {
+      "name": "fastrand",
+      "version": "2.4.1",
+      "license_expression": "Apache-2.0 OR MIT",
+      "purl": "pkg:cargo/fastrand@2.4.1",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6",
+      "archive_url": "https://crates.io/api/v1/crates/fastrand/2.4.1/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/rust-unic-58786053-LICENSE-APACHE.txt",
+          "reviewed_sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "source_entry": "fastrand-2.4.1/LICENSE-APACHE",
+          "source_raw_sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/rust-unic-58786053-LICENSE-MIT.txt",
+          "reviewed_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "source_entry": "fastrand-2.4.1/LICENSE-MIT",
+          "source_raw_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        }
+      ]
+    },
+    {
+      "name": "foldhash",
+      "version": "0.2.0",
+      "license_expression": "Zlib",
+      "purl": "pkg:cargo/foldhash@0.2.0",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb",
+      "archive_url": "https://crates.io/api/v1/crates/foldhash/0.2.0/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-1d4c38d56650edc2.txt",
+          "reviewed_sha256": "1d4c38d56650edc2c673cadbec74bec14db1fe8f2f10f4e3477dcbb49563be40",
+          "source_entry": "foldhash-0.2.0/LICENSE",
+          "source_raw_sha256": "b1181a40b2a7b25cf66fd01481713bc1005df082c53ef73e851e55071b102744"
+        }
+      ]
+    },
+    {
+      "name": "getrandom",
+      "version": "0.4.2",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/getrandom@0.4.2",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "0de51e6874e94e7bf76d726fc5d13ba782deca734ff60d5bb2fb2607c7406555",
+      "archive_url": "https://crates.io/api/v1/crates/getrandom/0.4.2/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-aaff376532ea30a0.txt",
+          "reviewed_sha256": "aaff376532ea30a0cd5330b9502ad4a4c8bf769c539c87ffe78819d188a18ebf",
+          "source_entry": "getrandom-0.4.2/LICENSE-APACHE",
+          "source_raw_sha256": "aaff376532ea30a0cd5330b9502ad4a4c8bf769c539c87ffe78819d188a18ebf"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-523a42c25d245dde.txt",
+          "reviewed_sha256": "523a42c25d245dde9c015f882cec7f4555aad883382a6cf19b4b7d9b2cd5419b",
+          "source_entry": "getrandom-0.4.2/LICENSE-MIT",
+          "source_raw_sha256": "523a42c25d245dde9c015f882cec7f4555aad883382a6cf19b4b7d9b2cd5419b"
+        }
+      ]
+    },
+    {
+      "name": "hashbrown",
+      "version": "0.16.1",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/hashbrown@0.16.1",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100",
+      "archive_url": "https://crates.io/api/v1/crates/hashbrown/0.16.1/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/rust-unic-58786053-LICENSE-APACHE.txt",
+          "reviewed_sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "source_entry": "hashbrown-0.16.1/LICENSE-APACHE",
+          "source_raw_sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-ff8f68cb076caf8c.txt",
+          "reviewed_sha256": "ff8f68cb076caf8cefe7a6430d4ac086ce6af2ca8ce2c4e5a2004d4552ef52a2",
+          "source_entry": "hashbrown-0.16.1/LICENSE-MIT",
+          "source_raw_sha256": "ff8f68cb076caf8cefe7a6430d4ac086ce6af2ca8ce2c4e5a2004d4552ef52a2"
+        }
+      ]
+    },
+    {
+      "name": "heck",
+      "version": "0.5.0",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/heck@0.5.0",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea",
+      "archive_url": "https://crates.io/api/v1/crates/heck/0.5.0/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/rust-unic-58786053-LICENSE-APACHE.txt",
+          "reviewed_sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "source_entry": "heck-0.5.0/LICENSE-APACHE",
+          "source_raw_sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-7b63ecd5f1902af1.txt",
+          "reviewed_sha256": "7b63ecd5f1902af1b63729947373683c32745c16a10e8e6292e2e2dcd7e90ae0",
+          "source_entry": "heck-0.5.0/LICENSE-MIT",
+          "source_raw_sha256": "7b63ecd5f1902af1b63729947373683c32745c16a10e8e6292e2e2dcd7e90ae0"
+        }
+      ]
+    },
+    {
+      "name": "itoa",
+      "version": "1.0.18",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/itoa@1.0.18",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682",
+      "archive_url": "https://crates.io/api/v1/crates/itoa/1.0.18/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-62c7a1e35f564068.txt",
+          "reviewed_sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+          "source_entry": "itoa-1.0.18/LICENSE-APACHE",
+          "source_raw_sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/rust-unic-58786053-LICENSE-MIT.txt",
+          "reviewed_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "source_entry": "itoa-1.0.18/LICENSE-MIT",
+          "source_raw_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        }
+      ]
+    },
+    {
+      "name": "libc",
+      "version": "0.2.186",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/libc@0.2.186",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66",
+      "archive_url": "https://crates.io/api/v1/crates/libc/0.2.186/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-62c7a1e35f564068.txt",
+          "reviewed_sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+          "source_entry": "libc-0.2.186/LICENSE-APACHE",
+          "source_raw_sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-123a331b5dbf04c3.txt",
+          "reviewed_sha256": "123a331b5dbf04c30097fa43b8f858bc85df671fe776de498d01f3d6b7c1f69e",
+          "source_entry": "libc-0.2.186/LICENSE-MIT",
+          "source_raw_sha256": "123a331b5dbf04c30097fa43b8f858bc85df671fe776de498d01f3d6b7c1f69e"
+        }
+      ]
+    },
+    {
+      "name": "memchr",
+      "version": "2.8.1",
+      "license_expression": "Unlicense OR MIT",
+      "purl": "pkg:cargo/memchr@2.8.1",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8",
+      "archive_url": "https://crates.io/api/v1/crates/memchr/2.8.1/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-01c266bced4a434d.txt",
+          "reviewed_sha256": "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f",
+          "source_entry": "memchr-2.8.1/COPYING",
+          "source_raw_sha256": "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-0f96a83840e146e4.txt",
+          "reviewed_sha256": "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f",
+          "source_entry": "memchr-2.8.1/LICENSE-MIT",
+          "source_raw_sha256": "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-7e12e5df4bae12cb.txt",
+          "reviewed_sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c",
+          "source_entry": "memchr-2.8.1/UNLICENSE",
+          "source_raw_sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c"
+        }
+      ]
+    },
+    {
+      "name": "memmap2",
+      "version": "0.9.10",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/memmap2@0.9.10",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "714098028fe011992e1c3962653c96b2d578c4b4bce9036e15ff220319b1e0e3",
+      "archive_url": "https://crates.io/api/v1/crates/memmap2/0.9.10/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-04ea4849dba9dcae.txt",
+          "reviewed_sha256": "04ea4849dba9dcae07113850c6f1b1a69052c625210639914eee352023f750ad",
+          "source_entry": "memmap2-0.9.10/LICENSE-APACHE",
+          "source_raw_sha256": "04ea4849dba9dcae07113850c6f1b1a69052c625210639914eee352023f750ad"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-0d25d03b5ab49576.txt",
+          "reviewed_sha256": "0d25d03b5ab49576178ad0cae7a2648d12c17ad0452fe49c07e55e4b59aa5257",
+          "source_entry": "memmap2-0.9.10/LICENSE-MIT",
+          "source_raw_sha256": "0d25d03b5ab49576178ad0cae7a2648d12c17ad0452fe49c07e55e4b59aa5257"
+        }
+      ]
+    },
+    {
+      "name": "once_cell",
+      "version": "1.21.4",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/once_cell@1.21.4",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50",
+      "archive_url": "https://crates.io/api/v1/crates/once_cell/1.21.4/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/rust-unic-58786053-LICENSE-APACHE.txt",
+          "reviewed_sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "source_entry": "once_cell-1.21.4/LICENSE-APACHE",
+          "source_raw_sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/rust-unic-58786053-LICENSE-MIT.txt",
+          "reviewed_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "source_entry": "once_cell-1.21.4/LICENSE-MIT",
+          "source_raw_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        }
+      ]
+    },
+    {
+      "name": "proc-macro2",
+      "version": "1.0.106",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/proc-macro2@1.0.106",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934",
+      "archive_url": "https://crates.io/api/v1/crates/proc-macro2/1.0.106/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-62c7a1e35f564068.txt",
+          "reviewed_sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+          "source_entry": "proc-macro2-1.0.106/LICENSE-APACHE",
+          "source_raw_sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/rust-unic-58786053-LICENSE-MIT.txt",
+          "reviewed_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "source_entry": "proc-macro2-1.0.106/LICENSE-MIT",
+          "source_raw_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        }
+      ]
+    },
+    {
+      "name": "pyo3",
+      "version": "0.28.3",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/pyo3@0.28.3",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "91fd8e38a3b50ed1167fb981cd6fd60147e091784c427b8f7183a7ee32c31c12",
+      "archive_url": "https://crates.io/api/v1/crates/pyo3/0.28.3/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-32c76dbe0e73d791.txt",
+          "reviewed_sha256": "32c76dbe0e73d79100d5ece77c158399f2e2541bc5c78548a4ba45c1cb53c5c9",
+          "source_entry": "pyo3-0.28.3/LICENSE-APACHE",
+          "source_raw_sha256": "32c76dbe0e73d79100d5ece77c158399f2e2541bc5c78548a4ba45c1cb53c5c9"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-afcbe3b2e6b37172.txt",
+          "reviewed_sha256": "afcbe3b2e6b37172b5a9ca869ee4c0b8cdc09316e5d4384864154482c33e5af6",
+          "source_entry": "pyo3-0.28.3/LICENSE-MIT",
+          "source_raw_sha256": "afcbe3b2e6b37172b5a9ca869ee4c0b8cdc09316e5d4384864154482c33e5af6"
+        }
+      ]
+    },
+    {
+      "name": "pyo3-build-config",
+      "version": "0.28.3",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/pyo3-build-config@0.28.3",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "e368e7ddfdeb98c9bca7f8383be1648fd84ab466bf2bc015e94008db6d35611e",
+      "archive_url": "https://crates.io/api/v1/crates/pyo3-build-config/0.28.3/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-32c76dbe0e73d791.txt",
+          "reviewed_sha256": "32c76dbe0e73d79100d5ece77c158399f2e2541bc5c78548a4ba45c1cb53c5c9",
+          "source_entry": "pyo3-build-config-0.28.3/LICENSE-APACHE",
+          "source_raw_sha256": "32c76dbe0e73d79100d5ece77c158399f2e2541bc5c78548a4ba45c1cb53c5c9"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-afcbe3b2e6b37172.txt",
+          "reviewed_sha256": "afcbe3b2e6b37172b5a9ca869ee4c0b8cdc09316e5d4384864154482c33e5af6",
+          "source_entry": "pyo3-build-config-0.28.3/LICENSE-MIT",
+          "source_raw_sha256": "afcbe3b2e6b37172b5a9ca869ee4c0b8cdc09316e5d4384864154482c33e5af6"
+        }
+      ]
+    },
+    {
+      "name": "pyo3-ffi",
+      "version": "0.28.3",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/pyo3-ffi@0.28.3",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "7f29e10af80b1f7ccaf7f69eace800a03ecd13e883acfacc1e5d0988605f651e",
+      "archive_url": "https://crates.io/api/v1/crates/pyo3-ffi/0.28.3/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-32c76dbe0e73d791.txt",
+          "reviewed_sha256": "32c76dbe0e73d79100d5ece77c158399f2e2541bc5c78548a4ba45c1cb53c5c9",
+          "source_entry": "pyo3-ffi-0.28.3/LICENSE-APACHE",
+          "source_raw_sha256": "32c76dbe0e73d79100d5ece77c158399f2e2541bc5c78548a4ba45c1cb53c5c9"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-afcbe3b2e6b37172.txt",
+          "reviewed_sha256": "afcbe3b2e6b37172b5a9ca869ee4c0b8cdc09316e5d4384864154482c33e5af6",
+          "source_entry": "pyo3-ffi-0.28.3/LICENSE-MIT",
+          "source_raw_sha256": "afcbe3b2e6b37172b5a9ca869ee4c0b8cdc09316e5d4384864154482c33e5af6"
+        }
+      ]
+    },
+    {
+      "name": "pyo3-macros",
+      "version": "0.28.3",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/pyo3-macros@0.28.3",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "df6e520eff47c45997d2fc7dd8214b25dd1310918bbb2642156ef66a67f29813",
+      "archive_url": "https://crates.io/api/v1/crates/pyo3-macros/0.28.3/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-32c76dbe0e73d791.txt",
+          "reviewed_sha256": "32c76dbe0e73d79100d5ece77c158399f2e2541bc5c78548a4ba45c1cb53c5c9",
+          "source_entry": "pyo3-macros-0.28.3/LICENSE-APACHE",
+          "source_raw_sha256": "32c76dbe0e73d79100d5ece77c158399f2e2541bc5c78548a4ba45c1cb53c5c9"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-afcbe3b2e6b37172.txt",
+          "reviewed_sha256": "afcbe3b2e6b37172b5a9ca869ee4c0b8cdc09316e5d4384864154482c33e5af6",
+          "source_entry": "pyo3-macros-0.28.3/LICENSE-MIT",
+          "source_raw_sha256": "afcbe3b2e6b37172b5a9ca869ee4c0b8cdc09316e5d4384864154482c33e5af6"
+        }
+      ]
+    },
+    {
+      "name": "pyo3-macros-backend",
+      "version": "0.28.3",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/pyo3-macros-backend@0.28.3",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "c4cdc218d835738f81c2338f822078af45b4afdf8b2e33cbb5916f108b813acb",
+      "archive_url": "https://crates.io/api/v1/crates/pyo3-macros-backend/0.28.3/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-32c76dbe0e73d791.txt",
+          "reviewed_sha256": "32c76dbe0e73d79100d5ece77c158399f2e2541bc5c78548a4ba45c1cb53c5c9",
+          "source_entry": "pyo3-macros-backend-0.28.3/LICENSE-APACHE",
+          "source_raw_sha256": "32c76dbe0e73d79100d5ece77c158399f2e2541bc5c78548a4ba45c1cb53c5c9"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-afcbe3b2e6b37172.txt",
+          "reviewed_sha256": "afcbe3b2e6b37172b5a9ca869ee4c0b8cdc09316e5d4384864154482c33e5af6",
+          "source_entry": "pyo3-macros-backend-0.28.3/LICENSE-MIT",
+          "source_raw_sha256": "afcbe3b2e6b37172b5a9ca869ee4c0b8cdc09316e5d4384864154482c33e5af6"
+        }
+      ]
+    },
+    {
+      "name": "quote",
+      "version": "1.0.45",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/quote@1.0.45",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924",
+      "archive_url": "https://crates.io/api/v1/crates/quote/1.0.45/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-62c7a1e35f564068.txt",
+          "reviewed_sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+          "source_entry": "quote-1.0.45/LICENSE-APACHE",
+          "source_raw_sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/rust-unic-58786053-LICENSE-MIT.txt",
+          "reviewed_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "source_entry": "quote-1.0.45/LICENSE-MIT",
+          "source_raw_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        }
+      ]
+    },
+    {
+      "name": "safetensors",
+      "version": "0.8.0",
+      "license_expression": "Apache-2.0",
+      "purl": "pkg:cargo/safetensors@0.8.0",
+      "source_kind": "pinned-wheel-project",
+      "texts": [
+        {
+          "reviewed_path": "wheel:safetensors-0.8.0.dist-info/licenses/LICENSE",
+          "reviewed_sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "source_entry": "safetensors-0.8.0.dist-info/licenses/LICENSE",
+          "source_raw_sha256": "1eb85fc97224598dad1852b5d6483bbcf0aa8608790dcc657a5a2a761ae9c8c6"
+        }
+      ]
+    },
+    {
+      "name": "serde",
+      "version": "1.0.228",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/serde@1.0.228",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e",
+      "archive_url": "https://crates.io/api/v1/crates/serde/1.0.228/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-62c7a1e35f564068.txt",
+          "reviewed_sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+          "source_entry": "serde-1.0.228/LICENSE-APACHE",
+          "source_raw_sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/rust-unic-58786053-LICENSE-MIT.txt",
+          "reviewed_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "source_entry": "serde-1.0.228/LICENSE-MIT",
+          "source_raw_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        }
+      ]
+    },
+    {
+      "name": "serde_core",
+      "version": "1.0.228",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/serde_core@1.0.228",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad",
+      "archive_url": "https://crates.io/api/v1/crates/serde_core/1.0.228/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-62c7a1e35f564068.txt",
+          "reviewed_sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+          "source_entry": "serde_core-1.0.228/LICENSE-APACHE",
+          "source_raw_sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/rust-unic-58786053-LICENSE-MIT.txt",
+          "reviewed_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "source_entry": "serde_core-1.0.228/LICENSE-MIT",
+          "source_raw_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        }
+      ]
+    },
+    {
+      "name": "serde_derive",
+      "version": "1.0.228",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/serde_derive@1.0.228",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79",
+      "archive_url": "https://crates.io/api/v1/crates/serde_derive/1.0.228/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-62c7a1e35f564068.txt",
+          "reviewed_sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+          "source_entry": "serde_derive-1.0.228/LICENSE-APACHE",
+          "source_raw_sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/rust-unic-58786053-LICENSE-MIT.txt",
+          "reviewed_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "source_entry": "serde_derive-1.0.228/LICENSE-MIT",
+          "source_raw_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        }
+      ]
+    },
+    {
+      "name": "serde_json",
+      "version": "1.0.150",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/serde_json@1.0.150",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9",
+      "archive_url": "https://crates.io/api/v1/crates/serde_json/1.0.150/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-62c7a1e35f564068.txt",
+          "reviewed_sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+          "source_entry": "serde_json-1.0.150/LICENSE-APACHE",
+          "source_raw_sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/rust-unic-58786053-LICENSE-MIT.txt",
+          "reviewed_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "source_entry": "serde_json-1.0.150/LICENSE-MIT",
+          "source_raw_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        }
+      ]
+    },
+    {
+      "name": "syn",
+      "version": "2.0.117",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/syn@2.0.117",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99",
+      "archive_url": "https://crates.io/api/v1/crates/syn/2.0.117/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-62c7a1e35f564068.txt",
+          "reviewed_sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+          "source_entry": "syn-2.0.117/LICENSE-APACHE",
+          "source_raw_sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/rust-unic-58786053-LICENSE-MIT.txt",
+          "reviewed_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "source_entry": "syn-2.0.117/LICENSE-MIT",
+          "source_raw_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        }
+      ]
+    },
+    {
+      "name": "target-lexicon",
+      "version": "0.13.5",
+      "license_expression": "Apache-2.0 WITH LLVM-exception",
+      "purl": "pkg:cargo/target-lexicon@0.13.5",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca",
+      "archive_url": "https://crates.io/api/v1/crates/target-lexicon/0.13.5/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-a6c48161a09acc75.txt",
+          "reviewed_sha256": "a6c48161a09acc75a0e25503bab66a731eb5fba5392ed4bb4743e4ba5085327a",
+          "source_entry": "target-lexicon-0.13.5/LICENSE",
+          "source_raw_sha256": "268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5"
+        }
+      ]
+    },
+    {
+      "name": "tempfile",
+      "version": "3.27.0",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/tempfile@3.27.0",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd",
+      "archive_url": "https://crates.io/api/v1/crates/tempfile/3.27.0/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/rust-unic-58786053-LICENSE-APACHE.txt",
+          "reviewed_sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "source_entry": "tempfile-3.27.0/LICENSE-APACHE",
+          "source_raw_sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-8b427f5bc5017645.txt",
+          "reviewed_sha256": "8b427f5bc501764575e52ba4f9d95673cf8f6d80a86d0d06599852e1a9a20a36",
+          "source_entry": "tempfile-3.27.0/LICENSE-MIT",
+          "source_raw_sha256": "8b427f5bc501764575e52ba4f9d95673cf8f6d80a86d0d06599852e1a9a20a36"
+        }
+      ]
+    },
+    {
+      "name": "unicode-ident",
+      "version": "1.0.24",
+      "license_expression": "(MIT OR Apache-2.0) AND Unicode-3.0",
+      "purl": "pkg:cargo/unicode-ident@1.0.24",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75",
+      "archive_url": "https://crates.io/api/v1/crates/unicode-ident/1.0.24/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-62c7a1e35f564068.txt",
+          "reviewed_sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+          "source_entry": "unicode-ident-1.0.24/LICENSE-APACHE",
+          "source_raw_sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/rust-unic-58786053-LICENSE-MIT.txt",
+          "reviewed_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "source_entry": "unicode-ident-1.0.24/LICENSE-MIT",
+          "source_raw_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-f7db81051789b729.txt",
+          "reviewed_sha256": "f7db81051789b729fea528a63ec4c938fdcb93d9d61d97dc8cc2e9df6d47f2a1",
+          "source_entry": "unicode-ident-1.0.24/LICENSE-UNICODE",
+          "source_raw_sha256": "f7db81051789b729fea528a63ec4c938fdcb93d9d61d97dc8cc2e9df6d47f2a1"
+        }
+      ]
+    },
+    {
+      "name": "windows-link",
+      "version": "0.2.1",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/windows-link@0.2.1",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5",
+      "archive_url": "https://crates.io/api/v1/crates/windows-link/0.2.1/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-c16f8dcf1a368b83.txt",
+          "reviewed_sha256": "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b",
+          "source_entry": "windows-link-0.2.1/license-apache-2.0",
+          "source_raw_sha256": "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-c2cfccb812fe4821.txt",
+          "reviewed_sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383",
+          "source_entry": "windows-link-0.2.1/license-mit",
+          "source_raw_sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+        }
+      ]
+    },
+    {
+      "name": "windows-sys",
+      "version": "0.61.2",
+      "license_expression": "MIT OR Apache-2.0",
+      "purl": "pkg:cargo/windows-sys@0.61.2",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc",
+      "archive_url": "https://crates.io/api/v1/crates/windows-sys/0.61.2/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-c16f8dcf1a368b83.txt",
+          "reviewed_sha256": "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b",
+          "source_entry": "windows-sys-0.61.2/license-apache-2.0",
+          "source_raw_sha256": "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b"
+        },
+        {
+          "reviewed_path": "tools/installer/licenses/safetensors-native-0.8.0/text-c2cfccb812fe4821.txt",
+          "reviewed_sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383",
+          "source_entry": "windows-sys-0.61.2/license-mit",
+          "source_raw_sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+        }
+      ]
+    },
+    {
+      "name": "zmij",
+      "version": "1.0.21",
+      "license_expression": "MIT",
+      "purl": "pkg:cargo/zmij@1.0.21",
+      "source_kind": "crates.io-archive",
+      "archive_sha256": "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa",
+      "archive_url": "https://crates.io/api/v1/crates/zmij/1.0.21/download",
+      "texts": [
+        {
+          "reviewed_path": "tools/installer/licenses/rust-unic-58786053-LICENSE-MIT.txt",
+          "reviewed_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "source_entry": "zmij-1.0.21/LICENSE-MIT",
+          "source_raw_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        }
+      ]
+    }
+  ]
+}

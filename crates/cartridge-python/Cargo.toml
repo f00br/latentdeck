@@ -10,6 +10,10 @@ description = "PyO3 binding for the LatentDeck Cartridge SDK"
 name = "_native"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = []
+abi3-py312 = ["pyo3/abi3-py312"]
+
 [dependencies]
 latentdeck-cartridge = { path = "../cartridge" }
 pyo3.workspace = true

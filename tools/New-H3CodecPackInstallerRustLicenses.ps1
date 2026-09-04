@@ -81,6 +81,41 @@ if ($packages.Count -eq 0 -or
     throw 'Installer Rust dependency closure is empty or missing its root package.'
 }
 
+$reviewedLicenseFallbacks = @{
+    'jsonschema-regex@0.53.0' = [ordered]@{
+        Repository = 'https://github.com/Stranger6667/jsonschema'
+        SourceCommit = '6af37d89619fdcb06d8ab82d02dbe6b3d1a4d1a7'
+        LicenseExpression = 'MIT'
+        LicensePath = 'tools/installer/licenses/jsonschema-0.53.0-LICENSE.txt'
+        LicenseSha256 = '117829c3ca21efb132d81a44b55363d395ab8eea18526873bc828da4c0e5f038'
+        LicenseUrl = 'https://raw.githubusercontent.com/Stranger6667/jsonschema/6af37d89619fdcb06d8ab82d02dbe6b3d1a4d1a7/LICENSE'
+    }
+    'jsonschema-value@0.53.0' = [ordered]@{
+        Repository = 'https://github.com/Stranger6667/jsonschema'
+        SourceCommit = '6af37d89619fdcb06d8ab82d02dbe6b3d1a4d1a7'
+        LicenseExpression = 'MIT'
+        LicensePath = 'tools/installer/licenses/jsonschema-0.53.0-LICENSE.txt'
+        LicenseSha256 = '117829c3ca21efb132d81a44b55363d395ab8eea18526873bc828da4c0e5f038'
+        LicenseUrl = 'https://raw.githubusercontent.com/Stranger6667/jsonschema/6af37d89619fdcb06d8ab82d02dbe6b3d1a4d1a7/LICENSE'
+    }
+    'uuid-simd@0.8.0' = [ordered]@{
+        Repository = 'https://github.com/Nugine/simd'
+        SourceCommit = 'd74c030d9dc4f3cae02146d1f497ff62726ef09a'
+        LicenseExpression = 'MIT'
+        LicensePath = 'tools/installer/licenses/simd-0.8.0-LICENSE.txt'
+        LicenseSha256 = '14e66de892a0e218a4d60b2cc41a17a28080c46621d812fa2471983d8c524748'
+        LicenseUrl = 'https://raw.githubusercontent.com/Nugine/simd/d74c030d9dc4f3cae02146d1f497ff62726ef09a/LICENSE'
+    }
+    'vsimd@0.8.0' = [ordered]@{
+        Repository = 'https://github.com/Nugine/simd'
+        SourceCommit = 'd74c030d9dc4f3cae02146d1f497ff62726ef09a'
+        LicenseExpression = 'MIT'
+        LicensePath = 'tools/installer/licenses/simd-0.8.0-LICENSE.txt'
+        LicenseSha256 = '14e66de892a0e218a4d60b2cc41a17a28080c46621d812fa2471983d8c524748'
+        LicenseUrl = 'https://raw.githubusercontent.com/Nugine/simd/d74c030d9dc4f3cae02146d1f497ff62726ef09a/LICENSE'
+    }
+}
+
 $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
 $builder = [System.Text.StringBuilder]::new()
 [void]$builder.AppendLine('LatentDeck H3 Codec Pack installer Rust license bundle')
@@ -158,6 +193,37 @@ foreach ($package in $packages) {
         }
         $licenseFilesByPath[$workspaceLicensePath.ToLowerInvariant()] = $workspaceLicensePath
     }
+    $reviewedFallback = $null
+    if ($licenseFilesByPath.Count -eq 0 -and $sourceKind -ceq 'registry') {
+        $fallbackKey = "$name@$version"
+        if ($reviewedLicenseFallbacks.ContainsKey($fallbackKey)) {
+            $reviewedFallback = $reviewedLicenseFallbacks[$fallbackKey]
+            $vcsInfoPath = Join-Path $packageRoot '.cargo_vcs_info.json'
+            if ([string]$package.repository -cne [string]$reviewedFallback.Repository -or
+                $licenseExpression -cne [string]$reviewedFallback.LicenseExpression -or
+                -not (Test-Path -LiteralPath $vcsInfoPath -PathType Leaf)) {
+                throw "Reviewed Rust dependency license fallback identity drifted: $fallbackKey"
+            }
+            $vcsInfo = Get-Content -LiteralPath $vcsInfoPath -Raw | ConvertFrom-Json -Depth 16
+            if ([string]$vcsInfo.git.sha1 -cne [string]$reviewedFallback.SourceCommit) {
+                throw "Reviewed Rust dependency source commit drifted: $fallbackKey"
+            }
+            $fallbackPath = Assert-ChildPath `
+                -ParentPath $repositoryRoot `
+                -CandidatePath (Join-Path $repositoryRoot $reviewedFallback.LicensePath)
+            Assert-PathComponentsNotReparsePoints -Path $fallbackPath
+            $fallbackItem = Get-Item -LiteralPath $fallbackPath -Force
+            $fallbackHash = (
+                Get-FileHash -LiteralPath $fallbackItem.FullName -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+            if ($fallbackItem.PSIsContainer -or
+                ($fallbackItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                $fallbackHash -cne [string]$reviewedFallback.LicenseSha256) {
+                throw "Reviewed Rust dependency license fallback bytes drifted: $fallbackKey"
+            }
+            $licenseFilesByPath[$fallbackPath.ToLowerInvariant()] = $fallbackPath
+        }
+    }
     if ($licenseFilesByPath.Count -eq 0) {
         throw "Rust dependency has no distributable license or notice file: $name $version"
     }
@@ -167,6 +233,11 @@ foreach ($package in $packages) {
     [void]$builder.AppendLine("Package: $name $version")
     [void]$builder.AppendLine("Source kind: $sourceKind")
     [void]$builder.AppendLine("License expression: $licenseExpression")
+    if ($null -ne $reviewedFallback) {
+        [void]$builder.AppendLine("Reviewed upstream source commit: $($reviewedFallback.SourceCommit)")
+        [void]$builder.AppendLine("Reviewed upstream license URL: $($reviewedFallback.LicenseUrl)")
+        [void]$builder.AppendLine("Reviewed license SHA-256: $($reviewedFallback.LicenseSha256)")
+    }
 
     $licenseFiles = @(
         $licenseFilesByPath.Values |

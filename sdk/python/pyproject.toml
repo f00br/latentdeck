@@ -2,7 +2,7 @@
 name = "latentdeck-cartridge"
 version = "0.1.0"
 description = "Python binding for the data-only LatentDeck Cartridge SDK."
-requires-python = ">=3.13,<3.14"
+requires-python = ">=3.12,<3.14"
 license = "Apache-2.0"
 dependencies = []
 
@@ -18,3 +18,4 @@ build-backend = "maturin"
 manifest-path = "../../crates/cartridge-python/Cargo.toml"
 python-source = "src"
 module-name = "latentdeck_cartridge._native"
+features = ["abi3-py312"]

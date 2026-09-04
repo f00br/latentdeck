@@ -4,6 +4,7 @@ param()
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+Import-Module (Join-Path $PSScriptRoot 'ReleaseLicenseBundle.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'CodecPackPackaging.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'ReleaseSpoutMetadata.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'TauriReleaseContract.psm1') -Force
@@ -189,6 +190,100 @@ function Write-SyntheticDependencyMetadata {
         [string]$PackVersion
     )
 
+    $sourceCommit = 'c' * 40
+    $metadataRoot = Split-Path -Parent $InventoryPath
+    $nativeSbomPath = Join-Path $metadataRoot 'NATIVE_RUST_SBOM.cdx.json'
+    $nativeLicensesPath = Join-Path $metadataRoot 'NATIVE_RUST_LICENSES.json'
+    $nativeArtifactName = 'LatentDeck H3 Native Extensions'
+    $nativeArtifactReference = "pkg:generic/LatentDeck%20H3%20Native%20Extensions@$PackVersion"
+    $nativeComponents = @(
+        foreach ($nativeName in @('latentdeck-cartridge-python', 'latentdeck-gpu-python')) {
+            [ordered]@{
+                'bom-ref' = "rust:$nativeName@0.1.0"
+                type = 'library'
+                name = $nativeName
+                version = '0.1.0'
+                licenses = @([ordered]@{ license = [ordered]@{ name = 'Apache-2.0' } })
+                properties = @(
+                    [ordered]@{ name = 'latentdeck:ecosystem'; value = 'rust' }
+                    [ordered]@{ name = 'latentdeck:dependency-scope'; value = 'artifact' }
+                    [ordered]@{ name = 'latentdeck:selection-root'; value = 'true' }
+                )
+            }
+        }
+    )
+    $nativeRoot = [ordered]@{
+        'bom-ref' = $nativeArtifactReference
+        type = 'application'
+        name = $nativeArtifactName
+        version = $PackVersion
+        licenses = @([ordered]@{ license = [ordered]@{ name = 'Apache-2.0' } })
+        properties = @(
+            [ordered]@{ name = 'latentdeck:artifact-scope'; value = 'h3-native' }
+            [ordered]@{ name = 'latentdeck:dependency-scope'; value = 'artifact' }
+            [ordered]@{ name = 'latentdeck:target-platform'; value = 'x86_64-pc-windows-msvc' }
+        )
+    }
+    Write-Utf8Text -Path $nativeSbomPath -Content (([ordered]@{
+        bomFormat = 'CycloneDX'
+        specVersion = '1.5'
+        serialNumber = 'urn:uuid:00000000-0000-0000-0000-000000000001'
+        version = 1
+        metadata = [ordered]@{ component = $nativeRoot }
+        components = $nativeComponents
+    } | ConvertTo-Json -Depth 32) + "`n")
+    $nativeLicenseText = "Synthetic Apache-2.0 fixture text.`n"
+    $nativeLicenseBytes = [System.Text.UTF8Encoding]::new($false).GetBytes($nativeLicenseText)
+    $nativeLicenseHash = [System.Convert]::ToHexString(
+        [System.Security.Cryptography.SHA256]::HashData($nativeLicenseBytes)
+    ).ToLowerInvariant()
+    $nativeMappings = @(
+        foreach ($mappingEntry in @(
+            [pscustomobject]@{ Component = $nativeRoot; Ecosystem = 'artifact' }
+            @($nativeComponents | ForEach-Object {
+                [pscustomobject]@{ Component = $_; Ecosystem = 'rust' }
+            })
+        )) {
+            [ordered]@{
+                'bom-ref' = [string]$mappingEntry.Component.'bom-ref'
+                name = [string]$mappingEntry.Component.name
+                version = [string]$mappingEntry.Component.version
+                ecosystem = [string]$mappingEntry.Ecosystem
+                dependency_scope = 'artifact'
+                license_expression = 'Apache-2.0'
+                artifacts = @($nativeArtifactName)
+                disposition = 'license_text_in_bundle'
+                rationale = ''
+                text_sha256s = @($nativeLicenseHash)
+            }
+        }
+    )
+    $nativeSbomItem = Get-Item -LiteralPath $nativeSbomPath
+    Write-Utf8Text -Path $nativeLicensesPath -Content (([ordered]@{
+        schema_version = 1
+        artifact = [ordered]@{ name = $nativeArtifactName; version = $PackVersion }
+        policy = [ordered]@{
+            component_coverage = 'exact-sbom-closure'
+            redistributed_components_require_text = $true
+            build_only_disposition = 'not_redistributed_no_text_required'
+            text_canonicalization = 'strict-utf8-lf-final-newline'
+        }
+        sboms = @([ordered]@{
+            name = 'NATIVE_RUST_SBOM.cdx.json'
+            artifact = $nativeArtifactName
+            byte_length = [int64]$nativeSbomItem.Length
+            sha256 = (Get-FileHash -LiteralPath $nativeSbomPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        })
+        component_count = $nativeMappings.Count
+        text_count = 1
+        components = $nativeMappings
+        texts = @([ordered]@{
+            sha256 = $nativeLicenseHash
+            byte_length = [int64]$nativeLicenseBytes.Length
+            sources = @([ordered]@{ source_kind = 'synthetic-test' })
+            text = $nativeLicenseText
+        })
+    } | ConvertTo-Json -Depth 32) + "`n")
     $components = @(
         [ordered]@{
             name = 'CPython'
@@ -203,7 +298,7 @@ function Write-SyntheticDependencyMetadata {
             name = 'latentdeck-codec-h3'
             version = '0.2.0'
             kind = 'repository'
-            source_url = 'https://latentdeck.org/'
+            source_url = 'https://github.com/f00br/latentdeck'
             license_expression = 'Apache-2.0'
             license_files = @()
             content_sha256 = ('b' * 64)
@@ -213,12 +308,21 @@ function Write-SyntheticDependencyMetadata {
         schema_version = 1
         pack_id = 'org.latentdeck.h3'
         pack_version = $PackVersion
+        source_commit = $sourceCommit
         platform = 'windows-x86_64'
         curator = [ordered]@{
             name = 'latentdeck-codec-pack-curator'
             schema_version = 1
         }
         components = $components
+        native_rust = [ordered]@{
+            sbom_path = 'NATIVE_RUST_SBOM.cdx.json'
+            sbom_sha256 = (Get-FileHash -LiteralPath $nativeSbomPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            license_bundle_path = 'NATIVE_RUST_LICENSES.json'
+            license_bundle_sha256 = (Get-FileHash -LiteralPath $nativeLicensesPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            component_count = $nativeComponents.Count
+            selection_roots = @('latentdeck-cartridge-python', 'latentdeck-gpu-python')
+        }
     } | ConvertTo-Json -Depth 16) + "`n")
 
     $sbomComponents = @(
@@ -233,6 +337,10 @@ function Write-SyntheticDependencyMetadata {
                 externalReferences = @(
                     [ordered]@{ type = 'distribution'; url = $component.source_url }
                 )
+                properties = @(
+                    [ordered]@{ name = 'latentdeck:ecosystem'; value = 'python' }
+                    [ordered]@{ name = 'latentdeck:dependency-scope'; value = 'runtime' }
+                )
             }
         }
     )
@@ -246,14 +354,47 @@ function Write-SyntheticDependencyMetadata {
                 type = 'application'
                 name = 'LatentDeck H3 Codec Pack'
                 version = $PackVersion
+                licenses = @([ordered]@{ expression = 'Apache-2.0' })
+                properties = @(
+                    [ordered]@{ name = 'latentdeck:source-commit'; value = $sourceCommit }
+                    [ordered]@{ name = 'latentdeck:artifact-scope'; value = 'h3-codec-pack' }
+                    [ordered]@{ name = 'latentdeck:dependency-scope'; value = 'artifact' }
+                    [ordered]@{
+                        name = 'latentdeck:included-dependency-scopes'
+                        value = 'artifact,runtime,build,runtime+build'
+                    }
+                    [ordered]@{ name = 'latentdeck:excluded-dependency-scopes'; value = 'development' }
+                    [ordered]@{ name = 'latentdeck:target-platform'; value = 'windows-x86_64' }
+                )
             }
         }
-        components = $sbomComponents
+        components = @($sbomComponents) + @($nativeComponents)
     } | ConvertTo-Json -Depth 16) + "`n")
 }
 
 try {
     [System.IO.Directory]::CreateDirectory($testRoot) | Out-Null
+
+    foreach ($caseVariant in @('UNSIGNED_PREVIEW', 'Unsigned_Preview')) {
+        Assert-NativeFailureContains `
+            -Context "application release channel case variant $caseVariant" `
+            -ExpectedText 'ReleaseChannel must be exactly unsigned_preview or stable.' `
+            -Command {
+                & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'Build-ReleaseCandidate.ps1') `
+                    -ReleaseChannel $caseVariant `
+                    -DevelopmentBuild
+            }
+        Assert-NativeFailureContains `
+            -Context "H3 release channel case variant $caseVariant" `
+            -ExpectedText 'ReleaseChannel must be exactly unsigned_preview or stable.' `
+            -Command {
+                & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'Build-H3CodecPack.ps1') `
+                    -PythonEmbedArchive (Join-Path $testRoot 'unused-python-embed.zip') `
+                    -PackVersion 0.2.1 `
+                    -ReleaseChannel $caseVariant `
+                    -DevelopmentBuild
+            }
+    }
 
     $portableSourceProbe = Join-Path $testRoot 'portable-source-probe'
     Write-Utf8Text `
@@ -388,10 +529,222 @@ try {
         }
 
     $generatedReleaseSbom = Join-Path $testRoot 'latentdeck-0.1.0-sbom.cdx.json'
-    & (Join-Path $PSScriptRoot 'New-Sbom.ps1') -OutputPath $generatedReleaseSbom | Out-Null
+    & (Join-Path $PSScriptRoot 'New-Sbom.ps1') `
+        -OutputPath $generatedReleaseSbom `
+        -ArtifactName 'LatentDeck App' `
+        -ArtifactVersion '0.1.0+1' `
+        -ArtifactScope application `
+        -CargoPackage latentdeck-app `
+        -NodePackage '@latentdeck/app' `
+        -NodeBuildPackage @(
+            '@sveltejs/vite-plugin-svelte',
+            '@tailwindcss/vite',
+            '@tauri-apps/cli',
+            'svelte',
+            'tailwindcss',
+            'typescript',
+            'vite',
+            'vitest'
+        ) `
+        -NodeRuntimeBuildPackage @('svelte', 'tailwindcss', 'vite') `
+        -IncludeSpout2 `
+        -IncludeTauriWindowsInstaller | Out-Null
     $generatedBom = Get-Content -Raw -LiteralPath $generatedReleaseSbom |
         ConvertFrom-Json -Depth 100
     Assert-Spout2CycloneDxComponent -Components @($generatedBom.components) | Out-Null
+    $missingReleaseLicenses = @(
+        @($generatedBom.metadata.component) + @($generatedBom.components) |
+            Where-Object {
+                $null -eq $_.PSObject.Properties['licenses'] -or @($_.licenses).Count -eq 0
+            }
+    )
+    if ($missingReleaseLicenses.Count -gt 0) {
+        throw 'Generated release SBOM has components without license metadata.'
+    }
+    if (@($generatedBom.metadata.component.licenses).Count -ne 1 -or
+        [string]$generatedBom.metadata.component.licenses[0].license.name -cne 'Apache-2.0') {
+        throw 'Generated release SBOM root does not bind the Apache-2.0 artifact license.'
+    }
+    $releaseScopePolicy = @($generatedBom.metadata.component.properties | Where-Object {
+        [string]$_.name -ceq 'latentdeck:included-dependency-scopes' -and
+        [string]$_.value -ceq 'artifact,runtime,build,runtime+build'
+    })
+    $releaseExcludedScope = @($generatedBom.metadata.component.properties | Where-Object {
+        [string]$_.name -ceq 'latentdeck:excluded-dependency-scopes' -and
+        [string]$_.value -ceq 'development'
+    })
+    $releaseTargetPlatform = @($generatedBom.metadata.component.properties | Where-Object {
+        [string]$_.name -ceq 'latentdeck:target-platform' -and
+        [string]$_.value -ceq 'x86_64-pc-windows-msvc'
+    })
+    $releaseExcludedNodeDevelopment = @($generatedBom.metadata.component.properties | Where-Object {
+        [string]$_.name -ceq 'latentdeck:excluded-node-development-component-count' -and
+        [string]$_.value -cmatch '^[1-9][0-9]*$'
+    })
+    $allowedReleaseScopes = @('artifact', 'runtime', 'build', 'runtime+build')
+    $invalidReleaseScopes = @(
+        foreach ($component in @($generatedBom.metadata.component) + @($generatedBom.components)) {
+            $scopes = @($component.properties | Where-Object {
+                [string]$_.name -ceq 'latentdeck:dependency-scope'
+            })
+            if ($scopes.Count -ne 1 -or
+                [string]$scopes[0].value -cnotin $allowedReleaseScopes) {
+                "$($component.name)@$($component.version)"
+            }
+        }
+    )
+    if ($releaseScopePolicy.Count -ne 1 -or $releaseExcludedScope.Count -ne 1 -or
+        $releaseTargetPlatform.Count -ne 1 -or
+        $releaseExcludedNodeDevelopment.Count -ne 1 -or
+        $invalidReleaseScopes.Count -ne 0) {
+        throw 'Generated Windows release SBOM dependency scope classification is invalid.'
+    }
+    $workspaceNodeManifest = Get-Content -LiteralPath (Join-Path $repoRoot 'package.json') -Raw |
+        ConvertFrom-Json -Depth 16
+    $expectedNodeBuildRoots = @(
+        '@sveltejs/vite-plugin-svelte',
+        '@tailwindcss/vite',
+        '@tauri-apps/cli',
+        'svelte',
+        'tailwindcss',
+        'typescript',
+        'vite',
+        'vitest'
+    )
+    foreach ($expectedNodeBuildRoot in $expectedNodeBuildRoots) {
+        $expectedVersion = [string](
+            $workspaceNodeManifest.devDependencies.PSObject.Properties[$expectedNodeBuildRoot].Value
+        )
+        $matches = @($generatedBom.components | Where-Object {
+            [string]$_.name -ceq $expectedNodeBuildRoot -and
+            [string]$_.version -ceq $expectedVersion -and
+            @($_.properties | Where-Object {
+                [string]$_.name -ceq 'latentdeck:ecosystem' -and
+                [string]$_.value -ceq 'node'
+            }).Count -eq 1 -and
+            @($_.properties | Where-Object {
+                [string]$_.name -ceq 'latentdeck:dependency-scope' -and
+                [string]$_.value -cin @('build', 'runtime+build')
+            }).Count -eq 1
+        })
+        if ($matches.Count -ne 1) {
+            throw "Generated release SBOM omitted locked Node build root $expectedNodeBuildRoot@$expectedVersion."
+        }
+    }
+    foreach ($emittedBuildRoot in @('svelte', 'tailwindcss', 'vite')) {
+        $emittedMatches = @($generatedBom.components | Where-Object {
+            [string]$_.name -ceq $emittedBuildRoot -and
+            @($_.properties | Where-Object {
+                [string]$_.name -ceq 'latentdeck:dependency-scope' -and
+                [string]$_.value -ceq 'runtime+build'
+            }).Count -eq 1
+        })
+        if ($emittedMatches.Count -ne 1) {
+            throw "Generated release SBOM does not classify emitted $emittedBuildRoot code as runtime+build."
+        }
+    }
+    $linuxOnlyCargoNames = @(
+        'gdk', 'gdk-sys', 'gdkwayland-sys', 'gdkx11', 'gdkx11-sys',
+        'gtk', 'gtk-sys', 'gtk3-macros', 'javascriptcore-rs',
+        'javascriptcore-rs-sys', 'soup3', 'soup3-sys', 'webkit2gtk', 'webkit2gtk-sys'
+    )
+    if (@($generatedBom.components | Where-Object {
+        [string]$_.name -cin $linuxOnlyCargoNames
+    }).Count -gt 0) {
+        throw 'Generated Windows release SBOM includes a Linux-only Cargo target branch.'
+    }
+    $releaseBuilderSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Build-ReleaseCandidate.ps1') -Raw
+    if ($releaseBuilderSource -cnotmatch 'missing license metadata and cannot be distributed' -or
+        $releaseBuilderSource -cnotmatch 'MissingLicenseComponentCount = 0' -or
+        $releaseBuilderSource -cnotmatch 'component_versions = \$releaseComponentVersions' -or
+        $releaseBuilderSource -cnotmatch 'windows-x64-\$artifactTrustSuffix-setup\.exe' -or
+        $releaseBuilderSource -cnotmatch 'Assert-PathComponentsNotReparsePoints' -or
+        $releaseBuilderSource -cnotmatch 'Stable application builds remain disabled') {
+        throw 'Application release builder license, unsigned-name, or stable-signing gate is missing.'
+    }
+    $builderTokens = $null
+    $builderErrors = $null
+    $builderAst = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $PSScriptRoot 'Build-ReleaseCandidate.ps1'),
+        [ref]$builderTokens,
+        [ref]$builderErrors
+    )
+    if ($builderErrors.Count -gt 0) {
+        throw 'Application release builder does not parse for notice contract testing.'
+    }
+    $noticeFunctions = @($builderAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'New-ApplicationThirdPartyNotice'
+    }, $true))
+    if ($noticeFunctions.Count -ne 1) {
+        throw 'Application notice generator function is missing or duplicated.'
+    }
+    Invoke-Expression $noticeFunctions[0].Extent.Text
+    $scopedApplicationNotice = Join-Path $testRoot 'APPLICATION_THIRD_PARTY_NOTICES.md'
+    New-ApplicationThirdPartyNotice `
+        -LatentDeckSbomPath $generatedReleaseSbom `
+        -LatentPlayerSbomPath $generatedReleaseSbom `
+        -RepositoryNoticePath (Join-Path $repoRoot 'THIRD_PARTY_NOTICES.md') `
+        -DestinationPath $scopedApplicationNotice `
+        -ReleaseLabel '0.1.0-preview.1' | Out-Null
+    $scopedApplicationNoticeText = Get-Content -LiteralPath $scopedApplicationNotice -Raw
+    if ($scopedApplicationNoticeText -cnotmatch '^# LatentDeck applications third-party notices' -or
+        $scopedApplicationNoticeText -cnotmatch '(?m)^## LatentDeck App locked component license inventory$' -or
+        $scopedApplicationNoticeText -cnotmatch '(?m)^## LatentPlayer locked component license inventory$' -or
+        $scopedApplicationNoticeText -cnotmatch '(?m)^## Spout2$' -or
+        $scopedApplicationNoticeText -match '(?i)\b(?:taehv|taeh3|H3)\b') {
+        throw 'Application third-party notice is not exact artifact scope or contains codec-only material.'
+    }
+    $applicationLicenseBundle = Join-Path $testRoot 'APPLICATION_THIRD_PARTY_LICENSES.json'
+    $applicationLicenseResult = New-ReleaseLicenseBundle `
+        -SbomPath $generatedReleaseSbom `
+        -ArtifactName 'LatentDeck Windows Applications' `
+        -ArtifactVersion '0.1.0-preview.1' `
+        -OutputPath $applicationLicenseBundle `
+        -RepositoryNoticePath (Join-Path $repoRoot 'THIRD_PARTY_NOTICES.md')
+    if ($applicationLicenseResult.ComponentCount -ne (@($generatedBom.components).Count + 1) -or
+        $applicationLicenseResult.TextCount -lt 1 -or
+        $applicationLicenseResult.NoTextDispositionCount -lt 1) {
+        throw 'Application license-text bundle does not cover the exact SBOM closure.'
+    }
+    foreach ($installerComponentName in @('NSIS', 'nsis-tauri-utils')) {
+        $matches = @($generatedBom.components | Where-Object {
+            [string]$_.name -ceq $installerComponentName -and
+            @($_.properties | Where-Object {
+                [string]$_.name -ceq 'latentdeck:dependency-scope' -and
+                [string]$_.value -ceq 'runtime+build'
+            }).Count -eq 1
+        })
+        if ($matches.Count -ne 1) {
+            throw "Application SBOM omitted redistributed installer component $installerComponentName."
+        }
+    }
+    foreach ($mutation in @('missing-mapping', 'scope', 'license', 'artifacts')) {
+        $tamperedBundlePath = Join-Path $testRoot "APPLICATION_THIRD_PARTY_LICENSES-$mutation.json"
+        $tamperedBundle = Get-Content -LiteralPath $applicationLicenseBundle -Raw |
+            ConvertFrom-Json -Depth 100
+        if ($mutation -ceq 'missing-mapping') {
+            $tamperedBundle.components = @($tamperedBundle.components | Select-Object -Skip 1)
+            $tamperedBundle.component_count = [int]$tamperedBundle.component_count - 1
+        } elseif ($mutation -ceq 'scope') {
+            $tamperedBundle.components[0].dependency_scope = 'runtime'
+        } elseif ($mutation -ceq 'license') {
+            $tamperedBundle.components[0].license_expression = 'Wrong-License'
+        } else {
+            $tamperedBundle.components[0].artifacts = @('Wrong Artifact')
+        }
+        Write-Utf8Text `
+            -Path $tamperedBundlePath `
+            -Content (($tamperedBundle | ConvertTo-Json -Depth 100) + "`n")
+        Assert-Throws -Context "license bundle must reject $mutation drift" -Action {
+            Test-ReleaseLicenseBundle `
+                -BundlePath $tamperedBundlePath `
+                -SbomPath $generatedReleaseSbom `
+                -ExpectedArtifactName 'LatentDeck Windows Applications' `
+                -ExpectedArtifactVersion '0.1.0-preview.1' | Out-Null
+        }
+    }
     $prebuiltSbomOutput = Join-Path $testRoot 'prebuilt-sbom-release-output'
     Assert-NativeFailureContains `
         -Context 'application release builder must reject every prebuilt SBOM input' `
@@ -401,6 +754,33 @@ try {
                 -OutputDirectory $prebuiltSbomOutput `
                 -SbomPath $generatedReleaseSbom
         }
+    Assert-NativeFailureContains `
+        -Context 'stable application release must remain closed until installed EXE verification exists' `
+        -ExpectedText 'Stable application builds remain disabled until' `
+        -Command {
+            & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'Build-ReleaseCandidate.ps1') `
+                -ReleaseChannel stable `
+                -ReleaseLabel 0.1.0 `
+                -SigningCommand 'signtool sign %1'
+        }
+    $releaseJunctionTarget = Join-Path $testRoot 'release-junction-target'
+    $releaseJunctionOutput = Join-Path $testRoot 'release-junction-output'
+    [System.IO.Directory]::CreateDirectory($releaseJunctionTarget) | Out-Null
+    New-Item -ItemType Junction -Path $releaseJunctionOutput -Target $releaseJunctionTarget | Out-Null
+    try {
+        Assert-NativeFailureContains `
+            -Context 'application release builder must reject output reparse ancestors' `
+            -ExpectedText 'reparse-point component' `
+            -Command {
+                & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'Build-ReleaseCandidate.ps1') `
+                    -OutputDirectory $releaseJunctionOutput `
+                    -DevelopmentBuild
+            }
+    } finally {
+        if (Test-Path -LiteralPath $releaseJunctionOutput) {
+            Remove-Item -LiteralPath $releaseJunctionOutput -Force
+        }
+    }
 
     $spoutComponent = New-Spout2CycloneDxComponent
     $badSpoutComponent = $spoutComponent | ConvertTo-Json -Depth 16 | ConvertFrom-Json -Depth 16
@@ -492,7 +872,7 @@ try {
         $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
         if ($config.productName -cne $app.Product -or
             $config.identifier -cne $app.Identifier -or
-            $config.version -cne '0.1.0' -or
+            $config.version -cne '0.1.0+1' -or
             $config.bundle.active -ne $true -or
             (@($config.bundle.targets) -join ',') -cne 'nsis' -or
             $config.bundle.createUpdaterArtifacts -ne $false -or
@@ -640,12 +1020,12 @@ try {
             format = 'safetensors'
             accepted_variants = @(
                 @{
-                    variant_id = 'madebyollin-taeh3-e743234f'
+                    variant_id = 'madebyollin-taeh3-62f7591f'
                     sha256 = '4fd022bfcab08772fe0536b17ea1a3bbb5625be11e397868d1c5d891863d4c13'
                     byte_length = 22709752
-                    source_url = 'https://huggingface.co/madebyollin/taehv/resolve/main/taeh3.safetensors'
+                    source_url = 'https://raw.githubusercontent.com/madebyollin/taehv/62f7591f59dfbb4c3c02b7a621d180a9eeaba26c/safetensors/taeh3.safetensors'
                     license_label = 'MIT'
-                    license_url = 'https://github.com/madebyollin/taehv/blob/e743234f/LICENSE'
+                    license_url = 'https://github.com/madebyollin/taehv/blob/62f7591f59dfbb4c3c02b7a621d180a9eeaba26c/LICENSE'
                 }
             )
         } | ConvertTo-Json -Depth 16)
@@ -834,6 +1214,71 @@ try {
             'Build-H3CodecPack.ps1 must force /Brepro for local wheels, suppress ' +
             'CARGO_ENCODED_RUSTFLAGS precedence, and restore both process variables in finally.'
         )
+    }
+    foreach ($requiredSupplyChainFragment in @(
+        "'--only-binary', ':all:', '--require-hashes', '--requirement', `$requirementsPath",
+        "'--build-constraints', `$buildConstraints, '--require-hashes'",
+        "'tools/packaging/windows-x64-build-constraints.txt'",
+        "install_policy = 'direct_https_wheels_only_sha256_required'"
+    )) {
+        if ($fullPackBuilder.IndexOf(
+            $requiredSupplyChainFragment,
+            [System.StringComparison]::Ordinal
+        ) -lt 0) {
+            throw (
+                'Build-H3CodecPack.ps1 lost a hash-bound wheels-only acquisition/build ' +
+                "contract fragment: $requiredSupplyChainFragment"
+            )
+        }
+    }
+    $h3WindowsLockPath = Join-Path (
+        Split-Path -Parent $PSScriptRoot
+    ) 'codec-host/codecs/h3/packaging/windows-x64-cu130.lock.json'
+    $h3WindowsLock = Get-Content -Raw -LiteralPath $h3WindowsLockPath |
+        ConvertFrom-Json -Depth 32
+    $h3Wheels = @($h3WindowsLock.dependencies)
+    if ([string]$h3WindowsLock.pack_version -cne '0.2.1' -or
+        $h3Wheels.Count -ne 15 -or
+        @($h3Wheels | Where-Object { $null -eq $_.wheel }).Count -ne 0) {
+        throw 'H3 Windows runtime lock must retain pack 0.2.1 and exactly 15 wheel identities.'
+    }
+    foreach ($lockedDependency in $h3Wheels) {
+        $lockedWheel = $lockedDependency.wheel
+        if ([string]$lockedWheel.file_name -cnotmatch '^[A-Za-z0-9_.+\-]+\.whl$' -or
+            [string]$lockedWheel.url -cnotmatch '^https://' -or
+            [int64]$lockedWheel.byte_length -le 0 -or
+            [int64]$lockedWheel.byte_length -ge 2GB -or
+            [string]$lockedWheel.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw "H3 Windows runtime lock has an invalid wheel identity: $($lockedDependency.name)"
+        }
+    }
+    $lockedTorch = @($h3Wheels | Where-Object { [string]$_.name -ceq 'torch' })
+    if ($lockedTorch.Count -ne 1 -or
+        [string]$lockedTorch[0].version -cne '2.13.0+cu130' -or
+        [string]$lockedTorch[0].wheel.file_name -cne
+            'torch-2.13.0+cu130-cp313-cp313-win_amd64.whl' -or
+        [int64]$lockedTorch[0].wheel.byte_length -ne 1915517499 -or
+        [string]$lockedTorch[0].wheel.sha256 -cne
+            'cf23236e9deed7d3510d14d9b9592d75d272ef7b35bbfee31a02bea339c73971') {
+        throw 'H3 Windows runtime lock lost the reviewed Torch 2.13.0+cu130 wheel identity.'
+    }
+    $lockedSafetensors = @($h3Wheels | Where-Object {
+        [string]$_.name -ceq 'safetensors'
+    })
+    $safetensorsClosureLock = Get-Content -Raw -LiteralPath (Join-Path (
+        Split-Path -Parent $PSScriptRoot
+    ) 'comfy/latent-cartridge/packaging/safetensors-native-0.8.0.lock.json') |
+        ConvertFrom-Json -Depth 32
+    if ($lockedSafetensors.Count -ne 1 -or
+        [string]$lockedSafetensors[0].wheel.file_name -cne
+            [string]$safetensorsClosureLock.wheel.file_name -or
+        [int64]$lockedSafetensors[0].wheel.byte_length -ne
+            [int64]$safetensorsClosureLock.wheel.byte_length -or
+        [string]$lockedSafetensors[0].wheel.sha256 -cne
+            [string]$safetensorsClosureLock.wheel.sha256 -or
+        [string]$lockedSafetensors[0].wheel.url -cne
+            [string]$safetensorsClosureLock.wheel.url) {
+        throw 'H3 and Recorder Safetensors wheel locks must remain byte-identical.'
     }
     foreach ($removedAuthorizationArgument in @(
         '--expected-sha256',

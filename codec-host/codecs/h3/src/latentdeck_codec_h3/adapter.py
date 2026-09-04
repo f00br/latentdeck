@@ -56,7 +56,7 @@ from .decoder import (
 )
 
 PACK_ID = "org.latentdeck.h3"
-PACK_VERSION = "0.2.0"
+PACK_VERSION = "0.2.1"
 ADAPTER_ID = "org.latentdeck.h3"
 ADAPTER_VERSION = "0.2.0"
 HOST_API_VERSION = "2.0"
