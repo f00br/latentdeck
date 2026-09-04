@@ -8,7 +8,10 @@ use latentdeck_library::{
 };
 use tempfile::tempdir;
 
-use support::{ID_A, ID_B, ID_C, write_synthetic_lc, write_synthetic_non_h3_lc_with_duration};
+use support::{
+    ID_A, ID_B, ID_C, write_synthetic_lc, write_synthetic_non_h3_lc,
+    write_synthetic_non_h3_lc_with_duration,
+};
 
 #[test]
 fn full_validation_import_is_persistent_and_deduplicates_archive_identity() {
@@ -107,7 +110,12 @@ fn reindex_retains_missing_identity_and_never_accepts_changed_content() {
     let recovered = library.reindex_registered().expect("recover reindex");
     assert_eq!(recovered[0].disposition, ReindexDisposition::Present);
 
-    write_synthetic_lc(&path, ID_C);
+    let replacement = write_synthetic_non_h3_lc(&path, ID_C);
+    assert_ne!(
+        replacement.len(),
+        original.len(),
+        "replacement fixture must change the cached file size"
+    );
     let changed = library.reindex_registered().expect("changed reindex");
     assert_eq!(changed[0].disposition, ReindexDisposition::ContentChanged);
     assert_ne!(changed[0].observed_key.as_ref(), Some(&imported.key));
