@@ -577,7 +577,12 @@ def test_public_synthetic_codec_runs_authenticated_service_bootstrap_from_temp_r
         runtime.mkdir(parents=True)
         runtime_python = runtime / "python.exe"
         base_python = Path(getattr(sys, "_base_executable", sys.executable)).resolve()
+        runtime_dll = base_python.with_name(
+            f"python{sys.version_info.major}{sys.version_info.minor}.dll"
+        )
+        assert runtime_dll.is_file(), f"CPython runtime DLL not found: {runtime_dll}"
         shutil.copy2(base_python, runtime_python)
+        shutil.copy2(runtime_dll, runtime / runtime_dll.name)
         environment = os.environ.copy()
         environment[SERVICE_CHILD_ENV] = "1"
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
