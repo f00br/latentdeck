@@ -23,6 +23,7 @@ if ($ReleaseChannel -cnotin @('unsigned_preview', 'stable')) {
 
 Import-Module (Join-Path $PSScriptRoot 'ReleaseLicenseBundle.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'SafetensorsNativeClosure.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'PublicWheelAudit.psm1') -Force
 
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $artifactsRoot = Join-Path $repositoryRoot 'artifacts'
@@ -916,6 +917,7 @@ $exampleSpecs = @(
 )
 
 $savedCargoTarget = $env:CARGO_TARGET_DIR
+$savedSourceDateEpoch = $env:SOURCE_DATE_EPOCH
 try {
     [System.IO.Directory]::CreateDirectory($buildRoot) | Out-Null
     [System.IO.Directory]::CreateDirectory($outputStage) | Out-Null
@@ -945,6 +947,7 @@ try {
     if ($LASTEXITCODE -ne 0 -or $uvVersion -cne 'uv 0.11.8 (0e961dd9a 2026-04-27 x86_64-pc-windows-msvc)') {
         throw "Developer Kit requires pinned uv 0.11.8; found '$uvVersion'."
     }
+    $env:SOURCE_DATE_EPOCH = '315532800'
     $projectInventory = [System.Collections.Generic.List[object]]::new()
     foreach ($spec in $projectSpecs) {
         $identity = Get-ProjectIdentity -ProjectPath $spec.Path
@@ -962,6 +965,16 @@ try {
             ($wheel.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "Developer Kit wheel is not a bounded regular file: $($wheel.Name)"
         }
+        $wheelAuditParameters = @{
+            Path = $wheel.FullName
+            ForbiddenPathRoot = @($repositoryRoot, $buildRoot)
+            Context = "Developer Kit wheel $($identity.Name)"
+            RequireDeterministicTimestamps = $true
+        }
+        if ($identity.Name -ceq 'latentdeck-cartridge') {
+            $wheelAuditParameters.ForbidEmbeddedSbom = $true
+        }
+        Assert-PublicProjectWheel @wheelAuditParameters | Out-Null
         $projectInventory.Add([pscustomobject]@{
             name = $identity.Name
             version = $identity.Version
@@ -972,6 +985,17 @@ try {
     }
     if ($projectInventory.Count -ne 9) {
         throw 'Developer Kit must contain exactly nine project wheels.'
+    }
+    foreach ($sharedName in @('latentdeck-cartridge', 'latentdeck-comfy-cartridge')) {
+        $built = @($projectInventory | Where-Object { [string]$_.name -ceq $sharedName })
+        $recorder = @($recorderReceipt.packages | Where-Object { [string]$_.name -ceq $sharedName })
+        if ($built.Count -ne 1 -or $recorder.Count -ne 1 -or
+            [string]$built[0].version -cne [string]$recorder[0].version -or
+            [string]$built[0].file_name -cne [string]$recorder[0].file_name -or
+            [int64]$built[0].byte_length -ne [int64]$recorder[0].byte_length -or
+            [string]$built[0].sha256 -cne [string]$recorder[0].sha256) {
+            throw "Developer Kit wheel differs from the exact Comfy Recorder wheel: $sharedName"
+        }
     }
 
     $env:CARGO_TARGET_DIR = Join-Path $buildRoot 'cargo-target'
@@ -1595,6 +1619,11 @@ workflow from the repository's locked environment or documented runtime profile.
     Write-Output $finalDirectory
 } finally {
     $env:CARGO_TARGET_DIR = $savedCargoTarget
+    if ($null -eq $savedSourceDateEpoch) {
+        Remove-Item Env:SOURCE_DATE_EPOCH -ErrorAction SilentlyContinue
+    } else {
+        $env:SOURCE_DATE_EPOCH = $savedSourceDateEpoch
+    }
     foreach ($temporary in @(
         [pscustomobject]@{ Path = $buildRoot; Prefix = '.developer-kit-build-' },
         [pscustomobject]@{ Path = $outputStage; Prefix = '.developer-kit-output-' }

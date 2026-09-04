@@ -19,3 +19,9 @@ manifest-path = "../../crates/cartridge-python/Cargo.toml"
 python-source = "src"
 module-name = "latentdeck_cartridge._native"
 features = ["abi3-py312"]
+
+# Release bundles already carry an artifact-scoped, lock-generated SBOM for
+# the complete Python and Rust closure. Maturin's build-local Rust SBOM is
+# disabled here because its path identities are not portable between builders.
+[tool.maturin.sbom]
+rust = false

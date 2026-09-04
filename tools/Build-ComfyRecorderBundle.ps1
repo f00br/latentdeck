@@ -14,6 +14,7 @@ Set-StrictMode -Version Latest
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 Import-Module (Join-Path $PSScriptRoot 'ReleaseLicenseBundle.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'SafetensorsNativeClosure.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'PublicWheelAudit.psm1') -Force
 if (-not [System.IO.Path]::IsPathRooted($OutputDirectory)) {
     $OutputDirectory = Join-Path $repositoryRoot $OutputDirectory
 }
@@ -355,6 +356,17 @@ try {
         $recorderWheel[0].Name -cne 'latentdeck_comfy_cartridge-0.1.0-py3-none-any.whl') {
         throw 'Comfy Recorder did not build the exact platform-neutral wheel.'
     }
+    Assert-PublicProjectWheel `
+        -Path $sdkWheel[0].FullName `
+        -ForbiddenPathRoot @($repositoryRoot, $scratchRoot) `
+        -Context 'Cartridge SDK wheel' `
+        -RequireDeterministicTimestamps `
+        -ForbidEmbeddedSbom | Out-Null
+    Assert-PublicProjectWheel `
+        -Path $recorderWheel[0].FullName `
+        -ForbiddenPathRoot @($repositoryRoot, $scratchRoot) `
+        -Context 'Comfy Recorder wheel' `
+        -RequireDeterministicTimestamps | Out-Null
 
     $resolvedSafetensors = (Resolve-Path -LiteralPath $SafetensorsWheelPath).Path
     Assert-NoReparseAncestor -Path $resolvedSafetensors -Context 'Safetensors wheel input'
