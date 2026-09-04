@@ -65,7 +65,8 @@ wheels as described below and install their declared dependencies into a
 disposable environment. Dropping only this source directory into
 `custom_nodes` does not supply the native Cartridge SDK.
 
-The node appears under `LatentDeck / Cartridge` as
+Restart ComfyUI after the installer completes. The node appears under
+`LatentDeck / Cartridge` as
 `Save Latent Cartridge (.lc)`. Recordings go under the dedicated
 `latentdeck/cartridges` subdirectory of ComfyUI's output directory.
 `filename_prefix` is a sanitized single-file basename inside that directory;

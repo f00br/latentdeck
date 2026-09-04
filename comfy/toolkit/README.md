@@ -191,6 +191,11 @@ environment that launches ComfyUI. Then place this `comfy/toolkit` directory in
 ComfyUI's `custom_nodes` directory so the top-level discovery shim is loaded,
 and restart ComfyUI.
 
+Workflow `06_RAW_RECORD_INSPECT.json` also requires the separately packaged
+Comfy LC Recorder. The Toolkit does not install that node. Follow the
+[Recorder section of the Windows guide](../../docs/guides/WINDOWS_INSTALL.md#install-the-comfy-lc-recorder)
+and restart ComfyUI before using workflow 06.
+
 The workspace resolves the shared `latentdeck-cartridge`,
 `latentdeck-operator-d2`, and `latentdeck-operator-q4` distributions. A
 standalone installation must provide compatible wheels for all four packages.

@@ -21,6 +21,12 @@ Before queueing a graph:
    synthesis inputs, and change `FALLBACK_TO_CPU` to `ERROR` when a CUDA-only
    benchmark or acceptance result is required.
 
+`06_RAW_RECORD_INSPECT.json` also uses the separately packaged Comfy LC
+Recorder. Install its self-contained Windows bundle by following the
+[Recorder section of the Windows guide](../../../docs/guides/WINDOWS_INSTALL.md#install-the-comfy-lc-recorder),
+then restart ComfyUI before opening that graph. Installing the Toolkit alone
+does not provide **Save Latent Cartridge (.lc)**.
+
 The examples never download assets and never hide crop, resize, dtype
 conversion, or re-encoding. The native H3 VAE and taeh3 weights are external
 inputs and are not part of this repository.
