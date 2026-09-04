@@ -1180,11 +1180,11 @@ def _command_curate(args: argparse.Namespace) -> int:
     lock = load_lock(args.lock)
     components = curate_site_packages(args.site_packages, lock)
     base_notice = Path(args.base_notice).read_text(encoding="utf-8", errors="strict")
-    native_rust_sbom = Path(args.native_rust_sbom).read_text(
-        encoding="utf-8", errors="strict"
+    native_rust_sbom = Path(args.native_rust_sbom).read_bytes().decode(
+        "utf-8", errors="strict"
     )
-    native_rust_licenses = Path(args.native_rust_licenses).read_text(
-        encoding="utf-8", errors="strict"
+    native_rust_licenses = Path(args.native_rust_licenses).read_bytes().decode(
+        "utf-8", errors="strict"
     )
     metadata = build_metadata(
         lock,

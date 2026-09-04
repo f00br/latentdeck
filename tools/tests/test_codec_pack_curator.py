@@ -454,6 +454,67 @@ def test_metadata_is_deterministic_path_free_and_atomic(tmp_path: Path) -> None:
     assert first == {path.name: path.read_bytes() for path in output.iterdir()}
 
 
+def test_curate_command_preserves_native_metadata_bytes(tmp_path: Path) -> None:
+    site_packages = tmp_path / "site-packages"
+    _, expected_digest = _write_distribution(
+        site_packages,
+        name="demo-runtime",
+        version="1.2.3",
+        package_name="demo_runtime",
+        license_expression="MIT",
+    )
+    lock_path = tmp_path / "lock.json"
+    lock_path.write_text(
+        json.dumps(_lock(content_sha256=expected_digest)),
+        encoding="utf-8",
+    )
+    base_notice = tmp_path / "BASE_NOTICES.md"
+    base_notice.write_text("# H3 notice\n", encoding="utf-8")
+
+    native_sbom_text, native_licenses_text = _native_metadata()
+    native_sbom_bytes = native_sbom_text.replace("\n", "\r\n").encode()
+    native_licenses = json.loads(native_licenses_text)
+    native_licenses["sboms"][0]["byte_length"] = len(native_sbom_bytes)
+    native_licenses["sboms"][0]["sha256"] = hashlib.sha256(
+        native_sbom_bytes
+    ).hexdigest()
+    native_license_bytes = (
+        json.dumps(native_licenses, indent=2, sort_keys=True) + "\n"
+    ).replace("\n", "\r\n").encode()
+    native_sbom_path = tmp_path / "NATIVE_RUST_SBOM.cdx.json"
+    native_licenses_path = tmp_path / "NATIVE_RUST_LICENSES.json"
+    native_sbom_path.write_bytes(native_sbom_bytes)
+    native_licenses_path.write_bytes(native_license_bytes)
+
+    output = tmp_path / "metadata"
+    assert (
+        curator.main(
+            [
+                "curate",
+                "--lock",
+                str(lock_path),
+                "--site-packages",
+                str(site_packages),
+                "--base-notice",
+                str(base_notice),
+                "--native-rust-sbom",
+                str(native_sbom_path),
+                "--native-rust-licenses",
+                str(native_licenses_path),
+                "--metadata-output",
+                str(output),
+                "--pack-version",
+                "0.2.1",
+                "--source-commit",
+                "a" * 40,
+            ]
+        )
+        == 0
+    )
+    assert (output / "NATIVE_RUST_SBOM.cdx.json").read_bytes() == native_sbom_bytes
+    assert (output / "NATIVE_RUST_LICENSES.json").read_bytes() == native_license_bytes
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
