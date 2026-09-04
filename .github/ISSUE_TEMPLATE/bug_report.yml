@@ -1,0 +1,63 @@
+name: Bug report
+description: Report a reproducible LatentDeck defect.
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not attach cartridges, raw latents, model assets, credentials, or unreviewed diagnostic bundles. Report security issues through the private Security link.
+  - type: input
+    id: version
+    attributes:
+      label: Exact version
+      description: Release label or source revision, plus app, Deck, and Codec versions when relevant.
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      options:
+        - LatentDeck App
+        - LatentPlayer
+        - Cartridge or SDK
+        - Deck or operator
+        - Codec Pack or worker
+        - ComfyUI integration
+        - Build or release tooling
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Minimal steps using synthetic or redistributable data.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior and stable error codes
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Windows, GPU, driver, device, codec/profile, and relevant toolchain versions. Omit private paths.
+  - type: checkboxes
+    id: boundary
+    attributes:
+      label: Public-data check
+      options:
+        - label: I removed private data, local paths, secrets, weights, and latent/media payloads.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

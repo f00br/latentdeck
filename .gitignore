@@ -118,10 +118,6 @@ htmlcov/
 /vendor-local/
 **/weights/
 
-# Owner-authorized, project-local generated UI sketches are visual references
-# only. Public builds use original screenshots of implemented applications.
-/docs/assets/concepts/*.png
-
 # Tauri's icon generator also emits mobile/macOS/raster variants. The Windows
 # 0.1 source tree tracks only the original SVG and required ICO resource.
 /apps/*/src-tauri/icons/android/

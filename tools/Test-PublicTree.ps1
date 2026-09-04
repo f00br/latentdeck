@@ -1,9 +1,15 @@
 [CmdletBinding()]
-param()
+param(
+    [string]$RepositoryRoot
+)
 
 $ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
 
-$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
+    $RepositoryRoot = Join-Path $PSScriptRoot '..'
+}
+$repoRoot = (Resolve-Path -LiteralPath $RepositoryRoot).Path
 $gitDirectory = Join-Path $repoRoot '.git'
 
 if (-not (Test-Path -LiteralPath $gitDirectory -PathType Container)) {
@@ -24,9 +30,59 @@ $candidatePaths = @($candidatePaths | Where-Object { -not [string]::IsNullOrWhit
 $failures = [System.Collections.Generic.List[string]]::new()
 $warnings = [System.Collections.Generic.List[string]]::new()
 $maximumBytes = 25MB
+$rootPrefix = $repoRoot.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+
+$trackedSymlinks = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::Ordinal
+)
+$indexEntries = @(
+    & git -c core.quotepath=false -C $repoRoot ls-files --cached --stage
+)
+if ($LASTEXITCODE -ne 0) {
+    Write-Error 'PUBLIC TREE AUDIT: Could not inspect tracked Git modes.'
+    exit 1
+}
+foreach ($entry in $indexEntries) {
+    if ($entry -match '^(?<mode>\d{6}) [0-9a-f]{40,64} \d+\t(?<path>.*)$') {
+        if ($Matches['mode'] -ceq '120000') {
+            [void]$trackedSymlinks.Add($Matches['path'].Replace('\', '/'))
+        }
+    } else {
+        $failures.Add("Could not parse tracked Git mode entry: $entry")
+    }
+}
+
+function Get-ReparsePathComponent {
+    param([Parameter(Mandatory)][string]$RelativePath)
+
+    $candidateFullPath = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $RelativePath))
+    if (-not $candidateFullPath.StartsWith(
+        $rootPrefix,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+        return '<out-of-tree>'
+    }
+
+    $currentPath = $repoRoot
+    foreach ($component in ($RelativePath.Replace('\', '/') -split '/')) {
+        if ([string]::IsNullOrWhiteSpace($component)) {
+            continue
+        }
+        $currentPath = Join-Path $currentPath $component
+        if (-not (Test-Path -LiteralPath $currentPath)) {
+            break
+        }
+        $item = Get-Item -LiteralPath $currentPath -Force
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            return [System.IO.Path]::GetRelativePath($repoRoot, $currentPath).Replace('\', '/')
+        }
+    }
+
+    return $null
+}
 
 $forbiddenExtensions = @(
-    '.lc', '.h3latent', '.safetensors', '.ckpt', '.pt', '.pth', '.onnx',
+    '.lc', '.h3latent', '.safetensors', '.npy', '.npz', '.ckpt', '.pt', '.pth', '.onnx',
     '.engine', '.plan', '.gguf', '.bin', '.p12', '.pfx', '.key', '.pem',
     '.exe', '.dll', '.msi', '.msix', '.appx', '.zip', '.7z', '.rar',
     '.tar', '.tgz', '.gz', '.mp4', '.mov', '.mkv', '.avi', '.webm',
@@ -49,6 +105,19 @@ $totalBytes = [int64]0
 foreach ($relativePath in $candidatePaths) {
     $normalizedPath = $relativePath.Replace('\', '/')
     $fullPath = Join-Path $repoRoot $relativePath
+
+    if ($trackedSymlinks.Contains($normalizedPath)) {
+        $failures.Add("Tracked Git symlink mode is forbidden: $normalizedPath")
+        continue
+    }
+
+    $reparseComponent = Get-ReparsePathComponent -RelativePath $relativePath
+    if ($null -ne $reparseComponent) {
+        $failures.Add(
+            "Reparse point is forbidden in candidate path: $normalizedPath (at $reparseComponent)"
+        )
+        continue
+    }
 
     if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
         $failures.Add("Missing candidate file: $normalizedPath")

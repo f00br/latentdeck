@@ -133,7 +133,7 @@ The manifest states these exclusions explicitly.
 
 Still inspect a bundle before sending it outside the machine. Creating a bundle
 does not authorize uploading it, attaching it to an issue, or publishing it.
-Those are separate owner decisions.
+Those are separate publication and disclosure decisions.
 
 When applications and workers are stopped, local logs and already-created
 bundles may be deleted normally. The exporter never deletes source logs and

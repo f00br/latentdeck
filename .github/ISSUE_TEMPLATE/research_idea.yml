@@ -1,0 +1,44 @@
+name: Research direction
+description: Propose a bounded latent-synthesis experiment.
+title: "[Research]: "
+labels: ["research", "needs-triage"]
+body:
+  - type: textarea
+    id: baseline
+    attributes:
+      label: 0.1 baseline
+      description: Which implemented behavior does the experiment begin from?
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: Open question
+    validations:
+      required: true
+  - type: textarea
+    id: experiment
+    attributes:
+      label: Candidate experiment
+      description: Describe inputs, controls, comparison, and bounded execution.
+    validations:
+      required: true
+  - type: textarea
+    id: observables
+    attributes:
+      label: Observable outcomes
+      description: State what can be measured or compared without claiming a result in advance.
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Possible extension surface
+      options:
+        - Comfy Toolkit graph
+        - Explicit-install operator
+        - Realtime Deck
+        - Codec experiment
+        - Format or SDK research only
+    validations:
+      required: true

@@ -1,0 +1,49 @@
+name: Extension proposal
+description: Propose an operator, Deck, Codec Pack, or cartridge tool.
+title: "[Extension]: "
+labels: ["extension", "needs-triage"]
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Extension kind
+      options:
+        - Cartridge tool
+        - Research operator
+        - Realtime Deck
+        - Codec Pack
+    validations:
+      required: true
+  - type: input
+    id: identity
+    attributes:
+      label: Proposed identity
+      description: Use a reverse-DNS ID outside org.latentdeck for an external Deck or Codec Pack.
+  - type: textarea
+    id: capability
+    attributes:
+      label: New capability or behavior
+    validations:
+      required: true
+  - type: textarea
+    id: contracts
+    attributes:
+      label: Contracts and compatibility
+      description: List affected specifications, source topology, tensor ABI, timing, device, and profile assumptions.
+    validations:
+      required: true
+  - type: textarea
+    id: tests
+    attributes:
+      label: Test and evidence plan
+    validations:
+      required: true
+  - type: checkboxes
+    id: trust
+    attributes:
+      label: Distribution boundary
+      options:
+        - label: The proposal does not require weights, cartridges, private data, or unlicensed media in the source repository.
+          required: true
+        - label: I understand executable extensions require explicit installation and enablement.
+          required: true

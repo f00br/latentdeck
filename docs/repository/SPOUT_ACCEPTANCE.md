@@ -1,49 +1,50 @@
-# Spout2 acceptance evidence
+# Spout2 output and validation
 
-This document records the public-safe acceptance result for the LatentDeck
-Spout2 output boundary. Raw captures and private cartridge media are local test
-evidence and are intentionally excluded from the repository.
+LatentPlayer, D2, and Q4 can publish the intrinsic decoded output through
+Spout2 on Windows. This page defines what the integration guarantees and how a
+release reviewer can reproduce the interoperability check without committing
+private media.
 
-## 2026-08-30 — Windows DX12 receiver proof
+## Output boundary
 
-Status: **verified on the development machine**.
+- The native DX12 render texture is shared without CPU readback, image
+  encoding, or an RGB fallback transport.
+- The sender publishes the decoded stream's intrinsic width, height, format,
+  chosen sender name, and advancing sequence.
+- Window letterbox or pillarbox bars are a local aspect-fit decision and are
+  not baked into the shared texture.
+- Disabling the sender or closing the application releases publication without
+  terminating or hanging a conforming receiver.
+- LatentPlayer and the generic Deck runtime use the same native output
+  integration; an external Deck does not implement or receive its own DX12
+  sharing surface.
 
-- Sender: LatentPlayer built with the `spout-sdk` feature.
-- Receiver: the official Spout2 `D3D12TextureReceiver` example built from the
-  pinned upstream revision recorded in
-  [`crates/output-spout/UPSTREAM.md`](../../crates/output-spout/UPSTREAM.md).
-- Transport: the native DX12 render texture was shared without CPU readback,
-  image encoding, or an RGB fallback path.
-- Published sender name: `LatentDeck v0.1 Receiver Proof`.
-- Published texture: 448 x 800, `rgba8_unorm`.
-- Sequence evidence: the sender advanced monotonically to frame 3,575 while
-  the receiver displayed the decoded stream.
-- Stop evidence: disabling the sender changed `enabled` and `published` to
-  `false`; the receiver stayed responsive and returned to its no-sender
-  checkerboard.
-- Error state: no Spout error code was reported during publish or shutdown.
+The pinned upstream Spout2 source, license, and archive identity are recorded in
+[`crates/output-spout/UPSTREAM.md`](../../crates/output-spout/UPSTREAM.md).
+Receiver executables are validation tools and are not release artifacts.
 
-This proves interoperability for the tested adapter, GPU, driver, sender, and
-official receiver combination. It does not replace the separate clean-machine
-Windows 11 release gate or the owner-approved six-minute pre-master stability
-suite recorded in the acceptance status.
+## Reproduce the receiver check
 
-## 2026-08-31 — final application-surface walkthrough
+Use the official upstream `D3D12TextureReceiver` built from the pinned revision.
+For LatentPlayer, D2, and Q4:
 
-Status: **verified on the development machine**.
+1. Load and play one compatible source or source set.
+2. Start the official receiver.
+3. Enable Spout and choose a recognizable sender name.
+4. Confirm the receiver lists that exact sender and reports the source's
+   intrinsic decoded dimensions.
+5. Confirm frames advance without squeeze, crop, baked bars, or a CPU-copy
+   presentation path.
+6. Enter/leave fullscreen and resize the application; receiver dimensions and
+   source aspect remain intrinsic.
+7. Disable Spout, then close the application in a second pass. The receiver
+   remains responsive and returns to its no-sender state.
 
-- LatentPlayer, LD-D2, and LD-Q4 kept their native output inside the owning
-  application window and published the same stream through Spout2.
-- A portrait `448x800` cartridge and landscape `1344x768` cartridges retained
-  their intrinsic geometry. The receiver reported the matching sender
-  dimensions, and presentation used aspect fit without hidden stretch or crop.
-- Fullscreen displayed the active stream and returned to the embedded surface.
-- Sender sequences advanced during playback and receiver shutdown remained
-  responsive.
-- Visible cartridge identity remained attached to the selected source through
-  Player and Deck playback; private cartridge names and hashes are omitted from
-  this public record.
+Record application, Deck, Codec Pack, adapter, decoder, GPU, driver, receiver
+revision, dimensions, frame count/interval, and stable error transitions in the
+release evidence. A successful check applies only to that declared
+configuration and does not certify every GPU, driver, geometry, or receiver.
 
-This closes the local application-surface replay requested after the embedded
-presentation changes. Clean-machine, signing, and publication gates remain
-separate.
+Public source evidence must omit cartridge names/hashes, captured frames, and
+private media. Store those test inputs separately. The complete clean-release
+gate is in [Release validation](../maintainers/RELEASE_VALIDATION.md).

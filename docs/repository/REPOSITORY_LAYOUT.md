@@ -30,7 +30,7 @@ stable contracts remain authoritative over replaceable implementations.
 | `spec/worker-protocol/`          | Protocol 2 control plane and explicit legacy Player bridge.                               |
 | `sdk/`                           | Cartridge, Codec, and Deck SDK surfaces and bindings.                                     |
 | `tests/`                         | Cross-component tests and explicitly approved tiny fixtures.                              |
-| `docs/`                          | Durable public documentation; local concept PNGs remain ignored.                          |
+| `docs/`                          | Durable public documentation and explicitly reviewed public assets.                      |
 | `tools/`                         | Repository maintenance and release-safety tools.                                          |
 
 Cargo, pnpm, uv, Tauri, Svelte, and Python workspaces use pinned manifests and

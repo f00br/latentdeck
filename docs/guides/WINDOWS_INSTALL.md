@@ -1,0 +1,167 @@
+# Install the Windows preview
+
+This guide is for an artist installing LatentDeck without a source checkout.
+The 0.1 preview uses independent current-user installers for LatentDeck,
+LatentPlayer, and the H3 Codec Pack, plus an optional self-contained Comfy LC
+Recorder bundle.
+
+## Requirements
+
+- 64-bit Windows 11 for the release-validation path;
+- an NVIDIA GPU and compatible CUDA driver for the current H3 runtime;
+- a compatible external TAEH3 decoder asset selected by the user;
+- at least one valid H3 `.lc` cartridge or raw H3 Safetensors file.
+
+The installers do not require administrator elevation. The H3 setup runs
+offline and does not require system Python, PowerShell, ComfyUI, either
+application, or a network connection.
+
+## Download one complete release set
+
+Download `v0.1.0-preview.1` only from [GitHub
+Releases](https://github.com/f00br/latentdeck/releases). The release contains
+these user-facing artifacts:
+
+- the LatentDeck App installer;
+- the LatentPlayer installer;
+- `LatentDeck-H3-CodecPack-0.2.1-setup.exe`;
+- `LatentDeck-H3-CodecPack-0.2.1-windows-x64.ldcodec`;
+- `LatentDeck-0.1.0-preview.1-comfy-recorder-windows-x64.zip` for artists who
+  record H3 latents inside ComfyUI;
+- `RELEASE-MANIFEST.json` and `SHA256SUMS.txt`.
+
+The Developer Kit is optional and is intended for extension authors.
+
+Do not combine files from different release pages or mirror downloads. Keep the
+H3 setup and its exact adjacent `.ldcodec` in the same directory. The setup is
+bound to that payload's filename, byte length, SHA-256, package ID, and version.
+
+Verify every downloaded file against `SHA256SUMS.txt` before running it:
+
+```powershell
+Get-FileHash -Algorithm SHA256 .\<downloaded-file>
+```
+
+Compare the complete lowercase/uppercase-insensitive hexadecimal digest, not a
+short prefix.
+
+## Unsigned preview warning
+
+`v0.1.0-preview.1` is deliberately published as an unsigned prerelease. Windows
+may show an unknown-publisher or SmartScreen warning. Verify that the download
+came from the official GitHub release and that its SHA-256 matches before using
+Windows' option to inspect and run it. If the source or hash is uncertain,
+cancel the installation.
+
+The warning is a property of this preview distribution; it is not proof that a
+file is safe. Extension packages remain separate executable-code trust
+decisions even after the applications are installed.
+
+## Install the applications
+
+Run the LatentDeck and LatentPlayer installers separately. Each installs for the
+current Windows user. Either application can be installed, updated, or removed
+without installing or removing the other application, the H3 Codec Pack,
+cartridges, Library data, or decoder selection.
+
+Launch both applications once. They should open without a cartridge or codec
+and provide Library/Extensions or diagnostic actions in that state.
+
+## Install H3 Codec Pack 0.2.1
+
+1. Confirm the setup and `.ldcodec` filenames both contain `0.2.1` and remain
+   side by side.
+2. Run `LatentDeck-H3-CodecPack-0.2.1-setup.exe`.
+3. Confirm **LatentDeck H3 Codec Pack 0.2.1** appears in Windows Installed Apps.
+4. Open **Extensions** in LatentPlayer or LatentDeck and refresh discovery.
+5. Find the exact H3 `0.2.1` pack and enable it. Installation does not enable a
+   package automatically.
+6. Select that exact version for Player and for each compatible Deck you intend
+   to use. LatentDeck never selects a newer version implicitly.
+
+The pack contains the H3 adapter and its isolated runtime, but no decoder/model
+weight, generator, ComfyUI installation, or cartridge.
+
+## Install the Comfy LC Recorder
+
+This optional path is for recording a generated H3 latent before decode. It is
+independent from the LatentDeck, LatentPlayer, and H3 Codec Pack installers.
+
+1. Verify
+   `LatentDeck-0.1.0-preview.1-comfy-recorder-windows-x64.zip` against the
+   release checksum, then extract it to a new directory.
+2. Close ComfyUI.
+3. Run the extracted installer against the root of the Windows Portable
+   distribution:
+
+   ```powershell
+   $comfyRoot = (Resolve-Path -LiteralPath (Read-Host 'Path to your ComfyUI root')).Path
+   powershell -ExecutionPolicy Bypass -File .\Install-ComfyRecorder.ps1 -ComfyUIRoot $comfyRoot
+   ```
+
+4. Restart ComfyUI and find **Save Latent Cartridge (.lc)** under
+   `LatentDeck / Cartridge`.
+
+The bundle supports Windows x64 CPython 3.12 and 3.13 and carries exact
+prebuilt wheels for the Recorder, `latentdeck-cartridge==0.1.0`, and
+`safetensors==0.8.0`. Installation is offline, does not use pip or a Rust
+compiler, keeps these packages inside the node directory, and refuses an
+unsupported Python ABI before writing the installation. Pass explicit
+`-PythonPath` and `-CustomNodesPath` values when the ComfyUI layout is not one
+of the detected Windows Portable layouts.
+
+If ComfyUI already supplies Safetensors, the Recorder preserves and uses that
+host package. Otherwise it uses the exact bundled 0.8.0 copy from the private
+`latentdeck_recorder_vendor.safetensors` namespace; the bundle does not expose
+that fallback as a global `safetensors` package.
+
+Comfy Registry/Manager installation is not available for this preview because
+the native `latentdeck-cartridge` wheel is not published to PyPI. The bundled
+installer is the supported public route; Registry publication/configuration is
+a separate future gate.
+
+## Select the external decoder
+
+Choose the decoder asset through the application's H3 extension controls. The
+pack declares the accepted byte length, SHA-256, source, and license; the
+application accepts only a matching local file. Review the upstream terms and
+obtain the asset from the source identified by the pack.
+
+Do not rename an arbitrary model or copy a weight into an undocumented
+application directory. A missing or mismatched decoder should produce a visible
+not-ready state rather than a fallback.
+
+When ready, the UI shows the exact pack, adapter, profile, device, and decoder
+identity. Select CUDA explicitly. The preview does not silently switch to CPU,
+another decoder, another Codec Pack, or Protocol 1 after a Protocol 2 failure.
+
+## Verify the first launch
+
+1. In LatentPlayer, open one compatible `.lc` and test Play, Pause, Restart,
+   Loop, window resize, and fullscreen.
+2. In LatentDeck, confirm the bundled D2 and Q4 Decks are visible as exact
+   enabled packages and that the compatibility matrix shows an H3 pairing.
+3. Load a compatible source set. The decoded image should remain at its
+   intrinsic aspect ratio; incompatible sources should remain visible but be
+   refused with a reason.
+4. Save a short Snapshot or Live Capture and open the new `.lc` in Player.
+5. Optionally record a short MP4 or verify a Spout sender.
+
+The complete creative sequence is in the [artist workflow](ARTIST_WORKFLOW.md).
+
+## Update, repair, and remove
+
+Installed Deck and Codec versions are immutable and coexist side by side. A new
+version installs separately; it does not overwrite the old one. Disable an
+exact version before removal. An active Player or Deck session may retain a
+usage lease, so close that session if removal reports the package is active.
+
+Use Windows Installed Apps to remove the exact H3 setup version. Removing H3
+must preserve the applications, cartridges, Library database, decoder
+selection, and other installed extension versions. Use each application's own
+uninstaller to remove that application. To remove the Recorder, close ComfyUI
+and remove only its `custom_nodes/ComfyUI-LatentCartridge` directory; its
+private dependencies are contained there.
+
+For a reproducible failure, save a sanitized bundle using **Save diagnostics**
+and read the [support guidance](../../SUPPORT.md) before sharing it.

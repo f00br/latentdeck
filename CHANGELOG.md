@@ -1,0 +1,39 @@
+# Changelog
+
+All notable public changes to LatentDeck are documented here. Format,
+application, Deck, Codec, SDK, and protocol versions are independent; each
+release entry lists the identities it contains.
+
+## Unreleased
+
+No public changes are recorded after the preview candidate.
+
+## 0.1.0-preview.1
+
+Channel: unsigned Windows prerelease.
+
+See [the complete preview release notes](docs/releases/0.1.0-preview.1.md).
+
+### Added
+
+- Codec-neutral LC 0.1 cartridge format and strict Rust/Python tooling.
+- LatentPlayer playback and raw-import PREPARE workspace.
+- LatentDeck Library, Collections, installable Decks, and declarative
+  faceplates.
+- Bundled D2 and Q4 Deck packages with realtime pre-decode synthesis.
+- Snapshot and bounded Live Capture back into `.lc`.
+- Native window/fullscreen output, Spout2, and video-only H.264 MP4 recording.
+- Installable `.ld` and `.ldcodec` lifecycle with exact-version compatibility.
+- Worker Protocol 2, Cartridge/Deck/Codec SDKs, ComfyUI recorder, and Comfy
+  Toolkit research nodes.
+- Public documentation, community workflow, extension authoring kit, and
+  reproducible GitHub prerelease staging path.
+- Machine-readable schemas and CPU-first cartridge, Deck, and Codec examples.
+
+### Known preview limitations
+
+- Windows x64 and the H3 NVIDIA/CUDA path are the initial tested runtime.
+- Preview installers are not Authenticode-signed.
+- H3 decoder/model assets and cartridges are not bundled.
+- Audio playback and synthesis are not implemented.
+- Incompatible latent signals are refused rather than converted implicitly.

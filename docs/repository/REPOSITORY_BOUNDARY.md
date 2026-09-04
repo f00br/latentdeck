@@ -24,8 +24,6 @@ private research storage, or separately governed media distribution:
   captures;
 - local ComfyUI installations, virtual environments, dependency caches, build
   products, databases, logs, diagnostics, and crash dumps;
-- owner-authorized, project-local generated rough interface sketches kept under
-  `docs/assets/concepts/` in a local working copy;
 - API keys, tokens, credentials, signing certificates, machine configuration,
   and absolute local paths;
 - copied third-party repositories or assets without a recorded redistribution
@@ -38,13 +36,22 @@ after an explicit review records:
 
 1. purpose and minimal required size;
 2. origin and cryptographic hash;
-3. owner and redistribution license;
+3. rights holder and redistribution license;
 4. absence of private prompts, paths, credentials, and unrelated payloads;
 5. parser and memory-safety implications;
 6. whether it belongs in Git history, a GitHub release, or separate storage.
 
 Do not bypass `.gitignore` as the exception mechanism. Change the repository
 policy deliberately and document why.
+
+## Showcase media exception
+
+Before the repository becomes public, `docs/assets/showcase/` may contain one
+hero image and up to four additional optimized still images. Each file must be
+no larger than 2 MiB, and the directory must remain at or below 10 MiB total.
+Every image requires recorded authorship, redistribution rights, provenance,
+and useful alt text. Showcase video belongs in the matching GitHub release,
+not in Git history. Until those checks pass, the directory remains absent.
 
 ## Third-party boundary
 

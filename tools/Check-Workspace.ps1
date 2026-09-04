@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param()
+param(
+    [ValidateNotNullOrEmpty()]
+    [string]$PublicHistoryRef = 'refs/heads/main'
+)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -9,6 +12,8 @@ $nodeRoot = & (Join-Path $PSScriptRoot 'Get-PinnedNode.ps1')
 $nsisRoot = & (Join-Path $PSScriptRoot 'Get-PinnedNsis.ps1') -AllowNetwork
 $env:PATH = "$nodeRoot;$env:PATH"
 $pnpm = Join-Path $nodeRoot 'pnpm.cmd'
+$previousPythonNoBytecode = $env:PYTHONDONTWRITEBYTECODE
+$env:PYTHONDONTWRITEBYTECODE = '1'
 
 function Invoke-Checked {
     param(
@@ -62,8 +67,12 @@ try {
     Invoke-Checked {
         uv run --no-sync pytest -q tools/tests/test_codec_pack_curator.py
     } 'Codec Pack curator tests'
+    Invoke-Checked { pwsh -NoProfile -File tools/Test-DeveloperOnboarding.ps1 } 'Developer onboarding contract'
+    Invoke-Checked { pwsh -NoProfile -File tools/Test-ComfyRecorderBundle.ps1 } 'Comfy Recorder bundle contract'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-LinkedDevCodecPack.ps1 } 'Linked development Codec Pack contract'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-ReleasePackaging.ps1 } 'Release packaging contract'
+    Invoke-Checked { pwsh -NoProfile -File tools/Test-DeveloperKitPackaging.ps1 } 'Developer Kit packaging contract'
+    Invoke-Checked { pwsh -NoProfile -File tools/Test-GitHubReleaseStaging.ps1 } 'GitHub Release staging contract'
     Invoke-Checked {
         pwsh -NoProfile -File tools/Test-H3CodecPackSetup.ps1 -NsisRoot $nsisRoot
     } 'H3 Codec Pack setup contract'
@@ -71,12 +80,25 @@ try {
         pwsh -NoProfile -File tools/Test-PrivateProtocol2GpuGate.ps1
     } 'Private Protocol 2 GPU gate contract'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-DiagnosticBundle.ps1 } 'Diagnostic bundle contract'
+    Invoke-Checked { pwsh -NoProfile -File tools/Test-PublicDocumentationContract.ps1 } 'Public-documentation audit contract'
+    Invoke-Checked { pwsh -NoProfile -File tools/Test-PublicDocumentation.ps1 } 'Public documentation audit'
+    Invoke-Checked { pwsh -NoProfile -File tools/Test-PublicAssetProvenance.ps1 } 'Public asset provenance audit'
+    Invoke-Checked { pwsh -NoProfile -File tools/Test-CiSecurityContract.ps1 } 'CI security contract'
+    Invoke-Checked { pwsh -NoProfile -File tools/Test-PublicHistoryContract.ps1 } 'Public-history audit contract'
+    Invoke-Checked { pwsh -NoProfile -File tools/Test-PublicHistory.ps1 -Ref $PublicHistoryRef } 'Public history/archive audit'
+    Invoke-Checked { pwsh -NoProfile -File tools/Test-PublicTreeContract.ps1 } 'Public-tree audit contract'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-PublicTree.ps1 } 'Public-tree audit'
     Invoke-Checked { git diff --check } 'Working-tree whitespace'
     Invoke-Checked { git diff --cached --check } 'Staged whitespace'
 }
 finally {
     Pop-Location
+    if ($null -eq $previousPythonNoBytecode) {
+        Remove-Item Env:PYTHONDONTWRITEBYTECODE -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:PYTHONDONTWRITEBYTECODE = $previousPythonNoBytecode
+    }
 }
 
 Write-Host 'WORKSPACE CHECK: PASS' -ForegroundColor Green

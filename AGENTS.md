@@ -1,172 +1,126 @@
-# LatentDeck agent runway
+# LatentDeck contributor and agent guide
 
-The owner accepted the completed Protocol 2 modular runtime and the full local
-`0.1.0` application surface on 2026-09-03. This repository is now in
-coordinated release-documentation and publication preparation. The current
-operational handoff is
-`docs/release/continue.md`, and accepted evidence versus open publication gates
-are tracked in `docs/release/ACCEPTANCE_STATUS.md`. Repository safeguards,
-specifications, and component boundaries remain mandatory through release.
+This file is the operational entry point for human contributors and automated
+coding agents. Read it before changing the repository. The same boundaries,
+tests, and review requirements apply regardless of who authored a change.
 
-## Required reading order
+## Start with the right contract
 
-Before changing anything:
+1. Read [README.md](README.md) and the [documentation hub](docs/README.md).
+2. Read the specification and developer guide for the surface being changed.
+3. Read the component's own README and tests before editing it.
+4. Run `git status --short` and preserve unrelated work in the checkout.
+5. Keep one contribution focused on one reviewable problem.
 
-1. Read this file completely.
-2. Read `README.md`.
-3. Read `docs/release/continue.md`.
-4. Read `docs/release/ACCEPTANCE_STATUS.md`.
-5. Read `docs/repository/REPOSITORY_BOUNDARY.md`.
-6. Read the relevant component directory and specification before editing it.
-7. Run `git status --short`. If unrelated owner changes are present, preserve
-   them and plan to audit the exact staged candidate in a clean local clone.
+| Change | Guide | Normative contract |
+| --- | --- | --- |
+| Cartridge format or tooling | [Cartridges](docs/developers/CARTRIDGES.md) | [LC 0.1](spec/latent-cartridge/README.md) |
+| Research operator | [Operators](docs/developers/OPERATORS.md) | [Operator API](spec/operator-api/README.md) |
+| Realtime Deck | [Decks](docs/developers/DECKS.md) | [Deck Package](spec/deck-package/README.md) and [Deck Signal](spec/deck-api/README.md) |
+| Codec adapter or package | [Codecs](docs/developers/CODECS.md) | [Codec Package](spec/codec-pack/README.md) and [Worker Protocol](spec/worker-protocol/README.md) |
+| User-facing behavior | [Artist workflow](docs/guides/ARTIST_WORKFLOW.md) | Relevant app/component README |
+| Release tooling | [Release process](docs/maintainers/RELEASE_PROCESS.md) | [Release validation](docs/maintainers/RELEASE_VALIDATION.md) |
 
-If the current user instruction conflicts with an older document, the current
-instruction wins. Record a deliberate decision instead of silently rewriting
-the baseline.
+If prose conflicts with a normative specification, the specification wins.
+Update the contract and its boundary tests deliberately rather than allowing
+implementations to drift.
 
-## Scope discipline
+## Stable center and replaceable parts
 
-- Implement only the task explicitly assigned in the current session.
-- Do not infer new scope beyond the accepted 0.1 contracts, current
-  release-preparation work, and the current user instruction.
-- Do not create a new roadmap, Technical Design Document, dependency graph, or
-  stack migration unless requested.
-- Do not treat the concept images as pixel-perfect UI requirements. They are
-  visual references, not executable specifications.
-- Keep the product boundaries: Cartridge Standard, LatentDeck,
-  LatentPlayer, Comfy Toolkit, Comfy recorder, codec adapters, SDKs, and APIs
-  remain separable.
-- Preserve the stable-center rule: cartridges and the realtime signal contract
-  are stable; UI, deck implementations, codecs, and workers are replaceable.
-- Verify time-sensitive dependency and platform facts before pinning versions.
+The `.lc` cartridge and realtime signal contract are the stable center.
+Applications, user interfaces, Deck implementations, codec adapters, workers,
+and output integrations are replaceable components with independent versions.
 
-## Public-repository invariant
+Keep these boundaries intact:
 
-Assume every tracked byte may eventually become public.
+- `.lc` is codec-neutral, data-only, strictly validated untrusted media. It
+  never installs or executes embedded code.
+- H3 is the first codec profile, not the definition of `.lc`.
+- Realtime latent processing occurs before decode. Snapshot and Live Capture
+  record the post-operator latent state before decode.
+- Runtime controls are independent from their current UI presentation.
+- Deck extensions use `.ld`; Codec Pack extensions use `.ldcodec`. Do not
+  restore the retired `.lddeck` alias or legacy adjacent ZIP payload.
+- Worker Protocol 2 is authoritative for Player and generic Deck runtimes.
+  Protocol 1 is an explicit Player bridge, never a hidden fallback.
+- Installed extension versions are immutable, explicitly enabled, and selected
+  by exact identity. Never auto-select the newest version.
+- Incompatible cartridges are refused. Do not hide a conversion, resize, crop,
+  alignment, cast, re-encode, profile substitution, device fallback, or source
+  substitution inside a loader or Deck.
+- Audio metadata may be preserved, but audio playback and synthesis are outside
+  the 0.1 product contract.
 
-Never commit:
+Inputs are untrusted media. Validate archives, strict JSON, tensor layout,
+dtype, dimensions, sizes, hashes, finite values, compatibility, and checked
+memory bounds before runtime allocation. Decks, Codec Packs, and installed
+operators may execute code with the user's authority; process isolation is not
+a security sandbox.
 
-- `.lc` cartridges or raw latent payloads;
-- model weights, checkpoints, decoder assets, or H3 generator components;
+## Public repository boundary
+
+Assume every tracked byte can become public. Follow the [repository
+boundary](docs/repository/REPOSITORY_BOUNDARY.md).
+
+Do not add:
+
+- `.lc` cartridges, raw latent payloads, model weights, checkpoints, decoder
+  assets, or generator components;
 - private datasets, prompts, workflows, user media, or generated renders;
-- credentials, tokens, signing keys, machine-local configuration, or absolute
-  user-machine paths;
-- virtual environments, dependency caches, build outputs, diagnostics, or
-  copied third-party repositories;
-- third-party assets whose source and redistribution permission are not
-  recorded.
+- credentials, tokens, signing material, machine-local configuration, or
+  absolute user-machine paths;
+- virtual environments, dependency caches, build output, logs, diagnostics,
+  databases, or copied third-party repositories;
+- third-party assets without recorded origin and redistribution permission.
 
-Tiny test fixtures are not an exception by default. A fixture may enter
-`tests/fixtures/public/` only after provenance, license, size, and data-only
-safety are reviewed and the repository rules are deliberately updated.
+Tests should generate bounded synthetic data in temporary directories. A tiny
+fixture is not automatically safe to publish; use the documented exception
+review when a real fixture is essential.
 
-H3 weights and distributable H3 cartridges remain outside the main source
-repository. Do not copy files from local ComfyUI, H3, or RunPod workspaces into
-this tree merely because they are useful for development.
+## Change workflow
 
-## Git and publication safety
+- Make the smallest coherent change at the owning boundary.
+- Preserve backward compatibility unless the relevant versioned contract is
+  intentionally revised.
+- Add tests at the same boundary as the behavior.
+- Keep failures stable, bounded, and path-safe.
+- Keep documentation in canonical English and link durable contracts instead
+  of duplicating them.
+- Mark research statements as `Implemented in 0.1`, `Design principle`, or
+  `Research direction`. Do not invent novelty, performance, or compatibility
+  claims.
+- Record source, version, license, purpose, and lock-file effects for every
+  dependency change.
+- Do not weaken an allowlist, hash check, no-clobber rule, atomic publication
+  rule, or package-trust boundary merely to make a test pass.
 
-- Do not create or change a GitHub or other external remote, push, publish, tag
-  a release, enable a service, or upload an artifact without explicit owner
-  authorization. The local build clone described below may have only its
-  automatic local `origin` pointing back to the primary checkout.
-- Do not choose or add a software license on the owner's behalf.
-- Before any commit, inspect `git status --short`, the exact staged file list,
-  and `git diff --cached`. Run `git diff --cached --check`. Run
-  `tools/Test-PublicTree.ps1` in the primary checkout only when unrelated local
-  changes do not affect it; otherwise apply the staged diff to a clean local
-  clone and run the audit there without modifying the owner's files.
-- Before any future push, complete
-  `docs/repository/PUBLIC_RELEASE_CHECKLIST.md` and inspect the archive that Git
-  would publish.
-- Never use `git add -f` to bypass a payload safeguard without explicit review.
-- Preserve unrelated user work and do not rewrite history as a cleanup method.
-- `docs/CONCEPT.md` and any owner-authored untracked concept documents may
-  contain unrelated work; do not edit, stage, delete, or reformat them unless
-  the owner assigns that exact documentation task.
+For code changes, run the focused component checks first. Before requesting
+review, run:
 
-## Clean release-build workflow
+```powershell
+pwsh -NoProfile -File tools/Test-PublicDocumentation.ps1
+pwsh -NoProfile -File tools/Test-PublicTree.ps1
+pwsh -NoProfile -File tools/Test-DeveloperOnboarding.ps1
+pwsh -NoProfile -File tools/Check-Workspace.ps1
+git diff --check
+git status --short
+```
 
-- Make and commit every accepted source change in the primary `main` checkout.
-  Never develop or fix code inside an earlier release-build clone.
-- After the owner accepts a source commit, create a fresh independent local
-  clone for the RC. Use a short Windows path such as
-  `X:\ldrc-<short-commit>`; deep paths can exceed MSVC FileTracker limits before
-  application code runs.
-- Create the clone from committed local source with
-  `git clone --no-hardlinks <primary-checkout> <short-build-path>`. The clone's
-  local `origin` is not authorization to add or use a GitHub remote. Refuse an
-  existing destination instead of mixing it with an older build tree.
-- The build clone must resolve to the exact full commit selected from `main`.
-  Before building, verify that `git branch --show-current` is exactly `main`,
-  `git rev-parse HEAD` is the selected full commit, `git status --short` is
-  empty, and `tools/Test-PublicTree.ps1` passes in that clone.
-- Run the aggregate final gate with
-  `pwsh -NoProfile -File tools/Check-Workspace.ps1` in the exact clean build
-  clone, then verify again that `git status --short` is empty. Targeted tests
-  alone are not sufficient for the source commit selected for an RC.
-- Build the applications from the clean short-path clone with
-  `tools/Build-ReleaseCandidate.ps1`. Do not build a release candidate from the
-  primary checkout when it contains unrelated or owner-authored working-tree
-  changes.
-- Accept an artifact set only when its receipt records the expected full commit,
-  branch `main`, `git_dirty=false`, the public snapshot identity, installer
-  hashes, SBOM, and third-party notices. Keep the complete artifact directory
-  together; never combine installers or metadata from different builds.
-- The builder writes below the build clone's ignored
-  `artifacts/release-candidate/<version>-windows-x64`. Preserve an accepted copy
-  in the primary checkout under the new ignored destination
-  `artifacts/release-candidate-final-<short-commit>/<version>-windows-x64`.
-  Copy the complete version directory only; refuse an existing destination and
-  never merge or overwrite a previous candidate.
-- If the accepted artifact directory is copied or moved out of the build clone,
-  remeasure every file listed in `SHA256SUMS.txt` at the destination and compare
-  it with the receipt. A successful filesystem copy is not integrity evidence.
-- Any accepted commit after an RC, including release-documentation changes,
-  makes that RC an older source snapshot. It may remain useful for comparison or
-  ongoing behavior UAT, but rebuild from a new clean clone before calling the
-  artifacts current or beginning publication review.
-- When a build exposes a real source defect, return to the primary checkout,
-  fix and commit it there, then create a new clean build clone. Do not patch the
-  generated artifact set or silently reuse the old clone.
+Review the exact diff and ensure unrelated files remain untouched. The complete
+workspace gate is required for a release candidate, even when focused tests
+passed earlier.
 
-## Engineering contracts
+## Git and release safety
 
-- `.lc` is codec-neutral, data-only, strictly validated, and never executes
-  embedded code.
-- H3 is the first codec profile, not the definition of the format.
-- Runtime controls are independent from UI controls.
-- Realtime latent processing happens before decode; resampling records the
-  post-operator latent state before decode.
-- No hidden conversion, resize, crop, alignment, or re-encode is allowed for
-  incompatible cartridges in 0.1.
-- Audio metadata may exist in 0.1 cartridges, but audio playback and synthesis
-  are out of scope for 0.1.
-- Model weights are external codec assets and are not vendored.
-- Inputs are untrusted media: validate schema, tensor layout, dtype, sizes,
-  hashes, finite values, compatibility, and memory limits before runtime
-  allocation.
-- Deck extensions use only `.ld`; Codec Pack extensions use only `.ldcodec`.
-  Do not reintroduce the retired `.lddeck` alias or the legacy adjacent ZIP
-  payload name.
-- Worker Protocol 2 is the authoritative Player and generic Deck runtime.
-  Protocol 1 remains only as an explicit Player-compatible bridge; a Protocol
-  2 error must never trigger a hidden fallback.
-- Installed Deck and Codec versions are immutable, explicitly enabled, and
-  selected by exact identity. Never auto-select the newest version.
+Use a branch and pull request for shared development. Do not rewrite public
+history or bypass repository protection. Do not change remotes, push, tag,
+publish a release, upload artifacts, enable an external service, or use signing
+material unless a maintainer has explicitly assigned that action.
 
-## Change quality
+Release candidates are built only from a clean, committed `main` checkout in a
+fresh short-path clone. Never patch an old build clone or combine artifacts
+from different commits. A documentation change after a build makes that binary
+set an older source snapshot; rebuild before publication review.
 
-- Keep changes narrow, modular, deterministic where the contract requires it,
-  and easy to remove or replace.
-- Add tests at the same boundary as changed behavior.
-- Distinguish `verified`, `inferred`, and `proposed` in research and benchmark
-  documentation.
-- Do not invent measurements. Store reproducible raw evidence separately from
-  conclusions, and never commit private or heavyweight raw evidence by default.
-- Link durable documentation from `README.md`; avoid machine-specific paths in
-  public docs.
-- Finish by running the relevant targeted tests, the staged-candidate
-  public-tree audit, `git diff --cached --check`, exact staged review, and a
-  final `git status --short` review.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the public collaboration workflow and
+[GOVERNANCE.md](GOVERNANCE.md) for decision authority.
