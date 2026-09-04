@@ -13,6 +13,21 @@ $testRoot = Join-Path $artifactsRoot ".developer-kit-contract-$([guid]::NewGuid(
 $outputRoot = Join-Path $testRoot 'output'
 $expandedRoot = Join-Path $testRoot 'expanded'
 $releaseLabel = '0.1.0-preview.1'
+$sourceBranch = (& git -C $repositoryRoot branch --show-current).Trim()
+if ($LASTEXITCODE -ne 0) {
+    throw 'Developer Kit test could not resolve the source branch.'
+}
+$sourceStatus = @(& git -C $repositoryRoot status --short --untracked-files=all)
+if ($LASTEXITCODE -ne 0) {
+    throw 'Developer Kit test could not resolve the source status.'
+}
+$expectedDistributable = (
+    $sourceBranch -ceq 'main' -and $sourceStatus.Count -eq 0
+)
+$developerKitMode = @{}
+if (-not $expectedDistributable) {
+    $developerKitMode.DevelopmentBuild = $true
+}
 
 function Assert-Throws {
     param(
@@ -126,7 +141,7 @@ try {
             -OutputDirectory (Join-Path $testRoot 'recorder-source-output') `
             -ReleaseChannel unsigned_preview `
             -ReleaseLabel $releaseLabel `
-            -DevelopmentBuild
+            @developerKitMode
     }
     [System.IO.File]::WriteAllText(
         $recorderReceiptPath,
@@ -146,7 +161,7 @@ try {
             -OutputDirectory (Join-Path $testRoot 'recorder-sidecar-output') `
             -ReleaseChannel unsigned_preview `
             -ReleaseLabel $releaseLabel `
-            -DevelopmentBuild
+            @developerKitMode
     }
     [System.IO.File]::WriteAllText(
         $recorderReviewPath,
@@ -164,7 +179,7 @@ try {
                 -OutputDirectory $junctionOutput `
                 -ReleaseChannel unsigned_preview `
                 -ReleaseLabel $releaseLabel `
-                -DevelopmentBuild
+                @developerKitMode
         }
     } finally {
         if (Test-Path -LiteralPath $junctionOutput) {
@@ -176,7 +191,7 @@ try {
         -OutputDirectory $outputRoot `
         -ReleaseChannel unsigned_preview `
         -ReleaseLabel $releaseLabel `
-        -DevelopmentBuild)
+        @developerKitMode)
     if ($result.Count -ne 1 -or -not (Test-Path -LiteralPath $result[0] -PathType Container)) {
         throw 'Developer Kit builder did not return exactly one artifact-set directory.'
     }
@@ -222,7 +237,7 @@ try {
         $receipt.release_channel -cne 'unsigned_preview' -or
         $receipt.application_api_version -cne '0.1.0' -or
         $receipt.windows_installer_version -cne '0.1.0+1' -or
-        [bool]$receipt.distributable -or
+        [bool]$receipt.distributable -ne $expectedDistributable -or
         [bool]$receipt.signed -or -not [bool]$receipt.unsigned -or
         [int]$receipt.wheel_count -ne 9 -or [int]$receipt.cli_count -ne 2 -or
         [bool]$receipt.contains_model_weights -or [bool]$receipt.contains_cartridges -or
@@ -610,7 +625,7 @@ try {
             -OutputDirectory $outputRoot `
             -ReleaseChannel unsigned_preview `
             -ReleaseLabel $releaseLabel `
-            -DevelopmentBuild
+            @developerKitMode
     }
     Write-Host 'DEVELOPER KIT PACKAGING CONTRACT: PASS' -ForegroundColor Green
 } finally {

@@ -122,6 +122,17 @@ try {
     ) -Raw | ConvertFrom-Json -Depth 32
     $safetensorsWheel = Join-Path $scratchRoot ([string]$lock.safetensors.file_name)
     Invoke-WebRequest -Uri ([string]$lock.safetensors.url) -OutFile $safetensorsWheel
+    $expectedSourceCommit = (& git -C $repositoryRoot rev-parse HEAD).Trim()
+    $expectedSourceTree = (& git -C $repositoryRoot rev-parse 'HEAD^{tree}').Trim()
+    $expectedSourceBranch = (& git -C $repositoryRoot branch --show-current).Trim()
+    $expectedSourceStatus = @(& git -C $repositoryRoot status --short --untracked-files=all)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Comfy Recorder test could not resolve the source identity.'
+    }
+    $expectedSourceDirty = $expectedSourceStatus.Count -gt 0
+    $expectedDistributable = (
+        -not $expectedSourceDirty -and $expectedSourceBranch -ceq 'main'
+    )
     $artifactRoot = Join-Path $scratchRoot 'artifact-set'
     & (Join-Path $PSScriptRoot 'Build-ComfyRecorderBundle.ps1') `
         -OutputDirectory $artifactRoot `
@@ -159,11 +170,16 @@ try {
         [string]$receipt.target -cne 'windows-x64' -or
         [string]$receipt.python_abi -cne 'cp312-abi3' -or
         (@($receipt.supported_python) -join "`0") -cne (@('cp312', 'cp313') -join "`0") -or
+        [string]$receipt.source.git_commit -cne $expectedSourceCommit -or
+        [string]$receipt.source.git_tree -cne $expectedSourceTree -or
+        [string]$receipt.source.git_branch -cne $expectedSourceBranch -or
+        [bool]$receipt.source.git_dirty -ne $expectedSourceDirty -or
+        [int64]$receipt.source.git_dirty_entry_count -ne $expectedSourceStatus.Count -or
         [string]$receipt.source.git_tree -cnotmatch '^[0-9a-f]{40}$' -or
         [string]$receipt.source.public_snapshot_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
         [int64]$receipt.source.public_snapshot_file_count -le 0 -or
         [bool]$receipt.signed -or -not [bool]$receipt.unsigned -or
-        [bool]$receipt.distributable) {
+        [bool]$receipt.distributable -ne $expectedDistributable) {
         throw 'Comfy Recorder receipt identity or dirty-build contract is invalid.'
     }
     if ([string]$receipt.archive.file_name -cne "$baseName.zip" -or
