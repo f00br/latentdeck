@@ -942,6 +942,34 @@ try {
         ) `
         -Message 'H3 setup builder no longer uses bounded private staging and no-overwrite publication.'
 
+    $builderEntrypointProbeArchive = Join-Path $testRoot 'python-3.13.14-embed-amd64.zip'
+    [System.IO.File]::WriteAllBytes($builderEntrypointProbeArchive, [byte[]]@(0))
+    $builderEntrypointProbe = Invoke-NativeResult `
+        -Executable (Get-Command pwsh).Source `
+        -Arguments @(
+            '-NoProfile',
+            '-File',
+            $fullPackBuilderCommand.Source,
+            '-PythonEmbedArchive',
+            $builderEntrypointProbeArchive,
+            '-PackVersion',
+            '0.2.1',
+            '-OutputDirectory',
+            (Join-Path $testRoot 'builder-entrypoint-probe-output'),
+            '-DevelopmentBuild'
+        )
+    Assert-Condition `
+        -Condition (
+            $builderEntrypointProbe.ExitCode -ne 0 -and
+            $builderEntrypointProbe.Output -like (
+                '*CPython runtime archive SHA-256 does not match the curation lock.*'
+            )
+        ) `
+        -Message (
+            'The production H3 builder entrypoint did not load its packaging modules before ' +
+            "validating inputs. Output: $($builderEntrypointProbe.Output)"
+        )
+
     $offlineProbeRoot = Join-Path $testRoot 'offline-nsis-probe'
     $offlineProbeTools = Join-Path $offlineProbeRoot 'tools'
     [System.IO.Directory]::CreateDirectory($offlineProbeTools) | Out-Null

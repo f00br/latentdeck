@@ -32,9 +32,9 @@ if ($ReleaseChannel -cnotin @('unsigned_preview', 'stable')) {
     throw 'ReleaseChannel must be exactly unsigned_preview or stable.'
 }
 
-Import-Module (Join-Path $PSScriptRoot 'CodecPackPackaging.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'ReleaseLicenseBundle.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'SafetensorsNativeClosure.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'CodecPackPackaging.psm1') -Force
 
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $sourceBefore = Get-PackagingSourceState -RepositoryRoot $repoRoot
