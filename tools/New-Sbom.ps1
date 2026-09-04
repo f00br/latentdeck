@@ -49,6 +49,14 @@ $defaultWorkspaceInventory = (
     -not $PSBoundParameters.ContainsKey('IncludeSpout2') -and
     -not $PSBoundParameters.ContainsKey('IncludeTauriWindowsInstaller')
 )
+if ($IncludeTauriWindowsInstaller -and
+    [string]::IsNullOrWhiteSpace($TauriNsisRoot)) {
+    throw 'IncludeTauriWindowsInstaller requires an explicit verified TauriNsisRoot.'
+}
+if (-not $IncludeTauriWindowsInstaller -and
+    -not [string]::IsNullOrWhiteSpace($TauriNsisRoot)) {
+    throw 'TauriNsisRoot cannot be supplied without IncludeTauriWindowsInstaller.'
+}
 $cargoSelectors = @($CargoPackage | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 $pythonSelectors = @($PythonPackage | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 $pythonBuildSelectors = @(
@@ -208,12 +216,7 @@ function Get-TauriWindowsInstallerComponents {
     $expectedTauriUtilsSha1 = '75197fee3c6a814fe035788d1c34ead39349b860'
     $expectedTauriUtilsSha256 = '5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709'
 
-    $rootCandidate = if ([string]::IsNullOrWhiteSpace($TauriNsisRoot)) {
-        Join-Path $env:LOCALAPPDATA 'tauri/NSIS'
-    } else {
-        $TauriNsisRoot
-    }
-    $root = (Resolve-Path -LiteralPath $rootCandidate).Path
+    $root = (Resolve-Path -LiteralPath $TauriNsisRoot).Path
     $rootItem = Get-Item -LiteralPath $root -Force
     if (-not $rootItem.PSIsContainer -or
         ($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {

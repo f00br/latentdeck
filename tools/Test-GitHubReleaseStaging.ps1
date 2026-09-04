@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param()
+param(
+    [string]$TauriNsisRoot
+)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -8,6 +10,15 @@ Import-Module (Join-Path $PSScriptRoot 'ReleaseLicenseBundle.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'SafetensorsNativeClosure.psm1') -Force
 
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+$resolvedTauriNsisRoot = if ([string]::IsNullOrWhiteSpace($TauriNsisRoot)) {
+    & (Join-Path $PSScriptRoot 'Get-PinnedNsis.ps1') `
+        -IncludeTauriUtils `
+        -AllowNetwork
+} else {
+    & (Join-Path $PSScriptRoot 'Get-PinnedNsis.ps1') `
+        -NsisRoot $TauriNsisRoot `
+        -IncludeTauriUtils
+}
 $artifactsRoot = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot 'artifacts'))
 [System.IO.Directory]::CreateDirectory($artifactsRoot) | Out-Null
 $testRoot = Join-Path $artifactsRoot ".github-stage-contract-$([guid]::NewGuid().ToString('N'))"
@@ -212,6 +223,7 @@ try {
             ) `
             -NodeRuntimeBuildPackage @('svelte', 'tailwindcss', 'vite') `
             -IncludeSpout2 `
+            -TauriNsisRoot $resolvedTauriNsisRoot `
             -IncludeTauriWindowsInstaller `
             -Deterministic | Out-Null
         if ($LASTEXITCODE -ne 0) {
@@ -225,7 +237,8 @@ try {
         -ArtifactName 'LatentDeck Windows Applications' `
         -ArtifactVersion $releaseLabel `
         -OutputPath (Join-Path $appRoot 'metadata/THIRD_PARTY_LICENSES.json') `
-        -RepositoryNoticePath (Join-Path $repositoryRoot 'THIRD_PARTY_NOTICES.md')
+        -RepositoryNoticePath (Join-Path $repositoryRoot 'THIRD_PARTY_NOTICES.md') `
+        -TauriNsisRoot $resolvedTauriNsisRoot
     $applications = @(
         foreach ($name in $appNames) {
             $receipt = Get-Receipt -Path (Join-Path $appRoot "installers/$name")

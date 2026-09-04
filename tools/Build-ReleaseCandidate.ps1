@@ -235,7 +235,8 @@ function Assert-TauriReleaseConfig {
     }
     if ($config.bundle.active -ne $true -or
         (@($config.bundle.targets) -join ',') -cne 'nsis' -or
-        $config.bundle.createUpdaterArtifacts -ne $false) {
+        $config.bundle.createUpdaterArtifacts -ne $false -or
+        $config.bundle.useLocalToolsDir -ne $true) {
         throw "Tauri bundle targets are not the local unsigned NSIS contract in $Path"
     }
     $resourceProperty = $config.bundle.PSObject.Properties['resources']
@@ -1120,6 +1121,27 @@ try {
         throw 'The pinned Cargo 1.93.1 toolchain is unavailable.'
     }
 
+    $env:CARGO_TARGET_DIR = Join-Path $buildRoot 't'
+    $pinnedTauriNsisRoot = & (Join-Path $PSScriptRoot 'Get-PinnedNsis.ps1') `
+        -IncludeTauriUtils `
+        -AllowNetwork
+    $tauriToolsRoot = Join-Path $env:CARGO_TARGET_DIR '.tauri'
+    $tauriNsisToolRoot = Join-Path $tauriToolsRoot 'NSIS'
+    [System.IO.Directory]::CreateDirectory($tauriToolsRoot) | Out-Null
+    if (Test-Path -LiteralPath $tauriNsisToolRoot) {
+        throw "Tauri local NSIS destination already exists: $tauriNsisToolRoot"
+    }
+    Copy-Item `
+        -LiteralPath $pinnedTauriNsisRoot `
+        -Destination $tauriNsisToolRoot `
+        -Recurse
+    $verifiedTauriNsisRoot = & (Join-Path $PSScriptRoot 'Get-PinnedNsis.ps1') `
+        -NsisRoot $tauriNsisToolRoot `
+        -IncludeTauriUtils
+    if ($verifiedTauriNsisRoot -cne $tauriNsisToolRoot) {
+        throw 'Tauri local NSIS root did not resolve to the exact prepared build path.'
+    }
+
     Invoke-Checked `
         -Description 'Frozen workspace dependency install' `
         -Command { & $pnpm --dir $repoRoot install --frozen-lockfile }
@@ -1139,6 +1161,7 @@ try {
                 -NodeBuildPackage $nodeBuildPackageNames `
                 -NodeRuntimeBuildPackage @('svelte', 'tailwindcss', 'vite') `
                 -IncludeSpout2 `
+                -TauriNsisRoot $tauriNsisToolRoot `
                 -IncludeTauriWindowsInstaller
         }
     Invoke-Checked `
@@ -1154,6 +1177,7 @@ try {
                 -NodeBuildPackage $nodeBuildPackageNames `
                 -NodeRuntimeBuildPackage @('svelte', 'tailwindcss', 'vite') `
                 -IncludeSpout2 `
+                -TauriNsisRoot $tauriNsisToolRoot `
                 -IncludeTauriWindowsInstaller
         }
     $deckSbomInput = Assert-CycloneDxSbom `
@@ -1175,7 +1199,8 @@ try {
         -ArtifactName 'LatentDeck Windows Applications' `
         -ArtifactVersion $ReleaseLabel `
         -OutputPath (Join-Path $buildRoot 'APPLICATION_THIRD_PARTY_LICENSES.json') `
-        -RepositoryNoticePath (Join-Path $repoRoot 'THIRD_PARTY_NOTICES.md')
+        -RepositoryNoticePath (Join-Path $repoRoot 'THIRD_PARTY_NOTICES.md') `
+        -TauriNsisRoot $tauriNsisToolRoot
     Assert-ReleaseLocksUnchanged `
         -CargoLockPath $cargoLockPath `
         -CargoLockSha256 $cargoLockHash `
@@ -1210,7 +1235,6 @@ try {
         -DestinationRoot (Join-Path $buildRoot 's')
     $env:LATENTDECK_SPOUT2_SOURCE_ROOT = $privateSpoutRoot
 
-    $env:CARGO_TARGET_DIR = Join-Path $buildRoot 't'
     Set-PublicRustBuildPolicy -Policy $nativeBuildPolicy
     $tauriArguments = @(
         'exec', 'tauri', 'build',

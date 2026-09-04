@@ -802,7 +802,8 @@ function New-ReleaseLicenseBundle {
         [Parameter(Mandatory)][string]$OutputPath,
         [Parameter(Mandatory)][string]$RepositoryNoticePath,
         [string]$SafetensorsWheelPath,
-        [string]$SafetensorsDistributionRoot
+        [string]$SafetensorsDistributionRoot,
+        [string]$TauriNsisRoot
     )
 
     $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
@@ -1069,7 +1070,10 @@ function New-ReleaseLicenseBundle {
                     'e7dd514003ab96cb3ddccbc028fe5c795fccf57dc41f21cfb9d4dd16ead23bf5') {
                 throw 'NSIS release license identity drifted.'
             }
-            $nsisCopyingPath = Join-Path $env:LOCALAPPDATA 'tauri/NSIS/COPYING'
+            if ([string]::IsNullOrWhiteSpace($TauriNsisRoot)) {
+                throw 'An application license bundle requires an explicit verified TauriNsisRoot.'
+            }
+            $nsisCopyingPath = Join-Path $TauriNsisRoot 'COPYING'
             $nsisText = ConvertTo-CanonicalLicenseText `
                 -Path $nsisCopyingPath `
                 -Context 'pinned NSIS 3.11 COPYING text'

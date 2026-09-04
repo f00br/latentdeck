@@ -28,6 +28,7 @@
     "active": true,
     "targets": ["nsis"],
     "createUpdaterArtifacts": false,
+    "useLocalToolsDir": true,
     "publisher": "LatentDeck Project",
     "icon": ["icons/icon.ico"],
     "license": "Apache-2.0",

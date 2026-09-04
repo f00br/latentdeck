@@ -28,6 +28,11 @@ The standalone H3 Codec Pack setup uses the same NSIS family as the application
 installers but is built directly rather than through a dummy Tauri application.
 `tools/Get-PinnedNsis.ps1` verifies the NSIS 3.11 archive, full extracted tree,
 and compiler hashes before placing the build-only tool under ignored `.tools/`.
+Application builds add the exact pinned `nsis-tauri-utils 0.5.3` payload with
+`-IncludeTauriUtils`, validate the resulting 442-file tree, and copy that tree
+into the private Cargo target through Tauri's project-local tools directory.
+SBOM and license generation receive this verified path explicitly and do not
+depend on a previously populated user-profile Tauri cache.
 The aggregate `tools/Check-Workspace.ps1` may bootstrap this exact pinned
 build tool when the cache is absent; the Codec Pack builder itself remains
 offline unless `-AllowNetwork` is explicit. NSIS is not an end-user

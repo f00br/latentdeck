@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param()
+param(
+    [string]$TauriNsisRoot
+)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -10,6 +12,15 @@ Import-Module (Join-Path $PSScriptRoot 'ReleaseSpoutMetadata.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'TauriReleaseContract.psm1') -Force
 
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+$resolvedTauriNsisRoot = if ([string]::IsNullOrWhiteSpace($TauriNsisRoot)) {
+    & (Join-Path $PSScriptRoot 'Get-PinnedNsis.ps1') `
+        -IncludeTauriUtils `
+        -AllowNetwork
+} else {
+    & (Join-Path $PSScriptRoot 'Get-PinnedNsis.ps1') `
+        -NsisRoot $TauriNsisRoot `
+        -IncludeTauriUtils
+}
 $artifactsRoot = Join-Path $repoRoot 'artifacts'
 [System.IO.Directory]::CreateDirectory($artifactsRoot) | Out-Null
 $testRoot = Join-Path $artifactsRoot ".packaging-test-$([guid]::NewGuid().ToString('N'))"
@@ -375,6 +386,31 @@ function Write-SyntheticDependencyMetadata {
 try {
     [System.IO.Directory]::CreateDirectory($testRoot) | Out-Null
 
+    $tamperedTauriNsisRoot = Join-Path $testRoot 'tampered-tauri-nsis'
+    Copy-Item `
+        -LiteralPath $resolvedTauriNsisRoot `
+        -Destination $tamperedTauriNsisRoot `
+        -Recurse
+    $tamperedTauriUtilsPath = Join-Path `
+        $tamperedTauriNsisRoot `
+        'Plugins/x86-unicode/additional/nsis_tauri_utils.dll'
+    $tamperStream = [System.IO.File]::Open(
+        $tamperedTauriUtilsPath,
+        [System.IO.FileMode]::Append,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None
+    )
+    try {
+        $tamperStream.WriteByte(0)
+    } finally {
+        $tamperStream.Dispose()
+    }
+    Assert-Throws -Context 'tampered Tauri NSIS tool tree must be rejected' -Action {
+        & (Join-Path $PSScriptRoot 'Get-PinnedNsis.ps1') `
+            -NsisRoot $tamperedTauriNsisRoot `
+            -IncludeTauriUtils | Out-Null
+    }
+
     foreach ($caseVariant in @('UNSIGNED_PREVIEW', 'Unsigned_Preview')) {
         Assert-NativeFailureContains `
             -Context "application release channel case variant $caseVariant" `
@@ -548,6 +584,7 @@ try {
         ) `
         -NodeRuntimeBuildPackage @('svelte', 'tailwindcss', 'vite') `
         -IncludeSpout2 `
+        -TauriNsisRoot $resolvedTauriNsisRoot `
         -IncludeTauriWindowsInstaller | Out-Null
     $generatedBom = Get-Content -Raw -LiteralPath $generatedReleaseSbom |
         ConvertFrom-Json -Depth 100
@@ -702,7 +739,8 @@ try {
         -ArtifactName 'LatentDeck Windows Applications' `
         -ArtifactVersion '0.1.0-preview.1' `
         -OutputPath $applicationLicenseBundle `
-        -RepositoryNoticePath (Join-Path $repoRoot 'THIRD_PARTY_NOTICES.md')
+        -RepositoryNoticePath (Join-Path $repoRoot 'THIRD_PARTY_NOTICES.md') `
+        -TauriNsisRoot $resolvedTauriNsisRoot
     if ($applicationLicenseResult.ComponentCount -ne (@($generatedBom.components).Count + 1) -or
         $applicationLicenseResult.TextCount -lt 1 -or
         $applicationLicenseResult.NoTextDispositionCount -lt 1) {
@@ -876,6 +914,7 @@ try {
             $config.bundle.active -ne $true -or
             (@($config.bundle.targets) -join ',') -cne 'nsis' -or
             $config.bundle.createUpdaterArtifacts -ne $false -or
+            $config.bundle.useLocalToolsDir -ne $true -or
             $config.bundle.windows.allowDowngrades -ne $false -or
             $config.bundle.windows.nsis.installMode -cne 'currentUser') {
             throw "Release configuration contract failed for $($app.Product)."

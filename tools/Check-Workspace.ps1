@@ -10,6 +10,9 @@ Set-StrictMode -Version Latest
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $nodeRoot = & (Join-Path $PSScriptRoot 'Get-PinnedNode.ps1')
 $nsisRoot = & (Join-Path $PSScriptRoot 'Get-PinnedNsis.ps1') -AllowNetwork
+$tauriNsisRoot = & (Join-Path $PSScriptRoot 'Get-PinnedNsis.ps1') `
+    -IncludeTauriUtils `
+    -AllowNetwork
 $env:PATH = "$nodeRoot;$env:PATH"
 $pnpm = Join-Path $nodeRoot 'pnpm.cmd'
 $previousPythonNoBytecode = $env:PYTHONDONTWRITEBYTECODE
@@ -72,9 +75,15 @@ try {
     Invoke-Checked { pwsh -NoProfile -File tools/Test-PublicWheelAudit.ps1 } 'Public project-wheel audit contract'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-ComfyRecorderBundle.ps1 } 'Comfy Recorder bundle contract'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-LinkedDevCodecPack.ps1 } 'Linked development Codec Pack contract'
-    Invoke-Checked { pwsh -NoProfile -File tools/Test-ReleasePackaging.ps1 } 'Release packaging contract'
+    Invoke-Checked {
+        pwsh -NoProfile -File tools/Test-ReleasePackaging.ps1 `
+            -TauriNsisRoot $tauriNsisRoot
+    } 'Release packaging contract'
     Invoke-Checked { pwsh -NoProfile -File tools/Test-DeveloperKitPackaging.ps1 } 'Developer Kit packaging contract'
-    Invoke-Checked { pwsh -NoProfile -File tools/Test-GitHubReleaseStaging.ps1 } 'GitHub Release staging contract'
+    Invoke-Checked {
+        pwsh -NoProfile -File tools/Test-GitHubReleaseStaging.ps1 `
+            -TauriNsisRoot $tauriNsisRoot
+    } 'GitHub Release staging contract'
     Invoke-Checked {
         pwsh -NoProfile -File tools/Test-H3CodecPackSetup.ps1 -NsisRoot $nsisRoot
     } 'H3 Codec Pack setup contract'
