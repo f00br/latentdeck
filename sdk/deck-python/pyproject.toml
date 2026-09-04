@@ -7,7 +7,7 @@ license = "Apache-2.0"
 dependencies = []
 
 [build-system]
-requires = ["uv-build==0.12.7"]
+requires = ["uv-build==0.12.8"]
 build-backend = "uv_build"
 
 [tool.pytest.ini_options]

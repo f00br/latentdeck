@@ -16,5 +16,5 @@ dependencies = [
 latentdeck-codec-host = "latentdeck_codec_host.__main__:main"
 
 [build-system]
-requires = ["uv-build==0.12.7"]
+requires = ["uv-build==0.12.8"]
 build-backend = "uv_build"

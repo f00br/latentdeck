@@ -17,7 +17,7 @@ test = [
 ]
 
 [build-system]
-requires = ["uv-build==0.12.7"]
+requires = ["uv-build==0.12.8"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
