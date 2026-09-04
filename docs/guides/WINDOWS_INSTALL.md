@@ -12,6 +12,12 @@ Recorder bundle.
 - a compatible external TAEH3 decoder asset selected by the user;
 - at least one valid H3 `.lc` cartridge or raw H3 Safetensors file.
 
+For a first run, use the separately hosted [LatentDeck Demo LC
+Pack](DEMO_CARTRIDGES.md). Its three pinned H3 cartridges share compatible
+1344 × 768 synthesis geometry. Its current card states no reuse or
+redistribution license, so this guide treats the pack as evaluation material;
+read its provenance status before further use.
+
 The installers do not require administrator elevation. The H3 setup runs
 offline and does not require system Python, PowerShell, ComfyUI, either
 application, or a network connection.
@@ -22,8 +28,8 @@ Download `v0.1.0-preview.1` only from [GitHub
 Releases](https://github.com/f00br/latentdeck/releases). The release contains
 these user-facing artifacts:
 
-- the LatentDeck App installer;
-- the LatentPlayer installer;
+- `LatentDeck-0.1.0-preview.1-windows-x64-unsigned-setup.exe`;
+- `LatentPlayer-0.1.0-preview.1-windows-x64-unsigned-setup.exe`;
 - `LatentDeck-H3-CodecPack-0.2.1-setup.exe`;
 - `LatentDeck-H3-CodecPack-0.2.1-windows-x64.ldcodec`;
 - `LatentDeck-0.1.0-preview.1-comfy-recorder-windows-x64.zip` for artists who
@@ -39,11 +45,11 @@ bound to that payload's filename, byte length, SHA-256, package ID, and version.
 Verify every downloaded file against `SHA256SUMS.txt` before running it:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\<downloaded-file>
+Get-FileHash -Algorithm SHA256 .\LatentDeck-0.1.0-preview.1-windows-x64-unsigned-setup.exe
 ```
 
-Compare the complete lowercase/uppercase-insensitive hexadecimal digest, not a
-short prefix.
+Repeat for every downloaded artifact. Compare the complete
+lowercase/uppercase-insensitive hexadecimal digest, not a short prefix.
 
 ## Unsigned preview warning
 
@@ -64,8 +70,8 @@ current Windows user. Either application can be installed, updated, or removed
 without installing or removing the other application, the H3 Codec Pack,
 cartridges, Library data, or decoder selection.
 
-Launch both applications once. They should open without a cartridge or codec
-and provide Library/Extensions or diagnostic actions in that state.
+Launch each installed application once. It should open without a cartridge or
+codec and provide Library/Extensions or diagnostic actions in that state.
 
 ## Install H3 Codec Pack 0.2.1
 
@@ -127,6 +133,15 @@ pack declares the accepted byte length, SHA-256, source, and license; the
 application accepts only a matching local file. Review the upstream terms and
 obtain the asset from the source identified by the pack.
 
+For H3 `0.2.1`, follow the **Source** link shown by the application or download
+the declared
+[TAEH3 file](https://raw.githubusercontent.com/madebyollin/taehv/62f7591f59dfbb4c3c02b7a621d180a9eeaba26c/safetensors/taeh3.safetensors).
+The accepted variant is 22,709,752 bytes with SHA-256
+`4fd022bfcab08772fe0536b17ea1a3bbb5625be11e397868d1c5d891863d4c13`.
+Use **Select decoder** in LatentPlayer. In LatentDeck, open the Deck's **Codec
+assets** section and use **Choose file…**. Select the asset explicitly in each
+application you use.
+
 Do not rename an arbitrary model or copy a weight into an undocumented
 application directory. A missing or mismatched decoder should produce a visible
 not-ready state rather than a fallback.
@@ -137,15 +152,17 @@ another decoder, another Codec Pack, or Protocol 1 after a Protocol 2 failure.
 
 ## Verify the first launch
 
-1. In LatentPlayer, open one compatible `.lc` and test Play, Pause, Restart,
+1. Download and checksum one compatible `.lc`, such as a cartridge from the
+   [pinned demo pack](DEMO_CARTRIDGES.md).
+2. In LatentPlayer, open that `.lc` and test Play, Pause, Restart,
    Loop, window resize, and fullscreen.
-2. In LatentDeck, confirm the bundled D2 and Q4 Decks are visible as exact
+3. In LatentDeck, confirm the bundled D2 and Q4 Decks are visible as exact
    enabled packages and that the compatibility matrix shows an H3 pairing.
-3. Load a compatible source set. The decoded image should remain at its
+4. Load a compatible source set. The decoded image should remain at its
    intrinsic aspect ratio; incompatible sources should remain visible but be
    refused with a reason.
-4. Save a short Snapshot or Live Capture and open the new `.lc` in Player.
-5. Optionally record a short MP4 or verify a Spout sender.
+5. Save a short Snapshot or Live Capture and open the new `.lc` in Player.
+6. Optionally record a short MP4 or verify a Spout sender.
 
 The complete creative sequence is in the [artist workflow](ARTIST_WORKFLOW.md).
 

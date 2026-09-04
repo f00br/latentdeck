@@ -10,10 +10,19 @@ raw H3 latent → .lc → play → D2/Q4 synthesis → resample or decode → re
 Start with the [Windows installation guide](WINDOWS_INSTALL.md) if the
 applications and H3 Codec Pack are not ready.
 
-## 1. Create a cartridge
+## 1. Obtain or create a cartridge
 
-Choose one of three explicit authoring paths. Renaming a `.safetensors` file to
-`.lc` is never conversion.
+Choose a prepared cartridge or one of three explicit authoring paths. Renaming
+a `.safetensors` file to `.lc` is never conversion.
+
+### Start with the demo pack
+
+For a first playback or synthesis session, download `anim-hud.lc`, `knight.lc`,
+and `landscape.lc` from the pinned [LatentDeck Demo LC
+Pack](DEMO_CARTRIDGES.md). Verify its published hashes before opening the
+files. All three share the same H3 synthesis compatibility key; the Codec Pack
+and separately selected decoder are still required. The current pack is
+evaluation material and does not yet grant reuse or redistribution rights.
 
 ### Record during generation in ComfyUI
 

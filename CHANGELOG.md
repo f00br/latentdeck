@@ -6,7 +6,10 @@ release entry lists the identities it contains.
 
 ## Unreleased
 
-No public changes are recorded after the preview candidate.
+- Added an owner-approved README hero screenshot and a checksum-pinned route to
+  the separately hosted H3 demo cartridges.
+- Added a first-run Windows quick start covering application choice, H3 Codec
+  Pack setup, explicit CUDA/decoder selection, demo playback, and D2 startup.
 
 ## 0.1.0-preview.1
 
@@ -29,11 +32,13 @@ See [the complete preview release notes](docs/releases/0.1.0-preview.1.md).
 - Public documentation, community workflow, extension authoring kit, and
   reproducible GitHub prerelease staging path.
 - Machine-readable schemas and CPU-first cartridge, Deck, and Codec examples.
+- Pinned documentation for the separately hosted three-cartridge H3 demo pack.
 
 ### Known preview limitations
 
 - Windows x64 and the H3 NVIDIA/CUDA path are the initial tested runtime.
 - Preview installers are not Authenticode-signed.
-- H3 decoder/model assets and cartridges are not bundled.
+- H3 decoder/model assets and demo cartridges are not bundled. The current
+  external demo-pack revision is evaluation-only pending explicit media terms.
 - Audio playback and synthesis are not implemented.
 - Incompatible latent signals are refused rather than converted implicitly.

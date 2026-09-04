@@ -29,6 +29,13 @@ $assets = [ordered]@{
         Hash = 'fb8f1b0d58ad030fb94da954f0ece142223c14c65a4faff5925f23624b2f0d1f'
         Record = 'docs/assets/screenshots/README.md'
     }
+    'docs/assets/showcase/latentdeck-d2-live-synthesis.png' = @{
+        Hash = '00db351eb57b9e99008e8eb3d719ace6a56e4d4c2bc393c86160f6d09827106e'
+        Record = 'docs/assets/showcase/README.md'
+        Author = '@f00br'
+        Alt = 'LatentDeck D2 mixing two compatible H3 cartridges into an active post-operator stream'
+        Readme = 'README.md'
+    }
     'apps/latentdeck/src-tauri/icons/source.svg' = @{
         Hash = '6a215c05222f77866729ea686974d6e0425754576cba55419136747c0ffd6e3e'
         Record = 'docs/assets/branding/README.md'
@@ -50,6 +57,10 @@ $assets = [ordered]@{
 $trackedAssets = @(
     & git -C $repoRoot -c core.quotepath=false ls-files -- `
         'docs/assets/screenshots/*.png' `
+        'docs/assets/showcase/*.png' `
+        'docs/assets/showcase/*.jpg' `
+        'docs/assets/showcase/*.jpeg' `
+        'docs/assets/showcase/*.webp' `
         'apps/latentdeck/src-tauri/icons/source.svg' `
         'apps/latentdeck/src-tauri/icons/icon.ico' `
         'apps/latentplayer/src-tauri/icons/source.svg' `
@@ -69,6 +80,46 @@ foreach ($difference in $pathDifference) {
     } else {
         $failures.Add("Tracked visual asset lacks a provenance record: $($difference.InputObject)")
     }
+}
+
+$trackedShowcaseEntries = @(
+    & git -C $repoRoot -c core.quotepath=false ls-files -- 'docs/assets/showcase'
+)
+if ($LASTEXITCODE -ne 0) {
+    $failures.Add('Could not enumerate the complete showcase directory.')
+}
+$trackedShowcaseEntries = @(
+    $trackedShowcaseEntries |
+        ForEach-Object { $_.Replace('\', '/') } |
+        Sort-Object -CaseSensitive -Unique
+)
+$showcasePaths = @(
+    $trackedShowcaseEntries |
+        Where-Object { $_ -cne 'docs/assets/showcase/README.md' }
+)
+foreach ($relativePath in $showcasePaths) {
+    if (-not $assets.Contains($relativePath)) {
+        $failures.Add("Tracked showcase file is not an approved still: $relativePath")
+    }
+    if ([System.IO.Path]::GetExtension($relativePath).ToLowerInvariant() -cnotin @(
+        '.png', '.jpg', '.jpeg', '.webp'
+    )) {
+        $failures.Add("Forbidden showcase payload type: $relativePath")
+    }
+}
+if ($showcasePaths.Count -gt 5) {
+    $failures.Add("Showcase contains more than five visual assets: $($showcasePaths.Count)")
+}
+$showcaseBytes = [int64]0
+foreach ($relativePath in $showcasePaths) {
+    $showcaseItem = Get-Item -LiteralPath (Join-Path $repoRoot $relativePath) -Force
+    $showcaseBytes += [int64]$showcaseItem.Length
+    if ($showcaseItem.Length -gt 2MB) {
+        $failures.Add("Showcase asset exceeds 2 MiB: $relativePath")
+    }
+}
+if ($showcaseBytes -gt 10MB) {
+    $failures.Add("Showcase exceeds 10 MiB total: $showcaseBytes bytes")
 }
 
 $recordCache = @{}
@@ -112,6 +163,59 @@ foreach ($relativePath in $assets.Keys) {
         -not $recordCache[$recordPath].Contains($expectedHash, [System.StringComparison]::Ordinal)
     ) {
         $failures.Add("Asset hash is absent from its provenance record: $relativePath")
+    }
+
+    if ($relativePath.StartsWith(
+        'docs/assets/showcase/',
+        [System.StringComparison]::Ordinal
+    )) {
+        $recordText = if ($recordCache.ContainsKey($recordPath)) {
+            [string]$recordCache[$recordPath]
+        } else {
+            ''
+        }
+        foreach ($requiredMarker in @(
+            'Author and rights holder:',
+            'Origin:',
+            'Redistribution:',
+            'Intended use:',
+            'Alt text:'
+        )) {
+            if (-not $recordText.Contains(
+                $requiredMarker,
+                [System.StringComparison]::Ordinal
+            )) {
+                $failures.Add(
+                    "Showcase provenance lacks '$requiredMarker' for $relativePath"
+                )
+            }
+        }
+        if (-not $recordText.Contains(
+            [string]$entry.Author,
+            [System.StringComparison]::Ordinal
+        )) {
+            $failures.Add("Showcase author is absent from provenance: $relativePath")
+        }
+        if (-not $recordText.Contains(
+            [string]$entry.Alt,
+            [System.StringComparison]::Ordinal
+        )) {
+            $failures.Add("Showcase alt text is absent from provenance: $relativePath")
+        }
+
+        $readmePath = Join-Path $repoRoot ([string]$entry.Readme)
+        if (-not (Test-Path -LiteralPath $readmePath -PathType Leaf)) {
+            $failures.Add("Showcase README binding is missing: $($entry.Readme)")
+        } else {
+            $readmeText = $utf8.GetString([System.IO.File]::ReadAllBytes($readmePath))
+            $expectedImage = "![$($entry.Alt)]($relativePath)"
+            if (-not $readmeText.Contains(
+                $expectedImage,
+                [System.StringComparison]::Ordinal
+            )) {
+                $failures.Add("README does not use the reviewed showcase alt text: $relativePath")
+            }
+        }
     }
 }
 

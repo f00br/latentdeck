@@ -41,6 +41,10 @@ adding machine paths, private media, or transient status notes to public docs.
       dependency was reclassified to suppress its license text.
 - [ ] Model/decoder assets and cartridges remain separately licensed and are
       not implied to inherit the project license.
+- [ ] The external demo pack is linked at one pinned Hugging Face revision;
+      its file hashes and LC/H3 compatibility are independently validated, and
+      its creator/source provenance, rights confirmation, and media terms are
+      explicit before it is described as reusable or redistributable.
 - [ ] Before public visibility, the Discord secure-channel fallback in
       `SECURITY.md` is ready; Private Vulnerability Reporting is a mandatory
       public-transition gate rather than a private-repository prerequisite.
@@ -228,7 +232,7 @@ Run `pwsh -NoProfile -File tools/Test-DeveloperOnboarding.ps1`, then confirm:
 - [ ] The draft prerelease contains only staged allowlisted assets.
 - [ ] Every downloaded draft asset re-hashes against the unified checksum file.
 - [ ] Release notes disclose the unsigned state, system/runtime boundary,
-      external decoder, missing sample cartridges, executable-extension trust,
+      external decoder, separate demo-pack terms, executable-extension trust,
       and known limitations.
 - [ ] Explicit release-authority approval exists separately for the remote
       push, tag, asset upload, repository visibility change, and prerelease

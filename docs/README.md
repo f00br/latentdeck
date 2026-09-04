@@ -7,10 +7,12 @@ duplicating them.
 ## Artists and performers
 
 1. [Install the Windows preview](guides/WINDOWS_INSTALL.md).
-2. Follow the complete [artist workflow](guides/ARTIST_WORKFLOW.md) from raw H3
+2. [Download and verify the demo cartridges](guides/DEMO_CARTRIDGES.md), or
+   create a cartridge from a supported raw H3 latent.
+3. Follow the complete [artist workflow](guides/ARTIST_WORKFLOW.md) from raw H3
    latent or ComfyUI recording to playback, synthesis, resampling, MP4, and
    Spout.
-3. Use the [diagnostics guide](repository/DIAGNOSTICS.md) when a reproducible
+4. Use the [diagnostics guide](repository/DIAGNOSTICS.md) when a reproducible
    failure needs a public-safe support bundle.
 
 ## Developers and agents
