@@ -43,13 +43,13 @@ descriptive cartridge filenames, and the intended generated visual output.
 - Source media: the originating cartridges are distributed separately through
   the reviewed demo pack; no cartridge, raw latent, decoder, model weight,
   prompt, workflow, or local path is embedded as a repository payload
-- Edits: none; the supplied JPEG is stored byte-for-byte and displayed at a
-  bounded width by the README
+- Repository processing: none; the supplied JPEG is stored byte-for-byte and
+  displayed at a bounded width by the README
 - Redistribution: approved by the project owner as LatentDeck documentation
   under the repository's Apache-2.0 license
 - Intended use: compact linked preview for the public Quick Start video
-- Alt text: “Watch the LatentDeck 0.1 Quick Start: installation, playback,
-  latent mixing, and resampling”
+- Alt text: “Watch the LatentDeck 0.1 Quick Start video showing D2 mixing
+  knight and landscape cartridges”
 
 The frame was reviewed for visible credentials, machine-local paths, private
 prompts, and unrelated user data. It contains only the application UI,

@@ -20,7 +20,7 @@ they become pixels.
 
 <p>
   <a href="https://youtu.be/NKyJiUL5ICc">
-    <img src="docs/assets/showcase/latentdeck-quick-start-video.jpg" width="640" alt="Watch the LatentDeck 0.1 Quick Start: installation, playback, latent mixing, and resampling">
+    <img src="docs/assets/showcase/latentdeck-quick-start-video.jpg" width="640" alt="Watch the LatentDeck 0.1 Quick Start video showing D2 mixing knight and landscape cartridges">
   </a>
 </p>
 
