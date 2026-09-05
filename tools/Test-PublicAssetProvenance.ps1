@@ -36,6 +36,15 @@ $assets = [ordered]@{
         Alt = 'LatentDeck D2 mixing two compatible H3 cartridges into an active post-operator stream'
         Readme = 'README.md'
     }
+    'docs/assets/showcase/latentdeck-quick-start-video.jpg' = @{
+        Hash = 'ff57b6d3a6ff816cdd1221aad9cae3d1dcb0e78d36108c22e06a5f8680d94c21'
+        Record = 'docs/assets/showcase/README.md'
+        Author = '@f00br'
+        Alt = 'Watch the LatentDeck 0.1 Quick Start video showing D2 mixing knight and landscape cartridges'
+        Readme = 'README.md'
+        HtmlWidth = '640'
+        Link = 'https://youtu.be/NKyJiUL5ICc'
+    }
     'apps/latentdeck/src-tauri/icons/source.svg' = @{
         Hash = '6a215c05222f77866729ea686974d6e0425754576cba55419136747c0ffd6e3e'
         Record = 'docs/assets/branding/README.md'
@@ -208,11 +217,29 @@ foreach ($relativePath in $assets.Keys) {
             $failures.Add("Showcase README binding is missing: $($entry.Readme)")
         } else {
             $readmeText = $utf8.GetString([System.IO.File]::ReadAllBytes($readmePath))
-            $expectedImage = "![$($entry.Alt)]($relativePath)"
-            if (-not $readmeText.Contains(
-                $expectedImage,
-                [System.StringComparison]::Ordinal
-            )) {
+            $hasReviewedBinding = if ($entry.ContainsKey('HtmlWidth')) {
+                $link = [regex]::Escape([string]$entry.Link)
+                $source = [regex]::Escape($relativePath)
+                $width = [regex]::Escape([string]$entry.HtmlWidth)
+                $alt = [regex]::Escape([string]$entry.Alt)
+                $linkedImagePattern = (
+                    '<a\s+href="{0}">\s*' +
+                    '<img\s+src="{1}"\s+width="{2}"\s+alt="{3}">\s*' +
+                    '</a>'
+                ) -f $link, $source, $width, $alt
+                [regex]::IsMatch(
+                    $readmeText,
+                    $linkedImagePattern,
+                    [System.Text.RegularExpressions.RegexOptions]::Singleline
+                )
+            } else {
+                $expectedImage = "![$($entry.Alt)]($relativePath)"
+                $readmeText.Contains(
+                    $expectedImage,
+                    [System.StringComparison]::Ordinal
+                )
+            }
+            if (-not $hasReviewedBinding) {
                 $failures.Add("README does not use the reviewed showcase alt text: $relativePath")
             }
         }

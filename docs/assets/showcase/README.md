@@ -48,8 +48,7 @@ descriptive cartridge filenames, and the intended generated visual output.
 - Redistribution: approved by the project owner as LatentDeck documentation
   under the repository's Apache-2.0 license
 - Intended use: compact linked preview for the public Quick Start video
-- Alt text: “Watch the LatentDeck 0.1 Quick Start video showing D2 mixing
-  knight and landscape cartridges”
+- Alt text: “Watch the LatentDeck 0.1 Quick Start video showing D2 mixing knight and landscape cartridges”
 
 The frame was reviewed for visible credentials, machine-local paths, private
 prompts, and unrelated user data. It contains only the application UI,
