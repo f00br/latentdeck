@@ -454,7 +454,11 @@ function New-DeterministicZip {
 
 function Get-GitSource {
     $commit = (& git -C $repositoryRoot rev-parse HEAD).Trim()
-    $branch = (& git -C $repositoryRoot branch --show-current).Trim()
+    $branchOutput = @(& git -C $repositoryRoot branch --show-current)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Could not resolve Developer Kit Git source branch.'
+    }
+    $branch = ($branchOutput -join '').Trim()
     $tree = (& git -C $repositoryRoot rev-parse 'HEAD^{tree}').Trim()
     $status = @(& git -C $repositoryRoot status --porcelain=v1 --untracked-files=all)
     if ($LASTEXITCODE -ne 0 -or $commit -cnotmatch '^[0-9a-f]{40}$' -or

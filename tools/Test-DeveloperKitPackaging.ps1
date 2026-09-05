@@ -13,10 +13,11 @@ $testRoot = Join-Path $artifactsRoot ".developer-kit-contract-$([guid]::NewGuid(
 $outputRoot = Join-Path $testRoot 'output'
 $expandedRoot = Join-Path $testRoot 'expanded'
 $releaseLabel = '0.1.0-preview.1'
-$sourceBranch = (& git -C $repositoryRoot branch --show-current).Trim()
+$sourceBranchOutput = @(& git -C $repositoryRoot branch --show-current)
 if ($LASTEXITCODE -ne 0) {
     throw 'Developer Kit test could not resolve the source branch.'
 }
+$sourceBranch = ($sourceBranchOutput -join '').Trim()
 $sourceStatus = @(& git -C $repositoryRoot status --short --untracked-files=all)
 if ($LASTEXITCODE -ne 0) {
     throw 'Developer Kit test could not resolve the source status.'

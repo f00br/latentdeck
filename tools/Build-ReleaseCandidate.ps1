@@ -1011,10 +1011,11 @@ $gitTree = (& git -C $repoRoot rev-parse 'HEAD^{tree}').Trim()
 if ($LASTEXITCODE -ne 0 -or $gitTree -cnotmatch '^[0-9a-f]{40}$') {
     throw 'Could not resolve the release source Git tree.'
 }
-$gitBranch = (& git -C $repoRoot branch --show-current).Trim()
+$gitBranchOutput = @(& git -C $repoRoot branch --show-current)
 if ($LASTEXITCODE -ne 0) {
     throw 'Could not resolve the release source Git branch.'
 }
+$gitBranch = ($gitBranchOutput -join '').Trim()
 if ([string]::IsNullOrWhiteSpace($gitBranch)) {
     $gitBranch = '(detached)'
 }
@@ -1300,7 +1301,14 @@ try {
     }
     $gitCommitAfter = (& git -C $repoRoot rev-parse HEAD).Trim()
     $gitTreeAfter = (& git -C $repoRoot rev-parse 'HEAD^{tree}').Trim()
-    $gitBranchAfter = (& git -C $repoRoot branch --show-current).Trim()
+    $gitBranchAfterOutput = @(& git -C $repoRoot branch --show-current)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Could not resolve the release source Git branch after the build.'
+    }
+    $gitBranchAfter = ($gitBranchAfterOutput -join '').Trim()
+    if ([string]::IsNullOrWhiteSpace($gitBranchAfter)) {
+        $gitBranchAfter = '(detached)'
+    }
     $gitStatusAfter = @(& git -C $repoRoot status --porcelain=v1 --untracked-files=all)
     if ($LASTEXITCODE -ne 0 -or
         $gitCommitAfter -cne $gitCommit -or
