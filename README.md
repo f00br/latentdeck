@@ -6,6 +6,7 @@ applications, and extension contracts for working on latent signals before
 they become pixels.
 
 [Download the Windows preview](https://github.com/f00br/latentdeck/releases) ·
+[Watch the Quick Start](#quick-start-video-latent-mixing-and-resampling) ·
 [Play the demo pack](#quick-start-play-the-demo-pack) ·
 [Artist workflow](docs/guides/ARTIST_WORKFLOW.md) ·
 [Developer documentation](docs/developers/README.md) ·
@@ -14,6 +15,19 @@ they become pixels.
 ![LatentDeck D2 mixing two compatible H3 cartridges into an active post-operator stream](docs/assets/showcase/latentdeck-d2-live-synthesis.png)
 
 *LatentDeck D2 performing a two-source latent synthesis before H3 decode.*
+
+## Quick Start video: latent mixing and resampling
+
+<p>
+  <a href="https://youtu.be/NKyJiUL5ICc">
+    <img src="docs/assets/showcase/latentdeck-quick-start-video.jpg" width="640" alt="Watch the LatentDeck 0.1 Quick Start: installation, playback, latent mixing, and resampling">
+  </a>
+</p>
+
+**[Watch the 7-minute Quick Start on YouTube](https://youtu.be/NKyJiUL5ICc)**
+— install LatentPlayer, LatentDeck, and the H3 Codec Pack; select the decoder;
+play and convert cartridges; mix compatible H3 sources with D2; and resample
+the post-operator stream into a new reusable `.lc`.
 
 [Library](docs/assets/screenshots/latentdeck-library-empty.png) ·
 [D2 faceplate](docs/assets/screenshots/latentdeck-d2-missing-codec.png) ·
@@ -90,12 +104,13 @@ implemented codec profile, not the definition of the format.
    `4fd022bfcab08772fe0536b17ea1a3bbb5625be11e397868d1c5d891863d4c13`.
    Arbitrary renamed weights are refused.
 
-5. Download the three cartridges and `SHA256SUMS.txt` from the pinned
-   [LatentDeck Demo LC Pack](https://huggingface.co/datasets/f00br/latentdeck-demo-lc-pack/tree/0e7b98f7152607c2d1709a896f9173859886ad79).
-   The files share the same 1344 × 768 H3 synthesis geometry. The pack is
-   separate from this repository and release and is licensed under CC BY 4.0;
-   credit **f00br** and **LatentDeck Demo LC Pack**, link the dataset and
-   license, and indicate changes when sharing or adapting it. See the
+5. Download the eight cartridges and `SHA256SUMS.txt` from the pinned
+   [LatentDeck Demo LC Pack](https://huggingface.co/datasets/f00br/latentdeck-demo-lc-pack/tree/67402c05f9155fa3af7d2d89a1bd0477a358f05f).
+   The pack contains seven source cartridges and one D2 live-capture resample;
+   all eight share the same 1344 × 768 H3 synthesis compatibility key. The
+   pack is separate from this repository and release and is licensed under CC
+   BY 4.0; credit **f00br** and **LatentDeck Demo LC Pack**, link the dataset
+   and license, and indicate changes when sharing or adapting it. See the
    [demo-pack identity, attribution, and checksums](docs/guides/DEMO_CARTRIDGES.md).
 
 6. Choose a first path:
@@ -104,13 +119,14 @@ implemented codec profile, not the definition of the format.
      press **Play**.
    - **Deck:** select **Import .LC files**, open LD-D2, assign any two demo
      cartridges to A/B, then select **Load exact Deck draft**. Q4 has four
-     slots; a cartridge may be reused, although three files do not demonstrate
-     four-source diversity.
+     slots; the seven distinct source cartridges provide enough material for
+     a four-source session without reusing a file.
 
 7. Continue with **Snapshot** or **Live Capture** to make a new `.lc`, or use
-   **Record MP4** or Spout2 for decoded output. The demo cartridges contain an
-   audio latent, but 0.1 preserves it without audio playback or synthesis;
-   MP4 output is video-only.
+   **Record MP4** or Spout2 for decoded output. The seven source cartridges
+   contain an audio latent; the included resample records why audio was
+   omitted. Version 0.1 has no audio playback or synthesis, and MP4 output is
+   video-only.
 
 For installation details, update/removal behavior, and the Comfy LC Recorder,
 follow the [Windows installation guide](docs/guides/WINDOWS_INSTALL.md). The

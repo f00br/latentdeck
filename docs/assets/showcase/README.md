@@ -27,3 +27,30 @@ hardware that is not named by a release receipt.
 The screenshot was reviewed for visible credentials, machine-local paths,
 private prompts, and unrelated user data. It contains only the application UI,
 descriptive cartridge filenames, and the intended generated visual output.
+
+## `latentdeck-quick-start-video.jpg`
+
+- SHA-256: `ff57b6d3a6ff816cdd1221aad9cae3d1dcb0e78d36108c22e06a5f8680d94c21`
+- Byte length: `526641`
+- Dimensions: `2560 × 1440`
+- Author and rights holder: project owner `@f00br`
+- Origin: an original frame captured from the final LatentDeck 0.1 Quick Start
+  video and supplied by `@f00br` on 2026-09-05 for public project
+  documentation
+- Application state: bundled LD-D2 Deck Package `0.2.1`, `knight.lc` and
+  `landscape.lc`, an active XS5 post-operator stream, and decoded in-window
+  output
+- Source media: the originating cartridges are distributed separately through
+  the reviewed demo pack; no cartridge, raw latent, decoder, model weight,
+  prompt, workflow, or local path is embedded as a repository payload
+- Edits: none; the supplied JPEG is stored byte-for-byte and displayed at a
+  bounded width by the README
+- Redistribution: approved by the project owner as LatentDeck documentation
+  under the repository's Apache-2.0 license
+- Intended use: compact linked preview for the public Quick Start video
+- Alt text: “Watch the LatentDeck 0.1 Quick Start: installation, playback,
+  latent mixing, and resampling”
+
+The frame was reviewed for visible credentials, machine-local paths, private
+prompts, and unrelated user data. It contains only the application UI,
+descriptive cartridge filenames, and the intended generated visual output.
