@@ -105,12 +105,24 @@ turn an advisory result into an unreviewed dependency update.
       `signing.mode=unsigned_local_rc` and its Authenticode evidence fields.
       Filenames and release prose say `unsigned` where required.
 - [ ] Every nested checksum and copied-destination hash was recomputed.
-- [ ] Each GitHub asset is below the [GitHub Releases 2 GiB per-file
+- [ ] The staging directory contains exactly the Artist Starter, Comfy
+      Recorder, Developer Kit, Release Evidence, and outer checksum assets;
+      each is below the [GitHub Releases 2 GiB per-file
       limit](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases)
-      and appears exactly once in the staging allowlist with a unique flat
-      name.
-- [ ] Unified `RELEASE-MANIFEST.json` and `SHA256SUMS.txt` describe every
-      uploaded asset and no extra file.
+      and has its unique allowlisted name.
+- [ ] The Artist Starter has deterministic timestamps and an exact internal
+      inventory: both application installers, adjacent H3 setup/`.ldcodec`,
+      `README-FIRST.txt`, required license/notices, and its checksum manifest.
+- [ ] The Recorder and Developer Kit ZIPs are byte-identical to their validated
+      artifact-set outputs.
+- [ ] The Release Evidence ZIP contains the release manifest and all receipts,
+      input checksums, artifact-scoped SBOMs, licenses, notices, and smoke
+      records; its internal checksum covers every entry except itself.
+- [ ] The outer checksum covers exactly the other four release assets and
+      conventionally excludes itself. `RELEASE-MANIFEST.json` records all five
+      filenames, roles, and display labels, with direct hashes for the three
+      primary payload archives and an explicit outer-checksum binding for the
+      evidence archive.
 - [ ] SBOMs, notices, setup/uninstall licenses, and build receipts are
       hash-bound to the appropriate artifact.
 
@@ -229,8 +241,11 @@ Run `pwsh -NoProfile -File tools/Test-DeveloperOnboarding.ps1`, then confirm:
 - [ ] Public-safe showcase media and provenance are committed before the public
       switch; the final RC was rebuilt after that commit.
 - [ ] The annotated release tag resolves to the exact validated commit.
-- [ ] The draft prerelease contains only staged allowlisted assets.
-- [ ] Every downloaded draft asset re-hashes against the unified checksum file.
+- [ ] The draft prerelease contains exactly the five staged allowlisted assets
+      with the display labels recorded in `RELEASE-MANIFEST.json`.
+- [ ] Every downloaded non-checksum draft asset re-hashes against the outer
+      checksum file; the checksum manifest itself is reviewed as canonical
+      UTF-8/LF text from the official release page.
 - [ ] Release notes disclose the unsigned state, system/runtime boundary,
       external decoder, separate demo-pack terms, executable-extension trust,
       and known limitations.

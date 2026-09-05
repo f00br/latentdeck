@@ -162,7 +162,7 @@ Keep behavior/artistic acceptance distinct from final packaging evidence. A
 previous functional pass can remain valid when runtime code is unchanged, but
 the final installers still require source-identity, install, and smoke checks.
 
-## 6. Stage flat GitHub assets
+## 6. Stage the five-file GitHub release
 
 Use the staging tool with the four complete artifact directories and a new
 output directory:
@@ -176,14 +176,36 @@ pwsh -NoProfile -File tools/Stage-GitHubRelease.ps1 `
   -OutputDirectory <new-release-staging-directory>
 ```
 
-The tool requires one source commit and release channel, verifies nested
-checksums, applies an exact asset allowlist, assigns unique flat names, refuses
-overwrite, rejects any file at or above the [GitHub Releases 2 GiB per-file
-limit](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases),
-and emits unified `RELEASE-MANIFEST.json` and `SHA256SUMS.txt`.
+The tool requires one source commit and release channel, verifies every nested
+checksum and receipt, refuses overwrite, and rejects any resulting file at or
+above the [GitHub Releases 2 GiB per-file
+limit](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases).
+It emits exactly these five assets for the preview:
 
-Review the complete staged directory. No installer, receipt, checksum, SBOM, or
-notice may be replaced without restaging and repeating validation.
+| Asset | GitHub display label |
+| --- | --- |
+| `LatentDeck-0.1.0-preview.1-Artist-Starter-Windows-x64-unsigned.zip` | `For artists - Player, LatentDeck, and H3 Codec Pack` |
+| `LatentDeck-0.1.0-preview.1-comfy-recorder-windows-x64.zip` | `For ComfyUI - LC Recorder for Windows x64` |
+| `LatentDeck-0.1.0-preview.1-developer-kit-windows-x64.zip` | `For developers - SDKs, examples, and tools` |
+| `LatentDeck-0.1.0-preview.1-Release-Evidence.zip` | `Verification - receipts, SBOMs, licenses, and manifests` |
+| `LatentDeck-0.1.0-preview.1-SHA256SUMS.txt` | `Verification - SHA-256 checksums` |
+
+The Artist Starter contains both application installers and an `H3-Codec`
+directory where setup remains adjacent to its exact hash-bound `.ldcodec`. It
+also contains `README-FIRST.txt`, the project and redistributed third-party
+license material, and an internal checksum manifest. The Recorder and
+Developer Kit archives remain byte-identical to their validated artifact-set
+outputs. The Release Evidence archive contains the source receipts, input
+checksum manifests, artifact-scoped SBOMs, licenses, notices, smoke records,
+and `RELEASE-MANIFEST.json`; its internal checksum verifies that inventory.
+The outer checksum covers the other four release assets and conventionally
+excludes itself.
+
+Apply the exact display labels recorded in `RELEASE-MANIFEST.json` when
+uploading the assets. Review the complete five-file staged directory and both
+archive inventories. No installer, archive, receipt, checksum, SBOM, license,
+notice, or manifest may be replaced without restaging and repeating
+validation.
 
 ## 7. Prepare the private repository
 
@@ -207,8 +229,9 @@ from a new clean clone afterward.
 1. Create the annotated tag `v0.1.0-preview.1` only after release-authority
    approval, pointing to the exact validated source commit.
 2. Create a draft GitHub prerelease and upload only the staged allowlist.
-3. Download every asset anonymously where possible and compare SHA-256 with the
-   unified checksum file.
+3. Download every asset anonymously where possible. Compare each of the four
+   non-checksum assets with the outer checksum file, and separately review the
+   checksum file as canonical UTF-8/LF text from the official release page.
 4. Verify release notes, installer warning, SBOM/notices, source archive, and
    links while the repository remains private.
 5. Obtain explicit approval for the visibility change and prerelease

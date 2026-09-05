@@ -51,22 +51,27 @@ implemented codec profile, not the definition of the format.
 > every SHA-256 before accepting an unknown-publisher or SmartScreen warning.
 
 1. From one [GitHub release](https://github.com/f00br/latentdeck/releases),
-   download `SHA256SUMS.txt` and the components you need:
+   download the checksum file and the package for your path:
 
    | Purpose | Download |
    | --- | --- |
-   | Play one cartridge | `LatentPlayer-0.1.0-preview.1-windows-x64-unsigned-setup.exe` |
-   | Organize and synthesize cartridges | `LatentDeck-0.1.0-preview.1-windows-x64-unsigned-setup.exe` |
-   | Decode H3 in either application | both `LatentDeck-H3-CodecPack-0.2.1-setup.exe` and `LatentDeck-H3-CodecPack-0.2.1-windows-x64.ldcodec` |
+   | Play cartridges or perform with D2/Q4 | `LatentDeck-0.1.0-preview.1-Artist-Starter-Windows-x64-unsigned.zip` |
+   | Record `.lc` cartridges in ComfyUI | `LatentDeck-0.1.0-preview.1-comfy-recorder-windows-x64.zip` |
+   | Build operators, Decks, Codecs, or cartridge tools | `LatentDeck-0.1.0-preview.1-developer-kit-windows-x64.zip` |
+   | Audit receipts, SBOMs, licenses, and manifests | `LatentDeck-0.1.0-preview.1-Release-Evidence.zip` |
+   | Verify any release download | `LatentDeck-0.1.0-preview.1-SHA256SUMS.txt` |
 
-   Keep the H3 setup and its exact `.ldcodec` side by side. Verify each file
-   with, for example,
-   `Get-FileHash -Algorithm SHA256 .\LatentPlayer-0.1.0-preview.1-windows-x64-unsigned-setup.exe`,
-   and compare it with `SHA256SUMS.txt`.
+   Verify the Artist Starter with, for example,
+   `Get-FileHash -Algorithm SHA256 .\LatentDeck-0.1.0-preview.1-Artist-Starter-Windows-x64-unsigned.zip`,
+   and compare it with
+   `LatentDeck-0.1.0-preview.1-SHA256SUMS.txt`. Extract the entire ZIP, then
+   verify its internal `SHA256SUMS.txt`; extraction keeps the H3 setup beside
+   its exact `.ldcodec` payload.
 
-2. Run the chosen application installer or install both, then run the H3
-   setup. In each application, open **Extensions**, refresh, find exact H3
-   `0.2.1`, and select **Enable**.
+2. From the extracted Artist Starter, run the chosen installer under
+   `Installers` or install both, then run the setup under `H3-Codec`. In each
+   application, open **Extensions**, refresh, find exact H3 `0.2.1`, and
+   select **Enable**.
 
 3. Configure the runtime explicitly:
 
@@ -86,11 +91,12 @@ implemented codec profile, not the definition of the format.
    Arbitrary renamed weights are refused.
 
 5. Download the three cartridges and `SHA256SUMS.txt` from the pinned
-   [LatentDeck Demo LC Pack](https://huggingface.co/datasets/f00br/latentdeck-demo-lc-pack/tree/a8eab9786d3efe2441ea18b14e7f61bb8ca7e665).
+   [LatentDeck Demo LC Pack](https://huggingface.co/datasets/f00br/latentdeck-demo-lc-pack/tree/0e7b98f7152607c2d1709a896f9173859886ad79).
    The files share the same 1344 × 768 H3 synthesis geometry. The pack is
-   separate from this repository and release; its current card does not grant
-   reuse or redistribution rights, so treat it as evaluation material and do
-   not mirror it. See the [demo-pack identity and checksums](docs/guides/DEMO_CARTRIDGES.md).
+   separate from this repository and release and is licensed under CC BY 4.0;
+   credit **f00br** and **LatentDeck Demo LC Pack**, link the dataset and
+   license, and indicate changes when sharing or adapting it. See the
+   [demo-pack identity, attribution, and checksums](docs/guides/DEMO_CARTRIDGES.md).
 
 6. Choose a first path:
 

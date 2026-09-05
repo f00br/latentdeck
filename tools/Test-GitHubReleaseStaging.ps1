@@ -178,6 +178,108 @@ function Write-ZipWithFile {
     }
 }
 
+function Read-ZipTextEntry {
+    param(
+        [Parameter(Mandatory)][string]$ArchivePath,
+        [Parameter(Mandatory)][string]$EntryName
+    )
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+    try {
+        $matches = @($archive.Entries | Where-Object { $_.FullName -ceq $EntryName })
+        if ($matches.Count -ne 1 -or $matches[0].Length -le 0 -or $matches[0].Length -gt 16MB) {
+            throw "ZIP does not contain one bounded text entry: $EntryName"
+        }
+        $stream = $matches[0].Open()
+        $memory = [System.IO.MemoryStream]::new()
+        try {
+            $stream.CopyTo($memory)
+            $bytes = $memory.ToArray()
+        } finally {
+            $memory.Dispose()
+            $stream.Dispose()
+        }
+    } finally {
+        $archive.Dispose()
+    }
+    return [System.Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+}
+
+function Get-ZipEntryHash {
+    param(
+        [Parameter(Mandatory)][System.IO.Compression.ZipArchive]$Archive,
+        [Parameter(Mandatory)][string]$EntryName
+    )
+
+    $matches = @($Archive.Entries | Where-Object { $_.FullName -ceq $EntryName })
+    if ($matches.Count -ne 1) {
+        throw "ZIP does not contain exactly one required entry: $EntryName"
+    }
+    $stream = $matches[0].Open()
+    $hasher = [System.Security.Cryptography.IncrementalHash]::CreateHash(
+        [System.Security.Cryptography.HashAlgorithmName]::SHA256
+    )
+    try {
+        $buffer = [byte[]]::new(1MB)
+        while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $hasher.AppendData($buffer, 0, $read)
+        }
+        return [System.Convert]::ToHexString($hasher.GetHashAndReset()).ToLowerInvariant()
+    } finally {
+        $hasher.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Assert-ZipContract {
+    param(
+        [Parameter(Mandatory)][string]$ArchivePath,
+        [Parameter(Mandatory)][string[]]$ExpectedEntries,
+        [Parameter(Mandatory)][string]$ChecksumEntry,
+        [Parameter(Mandatory)][string[]]$ExpectedChecksumCoverage
+    )
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+    try {
+        $actual = @($archive.Entries | ForEach-Object { $_.FullName } | Sort-Object -CaseSensitive)
+        $expected = @($ExpectedEntries | Sort-Object -CaseSensitive)
+        if (($actual -join "`0") -cne ($expected -join "`0") -or
+            @($archive.Entries | Where-Object {
+                $_.LastWriteTime.DateTime -ne [datetime]::new(1980, 1, 1, 0, 0, 0)
+            }).Count -gt 0) {
+            throw "ZIP inventory or deterministic timestamp contract failed: $ArchivePath"
+        }
+        $checksumText = Read-ZipTextEntry -ArchivePath $ArchivePath -EntryName $ChecksumEntry
+        if (-not $checksumText.EndsWith("`n", [System.StringComparison]::Ordinal) -or
+            $checksumText.Contains("`r")) {
+            throw "ZIP checksum entry is not canonical LF text: $ChecksumEntry"
+        }
+        $records = [System.Collections.Generic.Dictionary[string, string]]::new(
+            [System.StringComparer]::Ordinal
+        )
+        foreach ($line in @($checksumText.Split("`n") | Where-Object { $_.Length -gt 0 })) {
+            if ($line -cnotmatch '^(?<hash>[0-9a-f]{64})  (?<name>[^\\]+)$' -or
+                -not $records.TryAdd($Matches.name, $Matches.hash)) {
+                throw "ZIP checksum line is invalid or duplicated: $line"
+            }
+        }
+        $covered = @($records.Keys | Sort-Object -CaseSensitive)
+        $expectedCovered = @($ExpectedChecksumCoverage | Sort-Object -CaseSensitive)
+        if (($covered -join "`0") -cne ($expectedCovered -join "`0")) {
+            throw "ZIP checksum coverage is not exact: $ArchivePath"
+        }
+        foreach ($entryName in $expectedCovered) {
+            if ((Get-ZipEntryHash -Archive $archive -EntryName $entryName) -cne $records[$entryName]) {
+                throw "ZIP checksum verification failed: $entryName"
+            }
+        }
+    } finally {
+        $archive.Dispose()
+    }
+}
+
 try {
     $appRoot = Join-Path $testRoot 'app'
     $codecRoot = Join-Path $testRoot 'codec'
@@ -1429,9 +1531,114 @@ try {
         [System.IO.Path]::GetFullPath($output)) {
         throw 'GitHub Release staging returned an unexpected output directory.'
     }
-    $manifest = Get-Content -LiteralPath (Join-Path $output 'RELEASE-MANIFEST.json') -Raw |
+    $artistStarterName = "LatentDeck-$releaseLabel-Artist-Starter-Windows-x64-unsigned.zip"
+    $evidenceName = "LatentDeck-$releaseLabel-Release-Evidence.zip"
+    $outerSumsName = "LatentDeck-$releaseLabel-SHA256SUMS.txt"
+    $expectedOuterFiles = @(
+        $artistStarterName,
+        $recorderArchiveName,
+        $developerArchive,
+        $evidenceName,
+        $outerSumsName
+    ) | Sort-Object -CaseSensitive
+    $actualOuterFiles = @(
+        Get-ChildItem -LiteralPath $output -File -Force |
+            Select-Object -ExpandProperty Name |
+            Sort-Object -CaseSensitive
+    )
+    if (($actualOuterFiles -join "`0") -cne ($expectedOuterFiles -join "`0")) {
+        throw 'GitHub Release staging did not produce the exact five-file user-facing layout.'
+    }
+
+    $artistEntries = @(
+        'README-FIRST.txt',
+        'LICENSE.txt',
+        "Installers/$($appNames[0])",
+        "Installers/$($appNames[1])",
+        "H3-Codec/$setupName",
+        "H3-Codec/$archiveName",
+        'Licenses/Applications-THIRD-PARTY-NOTICES.md',
+        'Licenses/Applications-THIRD-PARTY-LICENSES.json',
+        'Licenses/H3-CodecPack-THIRD-PARTY-NOTICES.md',
+        'Licenses/H3-CodecPack-NSIS-COPYING.txt',
+        'Licenses/H3-CodecPack-RUST-LICENSES.txt',
+        'SHA256SUMS.txt'
+    )
+    Assert-ZipContract `
+        -ArchivePath (Join-Path $output $artistStarterName) `
+        -ExpectedEntries $artistEntries `
+        -ChecksumEntry 'SHA256SUMS.txt' `
+        -ExpectedChecksumCoverage @($artistEntries | Where-Object { $_ -cne 'SHA256SUMS.txt' })
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $artistArchive = [System.IO.Compression.ZipFile]::OpenRead(
+        (Join-Path $output $artistStarterName)
+    )
+    try {
+        if ((Get-ZipEntryHash -Archive $artistArchive -EntryName "Installers/$($appNames[0])") -cne
+                (Get-FileHash -LiteralPath (Join-Path $appRoot "installers/$($appNames[0])") -Algorithm SHA256).Hash.ToLowerInvariant() -or
+            (Get-ZipEntryHash -Archive $artistArchive -EntryName "Installers/$($appNames[1])") -cne
+                (Get-FileHash -LiteralPath (Join-Path $appRoot "installers/$($appNames[1])") -Algorithm SHA256).Hash.ToLowerInvariant() -or
+            (Get-ZipEntryHash -Archive $artistArchive -EntryName "H3-Codec/$setupName") -cne
+                (Get-FileHash -LiteralPath (Join-Path $codecRoot $setupName) -Algorithm SHA256).Hash.ToLowerInvariant() -or
+            (Get-ZipEntryHash -Archive $artistArchive -EntryName "H3-Codec/$archiveName") -cne
+                (Get-FileHash -LiteralPath (Join-Path $codecRoot $archiveName) -Algorithm SHA256).Hash.ToLowerInvariant()) {
+            throw 'Artist Starter does not contain the exact validated application and H3 bytes.'
+        }
+    } finally {
+        $artistArchive.Dispose()
+    }
+
+    $evidenceEntries = @(
+        'README.txt',
+        'LICENSE.txt',
+        'RELEASE-MANIFEST.json',
+        'Applications/BUILD-COMMANDS.txt',
+        'Applications/INPUT-SHA256SUMS.txt',
+        'Applications/RELEASE-RECEIPT.json',
+        'Applications/LatentDeck-App-SBOM.cdx.json',
+        'Applications/LatentPlayer-SBOM.cdx.json',
+        'Applications/THIRD-PARTY-NOTICES.md',
+        'Applications/THIRD-PARTY-LICENSES.json',
+        'H3-CodecPack/ARCHIVE-RUNTIME-SMOKE.json',
+        'H3-CodecPack/DISTRIBUTABLE-PROOF.json',
+        'H3-CodecPack/INSTALLED-RUNTIME-SMOKE.json',
+        'H3-CodecPack/INPUT-SHA256SUMS.txt',
+        'H3-CodecPack/INSTALLER-SBOM.cdx.json',
+        'H3-CodecPack/INSTALLER-THIRD-PARTY-NOTICES.md',
+        'H3-CodecPack/INSTALLER-NSIS-COPYING.txt',
+        'H3-CodecPack/INSTALLER-RUST-LICENSES.txt',
+        'H3-CodecPack/PACKAGE-RECEIPT.json',
+        'H3-CodecPack/SETUP-RECEIPT.json',
+        'Developer-Kit/INPUT-SHA256SUMS.txt',
+        'Developer-Kit/LICENSE-REVIEW.json',
+        'Developer-Kit/RECEIPT.json',
+        'Developer-Kit/SBOM.cdx.json',
+        'Developer-Kit/THIRD-PARTY-NOTICES.md',
+        'Developer-Kit/THIRD-PARTY-LICENSES.json',
+        'Comfy-Recorder/INPUT-SHA256SUMS.txt',
+        'Comfy-Recorder/LICENSE-REVIEW.json',
+        'Comfy-Recorder/RECEIPT.json',
+        'Comfy-Recorder/SBOM.cdx.json',
+        'Comfy-Recorder/THIRD-PARTY-NOTICES.md',
+        'Comfy-Recorder/THIRD-PARTY-LICENSES.json',
+        'EVIDENCE-SHA256SUMS.txt'
+    )
+    Assert-ZipContract `
+        -ArchivePath (Join-Path $output $evidenceName) `
+        -ExpectedEntries $evidenceEntries `
+        -ChecksumEntry 'EVIDENCE-SHA256SUMS.txt' `
+        -ExpectedChecksumCoverage @(
+            $evidenceEntries | Where-Object { $_ -cne 'EVIDENCE-SHA256SUMS.txt' }
+        )
+    $manifest = Read-ZipTextEntry `
+        -ArchivePath (Join-Path $output $evidenceName) `
+        -EntryName 'RELEASE-MANIFEST.json' |
         ConvertFrom-Json -Depth 100
-    if ($manifest.release_label -cne $releaseLabel -or
+    if ([int]$manifest.schema_version -ne 2 -or
+        [string]$manifest.release_layout -cne 'five_file_user_first' -or
+        [int]$manifest.outer_asset_count -ne 5 -or
+        $manifest.release_label -cne $releaseLabel -or
         $manifest.release_channel -cne $releaseChannel -or
         -not [bool]$manifest.prerelease -or
         [string]$manifest.identities.decks.d2.deck_version -cne '0.2.1' -or
@@ -1450,13 +1657,37 @@ try {
         [string]$manifest.source.git_tree -cne $tree -or
         [string]$manifest.source.public_snapshot_sha256 -cne $publicSnapshot -or
         [int64]$manifest.source.public_snapshot_file_count -ne $publicSnapshotFileCount -or
-        @($manifest.assets).Count -ne 31 -or
-        @($manifest.assets | Group-Object name | Where-Object Count -ne 1).Count -gt 0) {
+        @($manifest.assets).Count -ne 5 -or
+        (@($manifest.assets.name | Sort-Object -CaseSensitive) -join "`0") -cne
+            ($expectedOuterFiles -join "`0") -or
+        @($manifest.assets | Where-Object {
+            [string]::IsNullOrWhiteSpace([string]$_.display_label) -or
+            [string]::IsNullOrWhiteSpace([string]$_.role)
+        }).Count -gt 0 -or
+        @($manifest.assets | Where-Object {
+            [string]$_.verification.method -ceq 'manifest_sha256' -and
+            ([int64]$_.verification.byte_length -le 0 -or
+             [string]$_.verification.sha256 -cnotmatch '^[0-9a-f]{64}$')
+        }).Count -ne 0 -or
+        @($manifest.assets | Where-Object {
+            [string]$_.verification.method -ceq 'manifest_sha256'
+        }).Count -ne 3) {
         throw 'GitHub Release manifest identity or unique asset inventory is incorrect.'
     }
-    $sumLines = @(Get-Content -LiteralPath (Join-Path $output 'SHA256SUMS.txt'))
-    if ($sumLines.Count -ne 32) {
-        throw 'GitHub Release checksum manifest must cover thirty-one assets and RELEASE-MANIFEST.json.'
+    foreach ($asset in @($manifest.assets | Where-Object {
+        [string]$_.verification.method -ceq 'manifest_sha256'
+    })) {
+        $assetPath = Join-Path $output ([string]$asset.name)
+        $assetItem = Get-Item -LiteralPath $assetPath -Force
+        if ([int64]$assetItem.Length -ne [int64]$asset.verification.byte_length -or
+            (Get-FileHash -LiteralPath $assetItem.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+                [string]$asset.verification.sha256) {
+            throw "Release manifest primary payload binding failed: $($asset.name)"
+        }
+    }
+    $sumLines = @(Get-Content -LiteralPath (Join-Path $output $outerSumsName))
+    if ($sumLines.Count -ne 4) {
+        throw 'GitHub Release checksum manifest must cover exactly four non-checksum assets.'
     }
     foreach ($line in $sumLines) {
         if ($line -cnotmatch '^(?<hash>[0-9a-f]{64})  (?<name>[^/\\]+)$') {
@@ -1466,6 +1697,27 @@ try {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or
             (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $Matches.hash) {
             throw "GitHub Release checksum verification failed: $($Matches.name)"
+        }
+    }
+
+    if ((Get-FileHash -LiteralPath (Join-Path $output $recorderArchiveName) -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+            [string]$recorderReceipt.archive.sha256 -or
+        (Get-FileHash -LiteralPath (Join-Path $output $developerArchive) -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+            [string]$developerReceipt.archive.sha256) {
+        throw 'Byte-identical Recorder or Developer Kit release asset was not preserved.'
+    }
+
+    $deterministicOutput = Join-Path $testRoot 'release-output-deterministic'
+    & (Join-Path $PSScriptRoot 'Stage-GitHubRelease.ps1') `
+        -ApplicationArtifactDirectory $appRoot `
+        -CodecArtifactDirectory $codecRoot `
+        -DeveloperKitArtifactDirectory $developerRoot `
+        -ComfyRecorderArtifactDirectory $recorderRoot `
+        -OutputDirectory $deterministicOutput | Out-Null
+    foreach ($name in $expectedOuterFiles) {
+        if ((Get-FileHash -LiteralPath (Join-Path $output $name) -Algorithm SHA256).Hash -cne
+            (Get-FileHash -LiteralPath (Join-Path $deterministicOutput $name) -Algorithm SHA256).Hash) {
+            throw "GitHub Release five-file staging is not deterministic: $name"
         }
     }
 

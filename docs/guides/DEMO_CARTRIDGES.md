@@ -7,8 +7,8 @@ the GitHub release, the H3 Codec Pack, or the decoder asset.
 ## Pinned distribution
 
 - Friendly page: [LatentDeck Demo LC Pack](https://huggingface.co/datasets/f00br/latentdeck-demo-lc-pack)
-- Reviewed revision: [`a8eab9786d3efe2441ea18b14e7f61bb8ca7e665`](https://huggingface.co/datasets/f00br/latentdeck-demo-lc-pack/tree/a8eab9786d3efe2441ea18b14e7f61bb8ca7e665)
-- Published checksums: [`SHA256SUMS.txt`](https://huggingface.co/datasets/f00br/latentdeck-demo-lc-pack/blob/a8eab9786d3efe2441ea18b14e7f61bb8ca7e665/SHA256SUMS.txt)
+- Reviewed revision: [`0e7b98f7152607c2d1709a896f9173859886ad79`](https://huggingface.co/datasets/f00br/latentdeck-demo-lc-pack/tree/0e7b98f7152607c2d1709a896f9173859886ad79)
+- Published checksums: [`SHA256SUMS.txt`](https://huggingface.co/datasets/f00br/latentdeck-demo-lc-pack/blob/0e7b98f7152607c2d1709a896f9173859886ad79/SHA256SUMS.txt)
 
 Use the pinned revision for a reproducible first-run test. A later change to
 the friendly page does not change the files reviewed here.
@@ -74,12 +74,13 @@ or the complete [artist workflow](ARTIST_WORKFLOW.md).
 
 ## Media terms and provenance status
 
-The reviewed Hugging Face revision does not declare a payload license and does
-not yet record sufficient human/source authorship and redistribution-rights
-provenance. Download and use it as evaluation material only; do not mirror,
-redistribute, or imply a broader permission. This limitation applies to the
-separate cartridge media, not to LatentDeck source code.
+The three `.lc` cartridge media files and their dataset documentation are
+licensed under the [Creative Commons Attribution 4.0 International
+license](https://creativecommons.org/licenses/by/4.0/) (CC BY 4.0).
 
-Before the pack is presented as reusable or remixable community media, its
-owner must publish truthful creator/source provenance, confirm the relevant
-rights, choose explicit media terms, and create a new pinned revision.
+When sharing or adapting this material, credit **f00br** and **LatentDeck Demo
+LC Pack**, link both the [dataset](https://huggingface.co/datasets/f00br/latentdeck-demo-lc-pack)
+and the license, and indicate whether changes were made. The CC BY 4.0 terms
+apply only to media and documentation in that Hugging Face dataset. LatentDeck
+source code and documentation use the repository license; no decoder, model
+weight, or third-party software is included or relicensed by the demo pack.

@@ -21,8 +21,9 @@ For a first playback or synthesis session, download `anim-hud.lc`, `knight.lc`,
 and `landscape.lc` from the pinned [LatentDeck Demo LC
 Pack](DEMO_CARTRIDGES.md). Verify its published hashes before opening the
 files. All three share the same H3 synthesis compatibility key; the Codec Pack
-and separately selected decoder are still required. The current pack is
-evaluation material and does not yet grant reuse or redistribution rights.
+and separately selected decoder are still required. The pack is licensed under
+CC BY 4.0; credit **f00br** and **LatentDeck Demo LC Pack**, link the dataset
+and license, and indicate changes when sharing or adapting it.
 
 ### Record during generation in ComfyUI
 

@@ -14,9 +14,8 @@ Recorder bundle.
 
 For a first run, use the separately hosted [LatentDeck Demo LC
 Pack](DEMO_CARTRIDGES.md). Its three pinned H3 cartridges share compatible
-1344 × 768 synthesis geometry. Its current card states no reuse or
-redistribution license, so this guide treats the pack as evaluation material;
-read its provenance status before further use.
+1344 × 768 synthesis geometry. The pack is licensed under CC BY 4.0; follow
+its attribution terms when sharing or adapting the cartridge media.
 
 The installers do not require administrator elevation. The H3 setup runs
 offline and does not require system Python, PowerShell, ComfyUI, either
@@ -25,31 +24,35 @@ application, or a network connection.
 ## Download one complete release set
 
 Download `v0.1.0-preview.1` only from [GitHub
-Releases](https://github.com/f00br/latentdeck/releases). The release contains
-these user-facing artifacts:
+Releases](https://github.com/f00br/latentdeck/releases). It has exactly five
+downloadable project assets:
 
-- `LatentDeck-0.1.0-preview.1-windows-x64-unsigned-setup.exe`;
-- `LatentPlayer-0.1.0-preview.1-windows-x64-unsigned-setup.exe`;
-- `LatentDeck-H3-CodecPack-0.2.1-setup.exe`;
-- `LatentDeck-H3-CodecPack-0.2.1-windows-x64.ldcodec`;
-- `LatentDeck-0.1.0-preview.1-comfy-recorder-windows-x64.zip` for artists who
-  record H3 latents inside ComfyUI;
-- `RELEASE-MANIFEST.json` and `SHA256SUMS.txt`.
+| Purpose | File |
+| --- | --- |
+| Player, LatentDeck, and H3 Codec Pack | `LatentDeck-0.1.0-preview.1-Artist-Starter-Windows-x64-unsigned.zip` |
+| Optional ComfyUI LC Recorder | `LatentDeck-0.1.0-preview.1-comfy-recorder-windows-x64.zip` |
+| Optional extension-authoring tools | `LatentDeck-0.1.0-preview.1-developer-kit-windows-x64.zip` |
+| Receipts, SBOMs, licenses, notices, and manifests | `LatentDeck-0.1.0-preview.1-Release-Evidence.zip` |
+| Outer checksums | `LatentDeck-0.1.0-preview.1-SHA256SUMS.txt` |
 
-The Developer Kit is optional and is intended for extension authors.
+GitHub also displays automatically generated source archives; artists do not
+need those files. Do not combine assets from different releases or mirror
+downloads.
 
-Do not combine files from different release pages or mirror downloads. Keep the
-H3 setup and its exact adjacent `.ldcodec` in the same directory. The setup is
-bound to that payload's filename, byte length, SHA-256, package ID, and version.
-
-Verify every downloaded file against `SHA256SUMS.txt` before running it:
+Verify every downloaded ZIP against the release checksum file before opening
+it:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\LatentDeck-0.1.0-preview.1-windows-x64-unsigned-setup.exe
+Get-FileHash -Algorithm SHA256 .\LatentDeck-0.1.0-preview.1-Artist-Starter-Windows-x64-unsigned.zip
 ```
 
-Repeat for every downloaded artifact. Compare the complete
+Repeat for every downloaded ZIP. Compare the complete
 lowercase/uppercase-insensitive hexadecimal digest, not a short prefix.
+Extract the entire Artist Starter to a new directory and check its internal
+`SHA256SUMS.txt` before running anything. Do not launch setup from inside a ZIP
+viewer. Full extraction preserves the required adjacency between the H3 setup
+and its exact `.ldcodec`; the setup is bound to that payload's filename, byte
+length, SHA-256, package ID, and version.
 
 ## Unsigned preview warning
 
@@ -65,19 +68,20 @@ decisions even after the applications are installed.
 
 ## Install the applications
 
-Run the LatentDeck and LatentPlayer installers separately. Each installs for the
-current Windows user. Either application can be installed, updated, or removed
-without installing or removing the other application, the H3 Codec Pack,
-cartridges, Library data, or decoder selection.
+Run the LatentDeck and LatentPlayer installers from the extracted Artist
+Starter's `Installers` directory. Each installs for the current Windows user.
+Either application can be installed, updated, or removed without installing or
+removing the other application, the H3 Codec Pack, cartridges, Library data,
+or decoder selection.
 
 Launch each installed application once. It should open without a cartridge or
 codec and provide Library/Extensions or diagnostic actions in that state.
 
 ## Install H3 Codec Pack 0.2.1
 
-1. Confirm the setup and `.ldcodec` filenames both contain `0.2.1` and remain
-   side by side.
-2. Run `LatentDeck-H3-CodecPack-0.2.1-setup.exe`.
+1. Open the extracted Artist Starter's `H3-Codec` directory. Confirm the setup
+   and `.ldcodec` filenames both contain `0.2.1` and remain side by side.
+2. Run `LatentDeck-H3-CodecPack-0.2.1-setup.exe` from that directory.
 3. Confirm **LatentDeck H3 Codec Pack 0.2.1** appears in Windows Installed Apps.
 4. Open **Extensions** in LatentPlayer or LatentDeck and refresh discovery.
 5. Find the exact H3 `0.2.1` pack and enable it. Installation does not enable a

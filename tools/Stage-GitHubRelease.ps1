@@ -698,6 +698,182 @@ function Write-Utf8Text {
     [System.IO.File]::WriteAllText($Path, $Text, [System.Text.UTF8Encoding]::new($false))
 }
 
+function Assert-SafeZipEntryName {
+    param([Parameter(Mandatory)][string]$Name)
+
+    $canonical = $Name.Replace('\', '/')
+    $segments = @($canonical.Split('/'))
+    if ([string]::IsNullOrWhiteSpace($canonical) -or
+        $canonical.Length -gt 240 -or
+        $canonical -cne $Name -or
+        [System.IO.Path]::IsPathRooted($canonical) -or
+        $canonical.Contains(':') -or
+        @($segments | Where-Object { $_ -ceq '' -or $_ -ceq '.' -or $_ -ceq '..' }).Count -gt 0) {
+        throw "Release bundle entry name is unsafe: $Name"
+    }
+}
+
+function New-ChecksumText {
+    param([Parameter(Mandatory)][object[]]$Mappings)
+
+    return ((@(
+        $Mappings |
+            Sort-Object EntryName -CaseSensitive |
+            ForEach-Object {
+                "$([string]$_.Record.Sha256)  $([string]$_.EntryName)"
+            }
+    ) -join "`n") + "`n")
+}
+
+function New-DeterministicBoundZip {
+    param(
+        [Parameter(Mandatory)][object[]]$Mappings,
+        [Parameter(Mandatory)][string]$DestinationPath,
+        [System.IO.Compression.CompressionLevel]$CompressionLevel =
+            [System.IO.Compression.CompressionLevel]::NoCompression
+    )
+
+    if (Test-Path -LiteralPath $DestinationPath) {
+        throw "Refusing to overwrite a release bundle: $DestinationPath"
+    }
+    if ($Mappings.Count -eq 0 -or $Mappings.Count -gt 256) {
+        throw 'Release bundle has an invalid entry count.'
+    }
+    $orderedMappings = @($Mappings | Sort-Object EntryName -CaseSensitive)
+    $entryNames = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($mapping in $orderedMappings) {
+        Assert-SafeZipEntryName -Name ([string]$mapping.EntryName)
+        if (-not $entryNames.Add([string]$mapping.EntryName)) {
+            throw "Release bundle contains a duplicate entry: $($mapping.EntryName)"
+        }
+        $record = $mapping.Record
+        $sourceItem = Get-Item -LiteralPath ([string]$record.Path) -Force
+        if ($sourceItem.PSIsContainer -or
+            ($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            [int64]$sourceItem.Length -le 0 -or
+            [int64]$sourceItem.Length -ne [int64]$record.ByteLength -or
+            [string]$record.Sha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw "Release bundle source is not the exact validated regular file: $($record.Path)"
+        }
+    }
+
+    Add-Type -AssemblyName System.IO.Compression
+    $archiveStream = [System.IO.File]::Open(
+        $DestinationPath,
+        [System.IO.FileMode]::CreateNew,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None
+    )
+    try {
+        $archive = [System.IO.Compression.ZipArchive]::new(
+            $archiveStream,
+            [System.IO.Compression.ZipArchiveMode]::Create,
+            $true,
+            [System.Text.Encoding]::UTF8
+        )
+        try {
+            foreach ($mapping in $orderedMappings) {
+                $record = $mapping.Record
+                $entry = $archive.CreateEntry([string]$mapping.EntryName, $CompressionLevel)
+                $entry.LastWriteTime = [System.DateTimeOffset]::new(
+                    1980, 1, 1, 0, 0, 0, [System.TimeSpan]::Zero
+                )
+                $input = $null
+                $output = $null
+                $hasher = $null
+                $copiedBytes = [int64]0
+                try {
+                    $input = [System.IO.File]::Open(
+                        [string]$record.Path,
+                        [System.IO.FileMode]::Open,
+                        [System.IO.FileAccess]::Read,
+                        [System.IO.FileShare]::Read
+                    )
+                    $output = $entry.Open()
+                    $hasher = [System.Security.Cryptography.IncrementalHash]::CreateHash(
+                        [System.Security.Cryptography.HashAlgorithmName]::SHA256
+                    )
+                    $buffer = [byte[]]::new(1MB)
+                    while (($read = $input.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                        $output.Write($buffer, 0, $read)
+                        $hasher.AppendData($buffer, 0, $read)
+                        $copiedBytes += $read
+                    }
+                    $copyHash = [System.Convert]::ToHexString(
+                        $hasher.GetHashAndReset()
+                    ).ToLowerInvariant()
+                } finally {
+                    if ($null -ne $hasher) { $hasher.Dispose() }
+                    if ($null -ne $output) { $output.Dispose() }
+                    if ($null -ne $input) { $input.Dispose() }
+                }
+                if ($copiedBytes -ne [int64]$record.ByteLength -or
+                    $copyHash -cne [string]$record.Sha256) {
+                    throw (
+                        "Release bundle source changed after validation and was not staged: " +
+                        [string]$record.Path
+                    )
+                }
+            }
+        } finally {
+            $archive.Dispose()
+        }
+    } finally {
+        $archiveStream.Dispose()
+    }
+
+    $archiveItem = Get-Item -LiteralPath $DestinationPath -Force
+    if ($archiveItem.PSIsContainer -or
+        ($archiveItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        [int64]$archiveItem.Length -le 0 -or
+        [int64]$archiveItem.Length -ge $maximumGitHubAssetBytes) {
+        throw "Release bundle must be a regular non-empty file smaller than 2 GiB: $DestinationPath"
+    }
+
+    $readArchive = [System.IO.Compression.ZipFile]::OpenRead($archiveItem.FullName)
+    try {
+        $actualEntries = @($readArchive.Entries)
+        if ($actualEntries.Count -ne $orderedMappings.Count) {
+            throw 'Release bundle entry inventory changed after creation.'
+        }
+        foreach ($mapping in $orderedMappings) {
+            $matches = @($actualEntries | Where-Object {
+                [string]$_.FullName -ceq [string]$mapping.EntryName
+            })
+            if ($matches.Count -ne 1 -or
+                [int64]$matches[0].Length -ne [int64]$mapping.Record.ByteLength -or
+                $matches[0].LastWriteTime.DateTime -ne
+                    [datetime]::new(1980, 1, 1, 0, 0, 0)) {
+                throw "Release bundle entry metadata is invalid: $($mapping.EntryName)"
+            }
+            $entryStream = $matches[0].Open()
+            $entryHasher = [System.Security.Cryptography.IncrementalHash]::CreateHash(
+                [System.Security.Cryptography.HashAlgorithmName]::SHA256
+            )
+            try {
+                $buffer = [byte[]]::new(1MB)
+                while (($read = $entryStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    $entryHasher.AppendData($buffer, 0, $read)
+                }
+                $entryHash = [System.Convert]::ToHexString(
+                    $entryHasher.GetHashAndReset()
+                ).ToLowerInvariant()
+            } finally {
+                $entryHasher.Dispose()
+                $entryStream.Dispose()
+            }
+            if ($entryHash -cne [string]$mapping.Record.Sha256) {
+                throw "Release bundle entry hash differs after creation: $($mapping.EntryName)"
+            }
+        }
+    } finally {
+        $readArchive.Dispose()
+    }
+    return Get-FileIntegrityRecord -Path $archiveItem.FullName
+}
+
 $appRoot = Assert-ArtifactPath -Path $ApplicationArtifactDirectory -RequireExistingDirectory
 $codecRoot = Assert-ArtifactPath -Path $CodecArtifactDirectory -RequireExistingDirectory
 $developerRoot = Assert-ArtifactPath -Path $DeveloperKitArtifactDirectory -RequireExistingDirectory
@@ -2113,57 +2289,92 @@ try {
     foreach ($inputRoot in @($appRoot, $codecRoot, $developerRoot, $recorderRoot)) {
         Assert-ArtifactPath -Path $inputRoot -RequireExistingDirectory | Out-Null
     }
-    $assets = [System.Collections.Generic.List[object]]::new()
-    foreach ($mapping in @(
-        [pscustomobject]@{ Record = $deckApplicationRecord; Name = $deckInstallerName },
-        [pscustomobject]@{ Record = $playerApplicationRecord; Name = $playerInstallerName },
-        [pscustomobject]@{ Record = $codecSetupRecord; Name = [string]$codecReceipt.setup.name },
-        [pscustomobject]@{ Record = $codecArchiveRecord; Name = [string]$codecReceipt.archive.name },
-        [pscustomobject]@{ Record = $developerArchiveRecord; Name = $developerArchiveName },
-        [pscustomobject]@{ Record = $deckSbomRecord; Name = "LatentDeck-$releaseLabel-LatentDeck-App-SBOM.cdx.json" },
-        [pscustomobject]@{ Record = $playerSbomRecord; Name = "LatentDeck-$releaseLabel-LatentPlayer-SBOM.cdx.json" },
-        [pscustomobject]@{ Record = $codecChecksums['installer-SBOM.cdx.json']; Name = "LatentDeck-H3-CodecPack-$packVersion-installer-SBOM.cdx.json" },
-        [pscustomobject]@{ Record = $developerSbomRecord; Name = "LatentDeck-$releaseLabel-Developer-Kit-SBOM.cdx.json" },
-        [pscustomobject]@{ Record = $appChecksums['metadata/THIRD_PARTY_NOTICES.md']; Name = "LatentDeck-$releaseLabel-Applications-THIRD-PARTY-NOTICES.md" },
-        [pscustomobject]@{ Record = $applicationLicenseBundleRecord; Name = "LatentDeck-$releaseLabel-Applications-THIRD-PARTY-LICENSES.json" },
-        [pscustomobject]@{ Record = $codecChecksums['INSTALLER_THIRD_PARTY_NOTICES.md']; Name = "LatentDeck-H3-CodecPack-$packVersion-installer-THIRD-PARTY-NOTICES.md" },
-        [pscustomobject]@{ Record = $codecChecksums['INSTALLER_NSIS_COPYING.txt']; Name = "LatentDeck-H3-CodecPack-$packVersion-NSIS-COPYING.txt" },
-        [pscustomobject]@{ Record = $codecChecksums['INSTALLER_RUST_LICENSES.txt']; Name = "LatentDeck-H3-CodecPack-$packVersion-RUST-LICENSES.txt" },
-        [pscustomobject]@{ Record = $developerNoticesRecord; Name = "LatentDeck-$releaseLabel-Developer-Kit-THIRD-PARTY-NOTICES.md" },
-        [pscustomobject]@{ Record = $developerLicenseBundleRecord; Name = "LatentDeck-$releaseLabel-Developer-Kit-THIRD-PARTY-LICENSES.json" },
-        [pscustomobject]@{ Record = $developerLicenseRecord; Name = "LatentDeck-$releaseLabel-Developer-Kit-LICENSE-REVIEW.json" },
-        [pscustomobject]@{ Record = $recorderArchiveRecord; Name = "$recorderBaseName.zip" },
-        [pscustomobject]@{ Record = $recorderSbomRecord; Name = "$recorderBaseName-sbom.cdx.json" },
-        [pscustomobject]@{ Record = $recorderNoticesRecord; Name = "$recorderBaseName-THIRD-PARTY-NOTICES.md" },
-        [pscustomobject]@{ Record = $recorderLicenseBundleRecord; Name = "$recorderBaseName-THIRD-PARTY-LICENSES.json" },
-        [pscustomobject]@{ Record = $recorderLicenseReviewRecord; Name = "$recorderBaseName-license-review.json" },
-        [pscustomobject]@{ Record = $recorderReceiptRecord; Name = "$recorderBaseName.receipt.json" },
-        [pscustomobject]@{ Record = $recorderChecksumRecord; Name = "$recorderBaseName.SHA256SUMS.txt" },
-        [pscustomobject]@{ Record = $appReceiptRecord; Name = "LatentDeck-$releaseLabel-Applications-RECEIPT.json" },
-        [pscustomobject]@{ Record = $codecPackageReceiptRecord; Name = "LatentDeck-H3-CodecPack-$packVersion-PACKAGE-RECEIPT.json" },
-        [pscustomobject]@{ Record = $codecSetupReceiptRecord; Name = "LatentDeck-H3-CodecPack-$packVersion-SETUP-RECEIPT.json" },
-        [pscustomobject]@{ Record = $archiveSmokeRead.Integrity; Name = "LatentDeck-H3-CodecPack-$packVersion-ARCHIVE-RUNTIME-SMOKE.json" },
-        [pscustomobject]@{ Record = $installedSmokeRead.Integrity; Name = "LatentDeck-H3-CodecPack-$packVersion-INSTALLED-RUNTIME-SMOKE.json" },
-        [pscustomobject]@{ Record = $codecReceiptRecord; Name = "LatentDeck-H3-CodecPack-$packVersion-DISTRIBUTABLE-PROOF.json" },
-        [pscustomobject]@{ Record = $developerReceiptRecord; Name = "LatentDeck-$releaseLabel-Developer-Kit-RECEIPT.json" }
-    )) {
-        $assets.Add((Copy-ReleaseAsset `
-            -Source $mapping.Record.Path `
-            -DestinationName $mapping.Name `
-            -StageRoot $stageRoot `
-            -ExpectedByteLength $mapping.Record.ByteLength `
-            -ExpectedSha256 $mapping.Record.Sha256))
+    $workRoot = Join-Path $stageRoot '.bundle-work'
+    [System.IO.Directory]::CreateDirectory($workRoot) | Out-Null
+    $projectLicenseRecord = Get-FileIntegrityRecord -Path (Join-Path $repositoryRoot 'LICENSE')
+    $artistStarterName =
+        "LatentDeck-$releaseLabel-Artist-Starter-Windows-x64-$applicationTrustSuffix.zip"
+    $evidenceName = "LatentDeck-$releaseLabel-Release-Evidence.zip"
+    $outerChecksumName = "LatentDeck-$releaseLabel-SHA256SUMS.txt"
+
+    $artistReadmePath = Join-Path $workRoot 'artist-README-FIRST.txt'
+    $artistReadme = @"
+LatentDeck $releaseLabel - Artist Starter for Windows x64
+=========================================================
+
+UNSIGNED PREVIEW
+These installers are not Authenticode-signed. Verify the outer release ZIP
+against $outerChecksumName before extracting it, and verify this directory
+against SHA256SUMS.txt before running an installer.
+
+START HERE
+1. Extract this entire ZIP to a new directory. Do not run setup from inside
+   the ZIP viewer.
+2. Install either or both applications:
+   - Installers/$playerInstallerName plays one .lc cartridge.
+   - Installers/$deckInstallerName organizes cartridges and runs D2/Q4 latent
+     synthesis.
+3. Keep both files in H3-Codec in that same directory, then run:
+   H3-Codec/$([string]$codecReceipt.setup.name)
+4. In each application, open Extensions, refresh, enable H3 Codec Pack
+   $packVersion, and select it explicitly.
+5. The bundle does not contain decoder weights. Select the exact TAEH3 decoder
+   declared by H3: 22,709,752 bytes, SHA-256
+   4fd022bfcab08772fe0536b17ea1a3bbb5625be11e397868d1c5d891863d4c13
+   Source: https://raw.githubusercontent.com/madebyollin/taehv/62f7591f59dfbb4c3c02b7a621d180a9eeaba26c/safetensors/taeh3.safetensors
+6. Download demo cartridges from the pinned CC BY 4.0 pack:
+   https://huggingface.co/datasets/f00br/latentdeck-demo-lc-pack/tree/0e7b98f7152607c2d1709a896f9173859886ad79
+
+The Artist Starter contains no decoder weight, cartridge, generator, ComfyUI,
+or source dependency. Use the separate ComfyUI Recorder ZIP to create .lc
+cartridges and the separate Developer Kit ZIP to build extensions.
+"@
+    Write-Utf8Text -Path $artistReadmePath -Text ($artistReadme.Replace("`r`n", "`n"))
+    $artistReadmeRecord = Get-FileIntegrityRecord -Path $artistReadmePath
+    $artistMappings = @(
+        [pscustomobject]@{ EntryName = 'README-FIRST.txt'; Record = $artistReadmeRecord },
+        [pscustomobject]@{ EntryName = 'LICENSE.txt'; Record = $projectLicenseRecord },
+        [pscustomobject]@{ EntryName = "Installers/$deckInstallerName"; Record = $deckApplicationRecord },
+        [pscustomobject]@{ EntryName = "Installers/$playerInstallerName"; Record = $playerApplicationRecord },
+        [pscustomobject]@{ EntryName = "H3-Codec/$([string]$codecReceipt.setup.name)"; Record = $codecSetupRecord },
+        [pscustomobject]@{ EntryName = "H3-Codec/$([string]$codecReceipt.archive.name)"; Record = $codecArchiveRecord },
+        [pscustomobject]@{ EntryName = 'Licenses/Applications-THIRD-PARTY-NOTICES.md'; Record = $appChecksums['metadata/THIRD_PARTY_NOTICES.md'] },
+        [pscustomobject]@{ EntryName = 'Licenses/Applications-THIRD-PARTY-LICENSES.json'; Record = $applicationLicenseBundleRecord },
+        [pscustomobject]@{ EntryName = 'Licenses/H3-CodecPack-THIRD-PARTY-NOTICES.md'; Record = $codecChecksums['INSTALLER_THIRD_PARTY_NOTICES.md'] },
+        [pscustomobject]@{ EntryName = 'Licenses/H3-CodecPack-NSIS-COPYING.txt'; Record = $codecChecksums['INSTALLER_NSIS_COPYING.txt'] },
+        [pscustomobject]@{ EntryName = 'Licenses/H3-CodecPack-RUST-LICENSES.txt'; Record = $codecChecksums['INSTALLER_RUST_LICENSES.txt'] }
+    )
+    $artistChecksumPath = Join-Path $workRoot 'artist-SHA256SUMS.txt'
+    Write-Utf8Text -Path $artistChecksumPath -Text (New-ChecksumText -Mappings $artistMappings)
+    $artistMappings += [pscustomobject]@{
+        EntryName = 'SHA256SUMS.txt'
+        Record = Get-FileIntegrityRecord -Path $artistChecksumPath
     }
-    if ($assets.Count -ne 31 -or
-        @($assets | Group-Object name | Where-Object Count -ne 1).Count -gt 0) {
-        throw 'GitHub Release staging did not produce exactly thirty-one unique payload assets.'
-    }
+    $artistStarterRecord = New-DeterministicBoundZip `
+        -Mappings $artistMappings `
+        -DestinationPath (Join-Path $stageRoot $artistStarterName) `
+        -CompressionLevel ([System.IO.Compression.CompressionLevel]::NoCompression)
+
+    $recorderAsset = Copy-ReleaseAsset `
+        -Source $recorderArchiveRecord.Path `
+        -DestinationName "$recorderBaseName.zip" `
+        -StageRoot $stageRoot `
+        -ExpectedByteLength $recorderArchiveRecord.ByteLength `
+        -ExpectedSha256 $recorderArchiveRecord.Sha256
+    $developerAsset = Copy-ReleaseAsset `
+        -Source $developerArchiveRecord.Path `
+        -DestinationName $developerArchiveName `
+        -StageRoot $stageRoot `
+        -ExpectedByteLength $developerArchiveRecord.ByteLength `
+        -ExpectedSha256 $developerArchiveRecord.Sha256
 
     $manifest = [ordered]@{
-        schema_version = 1
+        schema_version = 2
         release_label = $releaseLabel
         release_channel = $releaseChannel
         prerelease = ($releaseChannel -ceq 'unsigned_preview')
+        release_layout = 'five_file_user_first'
+        outer_asset_count = 5
         source = [ordered]@{
             git_commit = $appCommit
             git_branch = 'main'
@@ -2194,26 +2405,158 @@ try {
             }
         }
         asset_limit_bytes_exclusive = $maximumGitHubAssetBytes
-        assets = @($assets | Sort-Object name)
-    }
-    $manifestPath = Join-Path $stageRoot 'RELEASE-MANIFEST.json'
-    Write-Utf8Text -Path $manifestPath -Text (($manifest | ConvertTo-Json -Depth 32) + "`n")
-    $checksumFiles = @(
-        Get-ChildItem -LiteralPath $stageRoot -File -Force |
-            Sort-Object Name
-    )
-    $checksumLines = @(
-        foreach ($file in $checksumFiles) {
-            $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            "$hash  $($file.Name)"
+        evidence_bundle = [ordered]@{
+            name = $evidenceName
+            internal_checksum = 'EVIDENCE-SHA256SUMS.txt'
+            manifest_integrity_scope = 'direct hashes for primary payloads; evidence bundle hash is in the outer checksum'
         }
+        assets = @(
+            [ordered]@{
+                name = $artistStarterName
+                display_label = 'For artists - Player, LatentDeck, and H3 Codec Pack'
+                role = 'artist_starter'
+                verification = [ordered]@{
+                    method = 'manifest_sha256'
+                    byte_length = [int64]$artistStarterRecord.ByteLength
+                    sha256 = [string]$artistStarterRecord.Sha256
+                }
+            },
+            [ordered]@{
+                name = "$recorderBaseName.zip"
+                display_label = 'For ComfyUI - LC Recorder for Windows x64'
+                role = 'comfy_recorder'
+                verification = [ordered]@{
+                    method = 'manifest_sha256'
+                    byte_length = [int64]$recorderAsset.byte_length
+                    sha256 = [string]$recorderAsset.sha256
+                }
+            },
+            [ordered]@{
+                name = $developerArchiveName
+                display_label = 'For developers - SDKs, examples, and tools'
+                role = 'developer_kit'
+                verification = [ordered]@{
+                    method = 'manifest_sha256'
+                    byte_length = [int64]$developerAsset.byte_length
+                    sha256 = [string]$developerAsset.sha256
+                }
+            },
+            [ordered]@{
+                name = $evidenceName
+                display_label = 'Verification - receipts, SBOMs, licenses, and manifests'
+                role = 'release_evidence'
+                verification = [ordered]@{ method = 'outer_sha256sums' }
+            },
+            [ordered]@{
+                name = $outerChecksumName
+                display_label = 'Verification - SHA-256 checksums'
+                role = 'outer_checksums'
+                verification = [ordered]@{ method = 'self_excluded_checksum_manifest' }
+            }
+        )
+    }
+    $manifestPath = Join-Path $workRoot 'RELEASE-MANIFEST.json'
+    $manifestText = (($manifest | ConvertTo-Json -Depth 32) + "`n").Replace("`r`n", "`n")
+    Write-Utf8Text -Path $manifestPath -Text $manifestText
+
+    $evidenceReadmePath = Join-Path $workRoot 'evidence-README.txt'
+    $evidenceReadme = @"
+LatentDeck $releaseLabel - Release Evidence
+============================================
+
+This archive contains the complete receipts, input checksum manifests,
+artifact-scoped SBOMs, license evidence, notices, and runtime smoke records
+validated before the five-file GitHub release set was staged.
+
+RELEASE-MANIFEST.json records the exact source identity, component versions,
+five uploaded filenames, recommended GitHub display labels, and direct hashes
+for the three primary payload archives. EVIDENCE-SHA256SUMS.txt verifies every
+other file in this archive. The outer $outerChecksumName verifies this evidence
+archive together with the three primary payload archives; like conventional
+checksum manifests, it does not list its own hash.
+"@
+    Write-Utf8Text -Path $evidenceReadmePath -Text ($evidenceReadme.Replace("`r`n", "`n"))
+    $appInputChecksumRecord = Get-FileIntegrityRecord -Path (Join-Path $appRoot 'SHA256SUMS.txt')
+    $appBuildCommandsRecord = Get-FileIntegrityRecord -Path (Join-Path $appRoot 'BUILD-COMMANDS.txt')
+    $codecInputChecksumRecord = Get-FileIntegrityRecord -Path (Join-Path $codecRoot 'SHA256SUMS.txt')
+    $developerInputChecksumRecord = Get-FileIntegrityRecord -Path (Join-Path $developerRoot 'SHA256SUMS.txt')
+    $evidenceMappings = @(
+        [pscustomobject]@{ EntryName = 'README.txt'; Record = Get-FileIntegrityRecord -Path $evidenceReadmePath },
+        [pscustomobject]@{ EntryName = 'LICENSE.txt'; Record = $projectLicenseRecord },
+        [pscustomobject]@{ EntryName = 'RELEASE-MANIFEST.json'; Record = Get-FileIntegrityRecord -Path $manifestPath },
+        [pscustomobject]@{ EntryName = 'Applications/BUILD-COMMANDS.txt'; Record = $appBuildCommandsRecord },
+        [pscustomobject]@{ EntryName = 'Applications/INPUT-SHA256SUMS.txt'; Record = $appInputChecksumRecord },
+        [pscustomobject]@{ EntryName = 'Applications/RELEASE-RECEIPT.json'; Record = $appReceiptRecord },
+        [pscustomobject]@{ EntryName = 'Applications/LatentDeck-App-SBOM.cdx.json'; Record = $deckSbomRecord },
+        [pscustomobject]@{ EntryName = 'Applications/LatentPlayer-SBOM.cdx.json'; Record = $playerSbomRecord },
+        [pscustomobject]@{ EntryName = 'Applications/THIRD-PARTY-NOTICES.md'; Record = $appChecksums['metadata/THIRD_PARTY_NOTICES.md'] },
+        [pscustomobject]@{ EntryName = 'Applications/THIRD-PARTY-LICENSES.json'; Record = $applicationLicenseBundleRecord },
+        [pscustomobject]@{ EntryName = 'H3-CodecPack/ARCHIVE-RUNTIME-SMOKE.json'; Record = $archiveSmokeRead.Integrity },
+        [pscustomobject]@{ EntryName = 'H3-CodecPack/DISTRIBUTABLE-PROOF.json'; Record = $codecReceiptRecord },
+        [pscustomobject]@{ EntryName = 'H3-CodecPack/INSTALLED-RUNTIME-SMOKE.json'; Record = $installedSmokeRead.Integrity },
+        [pscustomobject]@{ EntryName = 'H3-CodecPack/INPUT-SHA256SUMS.txt'; Record = $codecInputChecksumRecord },
+        [pscustomobject]@{ EntryName = 'H3-CodecPack/INSTALLER-SBOM.cdx.json'; Record = $codecChecksums['installer-SBOM.cdx.json'] },
+        [pscustomobject]@{ EntryName = 'H3-CodecPack/INSTALLER-THIRD-PARTY-NOTICES.md'; Record = $codecChecksums['INSTALLER_THIRD_PARTY_NOTICES.md'] },
+        [pscustomobject]@{ EntryName = 'H3-CodecPack/INSTALLER-NSIS-COPYING.txt'; Record = $codecChecksums['INSTALLER_NSIS_COPYING.txt'] },
+        [pscustomobject]@{ EntryName = 'H3-CodecPack/INSTALLER-RUST-LICENSES.txt'; Record = $codecChecksums['INSTALLER_RUST_LICENSES.txt'] },
+        [pscustomobject]@{ EntryName = 'H3-CodecPack/PACKAGE-RECEIPT.json'; Record = $codecPackageReceiptRecord },
+        [pscustomobject]@{ EntryName = 'H3-CodecPack/SETUP-RECEIPT.json'; Record = $codecSetupReceiptRecord },
+        [pscustomobject]@{ EntryName = 'Developer-Kit/INPUT-SHA256SUMS.txt'; Record = $developerInputChecksumRecord },
+        [pscustomobject]@{ EntryName = 'Developer-Kit/LICENSE-REVIEW.json'; Record = $developerLicenseRecord },
+        [pscustomobject]@{ EntryName = 'Developer-Kit/RECEIPT.json'; Record = $developerReceiptRecord },
+        [pscustomobject]@{ EntryName = 'Developer-Kit/SBOM.cdx.json'; Record = $developerSbomRecord },
+        [pscustomobject]@{ EntryName = 'Developer-Kit/THIRD-PARTY-NOTICES.md'; Record = $developerNoticesRecord },
+        [pscustomobject]@{ EntryName = 'Developer-Kit/THIRD-PARTY-LICENSES.json'; Record = $developerLicenseBundleRecord },
+        [pscustomobject]@{ EntryName = 'Comfy-Recorder/INPUT-SHA256SUMS.txt'; Record = $recorderChecksumRecord },
+        [pscustomobject]@{ EntryName = 'Comfy-Recorder/LICENSE-REVIEW.json'; Record = $recorderLicenseReviewRecord },
+        [pscustomobject]@{ EntryName = 'Comfy-Recorder/RECEIPT.json'; Record = $recorderReceiptRecord },
+        [pscustomobject]@{ EntryName = 'Comfy-Recorder/SBOM.cdx.json'; Record = $recorderSbomRecord },
+        [pscustomobject]@{ EntryName = 'Comfy-Recorder/THIRD-PARTY-NOTICES.md'; Record = $recorderNoticesRecord },
+        [pscustomobject]@{ EntryName = 'Comfy-Recorder/THIRD-PARTY-LICENSES.json'; Record = $recorderLicenseBundleRecord }
     )
-    Write-Utf8Text -Path (Join-Path $stageRoot 'SHA256SUMS.txt') -Text (
-        ($checksumLines -join "`n") + "`n"
+    $evidenceChecksumPath = Join-Path $workRoot 'EVIDENCE-SHA256SUMS.txt'
+    Write-Utf8Text -Path $evidenceChecksumPath -Text (New-ChecksumText -Mappings $evidenceMappings)
+    $evidenceMappings += [pscustomobject]@{
+        EntryName = 'EVIDENCE-SHA256SUMS.txt'
+        Record = Get-FileIntegrityRecord -Path $evidenceChecksumPath
+    }
+    $evidenceRecord = New-DeterministicBoundZip `
+        -Mappings $evidenceMappings `
+        -DestinationPath (Join-Path $stageRoot $evidenceName) `
+        -CompressionLevel ([System.IO.Compression.CompressionLevel]::Optimal)
+
+    $outerMappings = @(
+        [pscustomobject]@{ EntryName = $artistStarterName; Record = $artistStarterRecord },
+        [pscustomobject]@{ EntryName = "$recorderBaseName.zip"; Record = [pscustomobject]@{ Path = Join-Path $stageRoot "$recorderBaseName.zip"; ByteLength = $recorderAsset.byte_length; Sha256 = $recorderAsset.sha256 } },
+        [pscustomobject]@{ EntryName = $developerArchiveName; Record = [pscustomobject]@{ Path = Join-Path $stageRoot $developerArchiveName; ByteLength = $developerAsset.byte_length; Sha256 = $developerAsset.sha256 } },
+        [pscustomobject]@{ EntryName = $evidenceName; Record = $evidenceRecord }
     )
+    Write-Utf8Text `
+        -Path (Join-Path $stageRoot $outerChecksumName) `
+        -Text (New-ChecksumText -Mappings $outerMappings)
+    Assert-ChecksumManifest `
+        -Root $stageRoot `
+        -ManifestPath (Join-Path $stageRoot $outerChecksumName) `
+        -ExpectedPaths @($outerMappings.EntryName) | Out-Null
+
+    $workRootResolved = [System.IO.Path]::GetFullPath($workRoot)
+    if ((Split-Path -Parent $workRootResolved) -cne [System.IO.Path]::GetFullPath($stageRoot) -or
+        (Split-Path -Leaf $workRootResolved) -cne '.bundle-work') {
+        throw "Refusing to remove unsafe release bundle work directory: $workRootResolved"
+    }
+    Remove-Item -LiteralPath $workRootResolved -Recurse -Force
 
     $finalFiles = @(Get-ChildItem -LiteralPath $stageRoot -File -Force)
-    if ($finalFiles.Count -ne 33 -or
+    $expectedFinalNames = @(
+        $artistStarterName,
+        "$recorderBaseName.zip",
+        $developerArchiveName,
+        $evidenceName,
+        $outerChecksumName
+    ) | Sort-Object -CaseSensitive
+    if ($finalFiles.Count -ne 5 -or
+        (@($finalFiles.Name | Sort-Object -CaseSensitive) -join "`0") -cne
+            ($expectedFinalNames -join "`0") -or
         @($finalFiles | Where-Object { [int64]$_.Length -ge $maximumGitHubAssetBytes }).Count -gt 0) {
         throw 'GitHub Release final allowlist or per-file size limit failed.'
     }
