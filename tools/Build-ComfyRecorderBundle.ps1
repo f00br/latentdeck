@@ -85,7 +85,11 @@ function Write-Utf8Text {
 
 function Get-GitSource {
     $commit = (& git -C $repositoryRoot rev-parse HEAD).Trim()
-    $branch = (& git -C $repositoryRoot branch --show-current).Trim()
+    $branchOutput = @(& git -C $repositoryRoot branch --show-current)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Could not resolve the Comfy Recorder Git source branch.'
+    }
+    $branch = ($branchOutput -join '').Trim()
     $tree = (& git -C $repositoryRoot rev-parse 'HEAD^{tree}').Trim()
     $status = @(
         & git -C $repositoryRoot -c core.quotepath=false `

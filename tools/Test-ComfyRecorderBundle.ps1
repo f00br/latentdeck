@@ -150,7 +150,11 @@ try {
     Invoke-WebRequest -Uri ([string]$lock.safetensors.url) -OutFile $safetensorsWheel
     $expectedSourceCommit = (& git -C $repositoryRoot rev-parse HEAD).Trim()
     $expectedSourceTree = (& git -C $repositoryRoot rev-parse 'HEAD^{tree}').Trim()
-    $expectedSourceBranch = (& git -C $repositoryRoot branch --show-current).Trim()
+    $expectedSourceBranchOutput = @(& git -C $repositoryRoot branch --show-current)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Comfy Recorder test could not resolve the source branch.'
+    }
+    $expectedSourceBranch = ($expectedSourceBranchOutput -join '').Trim()
     $expectedSourceStatus = @(& git -C $repositoryRoot status --short --untracked-files=all)
     if ($LASTEXITCODE -ne 0) {
         throw 'Comfy Recorder test could not resolve the source identity.'

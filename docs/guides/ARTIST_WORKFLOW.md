@@ -17,13 +17,14 @@ a `.safetensors` file to `.lc` is never conversion.
 
 ### Start with the demo pack
 
-For a first playback or synthesis session, download `anim-hud.lc`, `knight.lc`,
-and `landscape.lc` from the pinned [LatentDeck Demo LC
-Pack](DEMO_CARTRIDGES.md). Verify its published hashes before opening the
-files. All three share the same H3 synthesis compatibility key; the Codec Pack
-and separately selected decoder are still required. The pack is licensed under
-CC BY 4.0; credit **f00br** and **LatentDeck Demo LC Pack**, link the dataset
-and license, and indicate changes when sharing or adapting it.
+For a first playback or synthesis session, download the pinned [LatentDeck Demo
+LC Pack](DEMO_CARTRIDGES.md) and verify its published hashes before opening the
+files. The pack contains seven source cartridges plus one D2 live-capture
+resample with recorded genealogy. All eight share the same H3 synthesis
+compatibility key; the Codec Pack and separately selected decoder are still
+required. The pack is licensed under CC BY 4.0; credit **f00br** and
+**LatentDeck Demo LC Pack**, link the dataset and license, and indicate changes
+when sharing or adapting it.
 
 ### Record during generation in ComfyUI
 

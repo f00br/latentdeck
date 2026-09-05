@@ -13,9 +13,10 @@ Recorder bundle.
 - at least one valid H3 `.lc` cartridge or raw H3 Safetensors file.
 
 For a first run, use the separately hosted [LatentDeck Demo LC
-Pack](DEMO_CARTRIDGES.md). Its three pinned H3 cartridges share compatible
-1344 × 768 synthesis geometry. The pack is licensed under CC BY 4.0; follow
-its attribution terms when sharing or adapting the cartridge media.
+Pack](DEMO_CARTRIDGES.md). Its seven source cartridges and one derived
+resample share the same 1344 × 768 H3 synthesis compatibility key. The pack is
+licensed under CC BY 4.0; follow its attribution terms when sharing or adapting
+the cartridge media.
 
 The installers do not require administrator elevation. The H3 setup runs
 offline and does not require system Python, PowerShell, ComfyUI, either

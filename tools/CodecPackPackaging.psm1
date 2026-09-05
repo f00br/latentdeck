@@ -153,10 +153,11 @@ function Get-PackagingSourceState {
     if ($LASTEXITCODE -ne 0 -or $commit -cnotmatch '^[0-9a-f]{40}$') {
         throw 'Could not resolve the packaging source commit.'
     }
-    $branch = (& git -C $root branch --show-current).Trim()
+    $branchOutput = @(& git -C $root branch --show-current)
     if ($LASTEXITCODE -ne 0) {
         throw 'Could not resolve the packaging source branch.'
     }
+    $branch = ($branchOutput -join '').Trim()
     $tree = (& git -C $root rev-parse ("{0}^{{tree}}" -f $commit)).Trim()
     if ($LASTEXITCODE -ne 0 -or $tree -cnotmatch '^[0-9a-f]{40}$') {
         throw 'Could not resolve the packaging source tree.'
