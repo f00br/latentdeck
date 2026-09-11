@@ -18,7 +18,7 @@ latentdeck-h3-worker = "latentdeck_codec_h3.worker:main"
 [project.optional-dependencies]
 cu130 = [
     "numpy==2.5.2",
-    "torch==2.13.0",
+    "torch==2.14.0",
     "tqdm==4.70.0",
 ]
 
