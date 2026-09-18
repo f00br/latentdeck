@@ -29,7 +29,7 @@ anyhow = "=1.0.104"
 atomicwrites = "=0.4.4"
 bytes = "=1.12.1"
 bytemuck = { version = "=1.25.2", features = ["derive"] }
-clap = { version = "=4.6.6", features = ["derive"] }
+clap = { version = "=4.6.7", features = ["derive"] }
 crc32fast = "=1.5.1"
 fs2 = "=0.4.3"
 getrandom = "=0.4.3"
