@@ -9,7 +9,7 @@ dependencies = [
     "latentdeck-codec-sdk==0.2.0",
     "latentdeck-deck-sdk==0.2.0",
     "latentdeck-rgb-ring==0.1.0",
-    "msgpack==1.2.2",
+    "msgpack==1.2.3",
 ]
 
 [project.scripts]
